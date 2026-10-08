@@ -1,0 +1,35 @@
+# Configuration Passerelle — à versionner avec vos pipelines (infrastructure as code)
+# Les secrets restent des variables d’environnement ${…}, résolues au déploiement.
+
+version: 1
+clickhouse:
+  endpoint: https://clickhouse.internal:8443
+  database: logs
+  user: '${CLICKHOUSE_USER}'
+  password: '${CLICKHOUSE_PASSWORD}'
+  cluster: ''
+  default_table: logs.events
+  time_field: timestamp
+  text_fields: [message, error.message]
+  index_mapping:
+    'logs-*': logs.events
+    'nginx-*': logs.nginx_access
+    'metrics-*': metrics.samples
+  field_mapping:
+    '@timestamp': timestamp
+kafka:
+  bootstrap_servers: ''
+  security_protocol: ''
+  sasl_mechanism: SCRAM-SHA-512
+  username: '${KAFKA_USERNAME}'
+  password: '${KAFKA_PASSWORD}'
+  ca_file: /etc/vector/certs/ca.pem
+  consumer_group: ''
+  input_topics: []
+  output_topic: ''
+vector:
+  format: yaml
+  log_namespace: true
+  logstash_compat: true
+  acknowledgements: true
+  shadow_mode: false

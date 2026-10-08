@@ -1,0 +1,41 @@
+GET logs-*/_search
+{
+  "runtime_mappings": {
+    "heure_locale": {
+      "type": "long",
+      "script": { "source": "emit(doc['@timestamp'].value.withZoneSameInstant(ZoneId.of('Europe/Paris')).getHour())" }
+    },
+    "classe_latence": {
+      "type": "keyword",
+      "script": {
+        "source": """
+          if (doc['latency_ms'].size() == 0) { return; }
+          long v = doc['latency_ms'].value;
+          if (v < params.rapide) { emit('rapide'); }
+          else if (v < params.lent) { emit('normal'); }
+          else { emit('lent'); }
+        """,
+        "params": { "rapide": 100, "lent": 1000 }
+      }
+    },
+    "domaine": {
+      "type": "keyword",
+      "script": "emit(doc['url.full.keyword'].value.splitOnToken('/')[2].toLowerCase())"
+    },
+    "ressource": {
+      "type": "keyword",
+      "script": "emit(grok('%{WORD:verbe} /api/%{NOTSPACE:ressource}').extract(doc['message.keyword'].value)?.ressource)"
+    }
+  },
+  "size": 0,
+  "query": { "range": { "@timestamp": { "gte": "now-7d/d" } } },
+  "aggs": {
+    "par_heure": {
+      "terms": { "field": "heure_locale", "size": 24, "order": { "_key": "asc" } },
+      "aggs": {
+        "par_classe": { "terms": { "field": "classe_latence", "size": 3 } },
+        "lentes": { "filter": { "term": { "classe_latence": "lent" } }, "aggs": { "lat_max": { "max": { "field": "latency_ms" } } } }
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "size": 50,
+  "_source": ["@timestamp", "service.name", "message", "trace.id"],
+  "query": {
+    "bool": {
+      "must": [
+        { "query_string": { "query": "message:(timeout OR \"connection reset\") AND NOT level:DEBUG", "default_operator": "AND" } }
+      ],
+      "filter": [
+        { "range": { "@timestamp": { "gte": "now-15m" } } },
+        { "wildcard": { "host.name": { "value": "web-*" } } }
+      ]
+    }
+  },
+  "sort": [ { "@timestamp": { "order": "desc" } } ],
+  "collapse": { "field": "trace.id" },
+  "track_total_hits": true
+}

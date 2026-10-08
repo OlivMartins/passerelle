@@ -1,0 +1,28 @@
+{
+  "size": 0,
+  "query": {
+    "bool": {
+      "filter": [
+        { "range": { "@timestamp": { "gte": "now-24h", "lte": "now" } } },
+        { "range": { "http.response.status_code": { "gte": 500 } } },
+        { "terms": { "service.name": ["checkout", "payment", "cart"] } }
+      ],
+      "must_not": [ { "term": { "env.keyword": "staging" } } ]
+    }
+  },
+  "aggs": {
+    "par_service": {
+      "terms": { "field": "service.name", "size": 10 },
+      "aggs": {
+        "clients_uniques": { "cardinality": { "field": "client.ip" } },
+        "par_heure": {
+          "date_histogram": { "field": "@timestamp", "fixed_interval": "1h", "time_zone": "Europe/Paris" },
+          "aggs": {
+            "latence_p95": { "percentiles": { "field": "latency_ms", "percents": [95] } },
+            "latence_moy": { "avg": { "field": "latency_ms" } }
+          }
+        }
+      }
+    }
+  }
+}

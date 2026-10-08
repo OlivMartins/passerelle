@@ -1,0 +1,22 @@
+# Produits de construction (publiés en release, jamais versionnés)
+dist/
+node_modules/
+*.tar.gz
+*.tar.gz.sha256
+*.blob
+
+# Secrets et configurations locales
+.env
+*.env
+passerelle.local.yaml
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+
+# Éditeurs et systèmes
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

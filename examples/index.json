@@ -1,0 +1,30 @@
+{
+  "dsl": [
+    {
+      "title": "Erreurs 5xx par service",
+      "file": "dsl/erreurs_5xx.json"
+    },
+    {
+      "title": "Champs runtime Painless",
+      "file": "dsl/console_kibana.txt"
+    },
+    {
+      "title": "Recherche plein texte",
+      "file": "dsl/recherche_texte.json"
+    }
+  ],
+  "ls": [
+    {
+      "title": "Logs nginx enrichis",
+      "file": "logstash/nginx.conf"
+    },
+    {
+      "title": "Routage multi-topics",
+      "file": "logstash/routage.conf"
+    },
+    {
+      "title": "Filtres avancés",
+      "file": "logstash/batch.conf"
+    }
+  ]
+}

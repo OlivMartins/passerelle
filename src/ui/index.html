@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Passerelle — Elastic vers ClickHouse et Vector</title>
+<style>
+/* @@STYLES@@ */
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="rail" aria-label="Sections">
+    <div class="brand">
+      <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><rect x="1" y="1" width="32" height="32" rx="8" fill="var(--ink)"/><path d="M6 22h22" stroke="var(--signal)" stroke-width="2.4" stroke-linecap="round"/><path d="M8 22c3-7 6-10 9-10s6 3 9 10" fill="none" stroke="var(--panel)" stroke-width="2" stroke-linecap="round"/><path d="M11.5 22v-4.6M17 22v-10M22.5 22v-4.6" stroke="var(--panel)" stroke-width="1.6" stroke-linecap="round"/></svg>
+      <div>Passerelle<small>Elastic vers ClickHouse et Vector</small></div>
+    </div>
+    <div class="nav">
+      <button class="nav-item" data-view="dsl"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8.5" cy="8.5" r="5"/><path d="M12.3 12.3 17 17"/></svg><div><b>Requêtes</b><small>DSL vers SQL ClickHouse</small></div></button>
+      <button class="nav-item" data-view="ls"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="10" r="2"/><circle cx="16" cy="4.5" r="2"/><circle cx="16" cy="15.5" r="2"/><path d="M6 10h3.5c2 0 2.5-5.5 4.5-5.5M9.5 10c2 0 2.5 5.5 4.5 5.5"/></svg><div><b>Pipelines</b><small>Logstash vers Vector</small></div></button>
+      <button class="nav-item" data-view="config"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 5.5h8M15 5.5h2M3 14.5h2M9 14.5h8"/><circle cx="13" cy="5.5" r="2"/><circle cx="7" cy="14.5" r="2"/></svg><div><b>Configuration</b><small>Endpoints, topics, options</small></div></button>
+    </div>
+    <div class="nav">
+      <button class="nav-item" data-view="api"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m7 6-4 4 4 4M13 6l4 4-4 4"/></svg><div><b>API et IaC</b><small>Automatiser les traductions</small></div></button>
+      <button class="nav-item" data-view="arch"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="3" y="3" width="14" height="4" rx="1"/><rect x="3" y="8.5" width="14" height="4" rx="1"/><rect x="3" y="14" width="14" height="3" rx="1"/></svg><div><b>Architecture</b><small>Cible et bascule</small></div></button>
+    </div>
+    <div class="rail-foot">
+      <div class="env" id="env-chip"></div>
+      <button class="theme-btn" id="theme-btn" type="button">Thème : automatique</button>
+    </div>
+  </nav>
+
+  <main>
+    <div class="mobile-brand"><svg width="26" height="26" viewBox="0 0 34 34" aria-hidden="true"><rect x="1" y="1" width="32" height="32" rx="8" fill="var(--ink)"/><path d="M6 22h22" stroke="var(--signal)" stroke-width="2.4" stroke-linecap="round"/><path d="M8 22c3-7 6-10 9-10s6 3 9 10" fill="none" stroke="var(--panel)" stroke-width="2" stroke-linecap="round"/></svg>Passerelle</div>
+
+    <!-- Requêtes DSL -->
+    <section class="view" id="view-dsl" data-kind="dsl" hidden>
+      <header class="view-head">
+        <div>
+          <h1>Requête Elasticsearch vers SQL ClickHouse</h1>
+          <p>Collez une requête DSL, déposez un ou plusieurs fichiers .json, ou reprenez une requête de la console Kibana. La traduction se met à jour pendant la saisie.</p>
+        </div>
+        <div class="head-actions">
+          <select class="btn" data-act="example" aria-label="Charger un exemple"></select>
+          <button class="btn" data-act="open" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10.5V2.5M5 5.5l3-3 3 3M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>Ouvrir des fichiers</button>
+          <input type="file" multiple accept=".json,.txt,.es,.ndjson" hidden>
+        </div>
+      </header>
+      <div class="files" data-role="files" hidden></div>
+      <div class="bench">
+        <section class="pane pane-in" aria-label="Requête source">
+          <div class="pane-bar">
+            <span class="pane-title">Requête DSL <small data-role="fname"></small></span>
+            <div class="pane-tools">
+              <label for="dsl-index">Index</label><input id="dsl-index" data-role="index" list="index-list" spellcheck="false">
+              <datalist id="index-list"></datalist>
+              <span aria-hidden="true">→</span><b data-role="table"></b>
+              <button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>
+            </div>
+          </div>
+          <div class="editor" data-role="editor"></div>
+          <div class="drop-veil"><div>Déposer pour traduire<small>Fichiers .json : un onglet par requête</small></div></div>
+        </section>
+        <div class="seam" aria-hidden="true"><span class="seam-pulse"></span><span class="seam-knot"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></span></div>
+        <section class="pane pane-out" aria-label="Résultat">
+          <div class="verdict" data-role="verdict"></div>
+          <div class="tabs" role="tablist" data-role="tabs"></div>
+          <div class="out-body" data-role="out"></div>
+          <div class="out-foot">
+            <button class="btn primary" data-act="copy" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></svg>Copier le SQL</button>
+            <button class="btn dl" data-act="export" type="button" hidden>Télécharger (.zip)</button>
+            <span class="hint">Traduction locale : rien ne quitte votre navigateur.</span>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- Pipelines Logstash -->
+    <section class="view" id="view-ls" data-kind="ls" hidden>
+      <header class="view-head">
+        <div>
+          <h1>Pipeline Logstash vers configuration Vector</h1>
+          <p>Déposez vos fichiers .conf. Chaque filtre devient une étape VRL nommée, les sorties conditionnelles deviennent un aiguillage, et Kafka reste la source comme la destination.</p>
+        </div>
+        <div class="head-actions">
+          <select class="btn" data-act="example" aria-label="Charger un exemple"></select>
+          <button class="btn" data-act="open" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10.5V2.5M5 5.5l3-3 3 3M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>Ouvrir des fichiers</button>
+          <input type="file" multiple accept=".conf,.cfg,.txt,.logstash" hidden>
+        </div>
+      </header>
+      <div class="files" data-role="files" hidden></div>
+      <div class="bench">
+        <section class="pane pane-in" aria-label="Pipeline source">
+          <div class="pane-bar">
+            <span class="pane-title">Pipeline Logstash <small data-role="fname"></small></span>
+            <div class="pane-tools">
+              <button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>
+            </div>
+          </div>
+          <div class="editor" data-role="editor"></div>
+          <div class="drop-veil"><div>Déposer pour traduire<small>Fichiers .conf : un onglet par pipeline</small></div></div>
+        </section>
+        <div class="seam" aria-hidden="true"><span class="seam-pulse"></span><span class="seam-knot"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></span></div>
+        <section class="pane pane-out" aria-label="Résultat">
+          <div class="verdict" data-role="verdict"></div>
+          <div class="tabs" role="tablist" data-role="tabs"></div>
+          <div class="out-body" data-role="out"></div>
+          <div class="out-foot">
+            <button class="btn primary" data-act="copy" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></svg>Copier la configuration</button>
+            <button class="btn dl" data-act="export" type="button" hidden>Télécharger (.zip)</button>
+            <span class="hint">Traduction locale : rien ne quitte votre navigateur.</span>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- Configuration -->
+    <section class="view scroll" id="view-config" hidden>
+      <header class="view-head">
+        <div>
+          <h1>Configuration</h1>
+          <p>Un seul fichier, passerelle.yaml, décrit les endpoints ClickHouse et Kafka, les topics et le groupe de consommateurs. Versionnez-le avec vos requêtes et pipelines : l’API et la CLI le lisent de la même façon.</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn" data-act="cfg-import" type="button">Importer passerelle.yaml</button>
+          <input type="file" accept=".yaml,.yml,.json" hidden id="cfg-file">
+          <button class="btn dl" data-act="cfg-export" type="button" hidden>Télécharger (.zip)</button>
+          <button class="btn quiet" data-act="cfg-reset" type="button">Réinitialiser</button>
+        </div>
+      </header>
+      <div class="config-grid">
+        <div id="cfg-form"></div>
+        <div class="config-preview">
+          <section class="pane">
+            <div class="pane-bar"><span class="pane-title">passerelle.yaml</span><button class="icon-btn" data-act="cfg-copy" type="button" title="Copier" aria-label="Copier la configuration"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></svg></button></div>
+            <div class="out-body"><pre class="code" id="cfg-preview"></pre></div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <!-- API -->
+    <section class="view scroll" id="view-api" hidden></section>
+
+    <!-- Architecture -->
+    <section class="view scroll" id="view-arch" hidden></section>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+/* @@SCRIPT@@ */
+</script>
+</body>
+</html>

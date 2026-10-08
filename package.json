@@ -1,0 +1,18 @@
+{
+  "name": "passerelle",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Traduction des requêtes DSL Elasticsearch en SQL ClickHouse et des pipelines Logstash en configurations Vector",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:ui": "node scripts/build.mjs --ui-only",
+    "test": "node scripts/test.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "postject": "1.0.0-alpha.6"
+  }
+}
