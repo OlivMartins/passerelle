@@ -1,0 +1,7 @@
+Passerelle
+Copyright 2026 OlivMartins
+
+Ce produit est distribué sous licence Apache 2.0 (voir le fichier LICENSE).
+
+Le binaire distribué dans les archives de release embarque Node.js (https://nodejs.org),
+soumis à sa propre licence : voir THIRD_PARTY_LICENSES/nodejs.txt dans l'archive.

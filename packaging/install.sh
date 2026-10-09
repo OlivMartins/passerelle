@@ -88,6 +88,9 @@ if [ ! -f "$ETC/passerelle.env" ]; then
 fi
 install -d -m 0755 "$DOC"
 install -m 0644 "$HERE/README.md" "$DOC/README.md"
+for f in LICENSE NOTICE THIRD_PARTY_LICENSES/nodejs.txt; do
+  if [ -f "$HERE/$f" ]; then install -m 0644 "$HERE/$f" "$DOC/$(basename "$f")"; fi
+done
 install -m 0644 "$HERE/systemd/passerelle.service" "$UNIT"
 
 "$BIN" check-config --quiet --config "$ETC/passerelle.yaml" 2>/dev/null || { "$BIN" check-config --quiet --config "$ETC/passerelle.yaml" || true; die "la configuration $ETC/passerelle.yaml est invalide"; }

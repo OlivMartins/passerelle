@@ -26,6 +26,8 @@ systemd/passerelle.service     unité systemd durcie
 etc/passerelle.yaml            configuration d’exemple
 etc/passerelle.env.example     variables d’environnement (secrets)
 install.sh                     installation, mise à jour, désinstallation
+LICENSE, NOTICE                licence Apache 2.0 de Passerelle
+THIRD_PARTY_LICENSES/          licence de Node.js, embarqué dans le binaire
 SHA256SUMS                     sommes de contrôle
 ```
 

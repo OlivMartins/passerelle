@@ -1,3 +1,7 @@
 # Fins de ligne LF partout : install.sh et l'unité systemd doivent fonctionner sous Linux,
 # même après un clone sous Windows.
 * text=auto eol=lf
+
+# Visuels de la documentation
+*.png binary
+*.gif binary

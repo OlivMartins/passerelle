@@ -8,7 +8,7 @@
  * avec un Node.js 24 officiel pour Linux x86_64. Par défaut, le Node qui exécute ce script ;
  * sinon, celui désigné par NODE_SEA_BASE.
  */
-import { readFileSync, writeFileSync, mkdirSync, rmSync, copyFileSync, chmodSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, copyFileSync, chmodSync, existsSync, statSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join, dirname, basename } from 'node:path';
@@ -51,8 +51,17 @@ function buildServer() {
 }
 
 /* ---------- Binaire autonome (Node.js SEA) ---------- */
+const base = process.env.NODE_SEA_BASE || process.execPath;
+
+// Le binaire embarque Node.js : sa licence (MIT et composants tiers) accompagne l’archive.
+// Les distributions officielles la placent à la racine, à côté de bin/.
+function nodeLicense() {
+  const p = join(dirname(dirname(realpathSync(base))), 'LICENSE');
+  if (!existsSync(p)) throw new Error(`licence de Node.js introuvable (${p}) : utilisez une distribution officielle de Node.js 24`);
+  return p;
+}
+
 function buildBinary() {
-  const base = process.env.NODE_SEA_BASE || process.execPath;
   const nodeVersion = execFileSync(base, ['--version'], { encoding: 'utf8' }).trim();
   const arch = execFileSync(base, ['-p', 'process.platform + "-" + process.arch'], { encoding: 'utf8' }).trim();
   if (!nodeVersion.startsWith('v24.') || arch !== 'linux-x64') {
@@ -93,7 +102,10 @@ function buildArchive() {
     ['etc/passerelle.yaml', join(ROOT, 'packaging/passerelle.yaml'), 0o644],
     ['etc/passerelle.env.example', join(ROOT, 'packaging/passerelle.env.example'), 0o644],
     ['install.sh', join(ROOT, 'packaging/install.sh'), 0o755],
-    ['README.md', join(ROOT, 'docs/INSTALL.md'), 0o644]
+    ['README.md', join(ROOT, 'docs/INSTALL.md'), 0o644],
+    ['LICENSE', join(ROOT, 'LICENSE'), 0o644],
+    ['NOTICE', join(ROOT, 'NOTICE'), 0o644],
+    ['THIRD_PARTY_LICENSES/nodejs.txt', nodeLicense(), 0o644]
   ];
   for (const [rel, src, mode] of layout) {
     mkdirSync(dirname(join(stage, rel)), { recursive: true });
