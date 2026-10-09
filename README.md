@@ -12,6 +12,7 @@
 
 <p align="center">
   <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.0.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.0.0"></a>
+  <a href="https://github.com/OlivMartins/passerelle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/OlivMartins/passerelle/ci.yml?branch=main&style=flat-square&label=tests&labelColor=1B2A33" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache%202.0-1E7A68?style=flat-square&labelColor=1B2A33" alt="Licence Apache 2.0"></a>
   <img src="https://img.shields.io/badge/Linux-x86__64-53636B?style=flat-square&labelColor=1B2A33" alt="Linux x86_64">
   <img src="https://img.shields.io/badge/test%C3%A9%20avec-ClickHouse%2026.9-53636B?style=flat-square&labelColor=1B2A33" alt="Testé avec ClickHouse 26.9">

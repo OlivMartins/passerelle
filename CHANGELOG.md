@@ -9,6 +9,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 - Présentation du projet : README, bannière, démonstration animée et captures en thème clair et sombre.
 - Fichiers `LICENSE`, `NOTICE` et licence de Node.js inclus dans l’archive de release.
 - Politique de sécurité (`SECURITY.md`).
+- Intégration continue : tests à chaque push ; archive, somme de contrôle et page autonome construites et jointes automatiquement aux releases.
 
 ## [1.0.0] - 2026-10-08
 
