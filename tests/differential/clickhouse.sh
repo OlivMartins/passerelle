@@ -10,6 +10,7 @@ TARGET="${2:-./clickhouse}"
 
 id=$(docker create "clickhouse/clickhouse-server:${VERSION}")
 docker cp -L "${id}:/usr/bin/clickhouse" "$TARGET" >/dev/null
-docker rm "$id" >/dev/null
+# -v : l'image déclare des volumes, qui resteraient orphelins après la suppression du conteneur
+docker rm -v "$id" >/dev/null
 chmod +x "$TARGET"
 "$TARGET" local --version
