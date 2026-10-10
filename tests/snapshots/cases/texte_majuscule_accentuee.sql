@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE (hasToken(lowerUTF8(message), 'payment') OR hasToken(lowerUTF8(message), 'service'));
+WHERE hasToken(lowerUTF8(message), 'échec');

@@ -4,5 +4,5 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE hasTokenCaseInsensitive(message, 'html')
+WHERE hasToken(lowerUTF8(message), 'html')
   AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_.\'’]|(?:^|[^\\p{L}_])[.\'’])html(?:$|[^\\p{L}\\p{N}_.\'’]|[.\'’](?:$|[^\\p{L}_]))');

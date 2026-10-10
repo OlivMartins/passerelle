@@ -4,7 +4,7 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE hasTokenCaseInsensitive(message, 'reset')
-  AND hasTokenCaseInsensitive(message, 'by')
-  AND hasTokenCaseInsensitive(message, 'peer')
+WHERE hasToken(lowerUTF8(message), 'reset')
+  AND hasToken(lowerUTF8(message), 'by')
+  AND hasToken(lowerUTF8(message), 'peer')
   AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_])reset[^\\p{L}\\p{N}]+by[^\\p{L}\\p{N}]+peer(?:$|[^\\p{L}\\p{N}_])');

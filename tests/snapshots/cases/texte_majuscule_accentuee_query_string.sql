@@ -4,5 +4,5 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE hasToken(lowerUTF8(message), 'timeout')
-  AND hasToken(lowerUTF8(message), 'upstream');
+WHERE hasToken(lowerUTF8(message), 'échec')
+  AND NOT hasToken(lowerUTF8(message), 'timeout');

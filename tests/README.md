@@ -55,6 +55,8 @@ Chaque cas est joué sur deux schémas ClickHouse, parce que les deux convention
 
 Les cas sensibles au fuseau sont aussi joués avec un serveur ClickHouse en `Europe/Paris`. Les agrégations `composite` sont paginées jusqu’au bout des deux côtés.
 
+La table ClickHouse porte l’index `text` que la traduction recommande pour `message` : la recherche plein texte est vérifiée index compris.
+
 ### Écarts connus
 
 Un cas dont la traduction ne donne pas encore le résultat d’Elasticsearch porte un champ `known` avec la raison. Le banc réussit tant que chaque cas se comporte comme annoncé. Il échoue dans deux situations :

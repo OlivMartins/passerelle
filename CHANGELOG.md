@@ -21,6 +21,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Modifié
 
+- Recherche plein texte : chaque mot est cherché par `hasToken(lowerUTF8(colonne), 'mot')` et non plus par `hasTokenCaseInsensitive(colonne, 'mot')`. L’index recommandé devient un index `text` construit sur `lowerUTF8(colonne)`, à la place de `tokenbf_v1` : un index posé sur `lower(colonne)` ne sert pas cette forme et doit être recréé.
 - Configuration Vector générée : l’API de Vector écoute sur `127.0.0.1:8686` et non plus sur toutes les interfaces. Elle n’a pas d’authentification.
 - Agrégations `range`, `date_range`, `ip_range` et `filters` : calculées par agrégation conditionnelle (un `countIf` par plage, puis `ARRAY JOIN`) au lieu d’un `arrayJoin` qui construisait un tableau pour chaque ligne. Quand elles servent de parent à un autre regroupement, des plages numériques disjointes deviennent un `multiIf`.
 - Agrégations imbriquées : le filtre commun et chaque top N sont nommés par des CTE (`base`, `top_<nom>`) au lieu d’être recopiés dans des sous-requêtes emboîtées. Le SQL se lit de haut en bas ; le plan d’exécution ne change pas.
@@ -34,6 +35,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Corrigé
 
+- Recherche plein texte et lettres accentuées : `échec` ne trouvait pas `Échec`, parce que `hasTokenCaseInsensitive()` ne replie que les lettres ASCII. Même correction pour `fuzzy` sur un champ texte.
 - Agrégations `range` et `filters` : une plage ou un filtre sans document n’était pas renvoyé. Elasticsearch renvoie tous les groupes, avec un compte nul et des mesures `null`.
 - Clé par défaut d’une plage numérique : `*-100.0` comme dans Elasticsearch, et non `*-100`. Une `date_range` sans clé explicite est signalée « à vérifier ».
 - Un regroupement placé sous un `range` ou un `filters` sortait ses groupes parents par ordre alphabétique de clé, et non dans l’ordre de leur déclaration.

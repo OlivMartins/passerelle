@@ -4,6 +4,6 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE hasTokenCaseInsensitive(message, '3')
-  AND hasTokenCaseInsensitive(message, '14')
+WHERE hasToken(lowerUTF8(message), '3')
+  AND hasToken(lowerUTF8(message), '14')
   AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_.,\']|(?:^|[^\\p{N}])[.,\'])3\\.14(?:$|[^\\p{L}\\p{N}_.,\']|[.,\'](?:$|[^\\p{N}]))');

@@ -4,6 +4,6 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE hasTokenCaseInsensitive(message, 'connection')
-  AND hasTokenCaseInsensitive(message, 'reset')
+WHERE hasToken(lowerUTF8(message), 'connection')
+  AND hasToken(lowerUTF8(message), 'reset')
   AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_.\'’]|(?:^|[^\\p{L}_])[.\'’])connection(?:[^\\p{L}\\p{N}_.,\'’]|[.,\'’](?:$|[^\\p{L}\\p{N}_]))[^\\p{L}\\p{N}_]*reset(?:$|[^\\p{L}\\p{N}_.\'’]|[.\'’](?:$|[^\\p{L}_]))');

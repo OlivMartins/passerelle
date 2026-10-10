@@ -163,7 +163,9 @@ function isTextField(ctx, field) {
 function textIndexNote(ctx, col) {
   ctx.textCols.add(col);
 }
-function hasTok(f, t) { return `hasTokenCaseInsensitive(${f}, ${chStr(t)})`; }
+// Le mot est cherché dans la colonne mise en minuscules : lowerUTF8() traite aussi les lettres accentuées, là où
+// hasTokenCaseInsensitive() et lower() ne connaissent que l’ASCII (« échec » ne trouverait pas « Échec »)
+function hasTok(f, t) { return `hasToken(lowerUTF8(${f}), ${chStr(t)})`; }
 function todo(ctx, what, detail) {
   ctx.stats.ko++;
   ctx.notes.add('err', `${what} non traduit`, detail);
@@ -545,7 +547,8 @@ function rangeClause(ctx, field, spec0) {
  * alphanumérique. Chercher « 10.0.0.1 » comme 10 OU 0 OU 1 ramène presque tout.
  *
  * esTokens() reproduit le découpage d’Elasticsearch sur le texte cherché. Chaque mot est ensuite cherché :
- *   - par hasTokenCaseInsensitive() sur ses fragments, que l’index tokenbf_v1 sait exploiter ;
+ *   - par hasToken() sur ses fragments, dans la colonne mise en minuscules : un index text construit sur
+ *     lowerUTF8(colonne) sait l’exploiter ;
  *   - et, si le mot contient un séparateur ou si clickhouse.text_match vaut « strict », par une expression
  *     régulière qui vérifie que le mot apparaît bien entier.
  * En mode « tokens » (par défaut), un mot simple n’est cherché que par hasToken : « user » trouve aussi
@@ -616,7 +619,7 @@ function matchClause(ctx, field, o, type) {
   textIndexNote(ctx, f);
   const words = esTokens(q);
   if (!words.length) { ctx.stats.ok++; return null; }
-  if (!strictText(ctx)) ctx.notes.add('info', 'Recherche plein texte par tokens', 'Chaque mot est cherché par hasTokenCaseInsensitive(), que l’index tokenbf_v1 sait exploiter. Un mot simple trouve aussi ses occurrences collées à un autre par « _ », « . » ou une apostrophe (user dans user_id), ce qu’Elasticsearch ne fait pas. Pour une équivalence stricte, clickhouse.text_match: strict ajoute à chaque mot une vérification par expression régulière.');
+  if (!strictText(ctx)) ctx.notes.add('info', 'Recherche plein texte par tokens', 'Chaque mot est cherché par hasToken() dans la colonne mise en minuscules, ce qu’un index text sait exploiter. Un mot simple trouve aussi ses occurrences collées à un autre par « _ », « . » ou une apostrophe (user dans user_id), ce qu’Elasticsearch ne fait pas. Pour une équivalence stricte, clickhouse.text_match: strict ajoute à chaque mot une vérification par expression régulière.');
   if (type === 'match') {
     if (o.fuzziness !== undefined && String(o.fuzziness) !== '0') {
       ctx.stats.approx++;
@@ -736,7 +739,7 @@ function clauseSQL(ctx, q) {
       const f = mapField(ctx, field); ctx.stats.approx++;
       ctx.notes.add('info', 'fuzzy → editDistanceUTF8', 'Distance d’édition calculée à la volée : coûteux sur de gros volumes, à combiner avec un filtre sélectif. Nécessite une version récente de ClickHouse.');
       H(ctx, 'filters', `${field} ≈ ${v}`);
-      if (isTextField(ctx, field)) return `arrayExists(t -> editDistanceUTF8(t, ${chStr(v.toLowerCase())}) <= ${d}, tokens(lower(${f})))`;
+      if (isTextField(ctx, field)) return `arrayExists(t -> editDistanceUTF8(t, ${chStr(v.toLowerCase())}) <= ${d}, tokens(lowerUTF8(${f})))`;
       return `editDistanceUTF8(${f}, ${chStr(v)}) <= ${d}`;
     }
     case 'ids': {
@@ -1772,7 +1775,7 @@ function translateRequest(input, cfg, opts, columns) {
   }
   for (const col of ctx.textCols) {
     const base = col.replace(/[`.]/g, '_');
-    ctx.notes.add('opt', `Index de tokens sur ${col}`, 'hasTokenCaseInsensitive exploite un index tokenbf_v1 construit sur la version en minuscules de la colonne : les blocs sans le mot sont sautés sans être lus.', `ALTER TABLE ${table}\n    ADD INDEX idx_${base}_tokens lower(${col}) TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1;\nALTER TABLE ${table} MATERIALIZE INDEX idx_${base}_tokens;`);
+    ctx.notes.add('opt', `Index plein texte sur ${col}`, `hasToken(lowerUTF8(${col}), …) exploite un index text construit sur la même expression : les blocs sans le mot sont sautés sans être lus. Le découpage splitByNonAlpha est celui de hasToken(). La taille de l’index dépend du nombre de mots distincts (identifiants, adresses IP) : mesurez-la dans system.data_skipping_indices. Un index tokenbf_v1 sur la même expression, de taille fixe par bloc, reste possible.`, `ALTER TABLE ${table}\n    ADD INDEX idx_${base}_text lowerUTF8(${col}) TYPE text(tokenizer = splitByNonAlpha);\nALTER TABLE ${table} MATERIALIZE INDEX idx_${base}_text;`);
   }
   if (ctx.leadingWildcard) ctx.notes.add('opt', 'Joker en tête de motif', `Un motif qui commence par * impose de lire toute la colonne ${ctx.leadingWildcard}. Un index ngrambf_v1 permet d’éviter une partie des lectures.`, `ALTER TABLE ${table}\n    ADD INDEX idx_ngram ${ctx.leadingWildcard} TYPE ngrambf_v1(3, 65536, 3, 0) GRANULARITY 1;`);
   if (ctx.groupCols.size) ctx.notes.add('opt', 'LowCardinality pour les regroupements', `${[...ctx.groupCols].join(', ')} : si le nombre de valeurs distinctes reste sous ~10 000, le type LowCardinality(String) accélère nettement GROUP BY et réduit le stockage.`);

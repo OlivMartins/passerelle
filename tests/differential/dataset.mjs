@@ -109,7 +109,9 @@ export function columns(variant) {
 
 export function clickhouseDDL(variant) {
   const cols = Object.entries(columns(variant)).map(([name, type]) => `    \`${name}\` ${type}`).join(',\n');
-  return `CREATE DATABASE IF NOT EXISTS logs;\nCREATE TABLE ${TABLE} (\n${cols}\n) ENGINE = MergeTree ORDER BY (service, timestamp);`;
+  // L’index text est celui que la traduction recommande : la recherche plein texte est vérifiée index compris
+  const index = '    INDEX idx_message_text lowerUTF8(message) TYPE text(tokenizer = splitByNonAlpha)';
+  return `CREATE DATABASE IF NOT EXISTS logs;\nCREATE TABLE ${TABLE} (\n${cols},\n${index}\n) ENGINE = MergeTree ORDER BY (service, timestamp);`;
 }
 
 /*

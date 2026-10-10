@@ -4,6 +4,6 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE hasTokenCaseInsensitive(message, 'user')
-  AND hasTokenCaseInsensitive(message, 'id')
+WHERE hasToken(lowerUTF8(message), 'user')
+  AND hasToken(lowerUTF8(message), 'id')
   AND positionCaseInsensitiveUTF8(message, 'user_id') > 0;

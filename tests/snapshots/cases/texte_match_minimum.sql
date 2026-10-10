@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE (hasTokenCaseInsensitive(message, 'connection')) + (hasTokenCaseInsensitive(message, 'reset')) + (hasTokenCaseInsensitive(message, 'peer')) + (hasTokenCaseInsensitive(message, 'upstream')) >= 3;
+WHERE (hasToken(lowerUTF8(message), 'connection')) + (hasToken(lowerUTF8(message), 'reset')) + (hasToken(lowerUTF8(message), 'peer')) + (hasToken(lowerUTF8(message), 'upstream')) >= 3;

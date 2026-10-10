@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE (hasTokenCaseInsensitive(message, 'timeout') OR hasTokenCaseInsensitive(message, 'reset'));
+WHERE (hasToken(lowerUTF8(message), 'timeout') OR hasToken(lowerUTF8(message), 'reset'));

@@ -4,6 +4,6 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE hasTokenCaseInsensitive(message, 'upstream')
-  AND hasTokenCaseInsensitive(message, 'timeout')
-  AND NOT hasTokenCaseInsensitive(message, 'reset');
+WHERE hasToken(lowerUTF8(message), 'upstream')
+  AND hasToken(lowerUTF8(message), 'timeout')
+  AND NOT hasToken(lowerUTF8(message), 'reset');

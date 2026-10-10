@@ -107,7 +107,7 @@ SELECT
     quantilesTDigest(0.95)(latency_ms) AS p95
 FROM logs.events
 WHERE timestamp >= toStartOfDay(now('UTC') - INTERVAL 7 DAY)
-  AND hasTokenCaseInsensitive(message, 'timeout')
+  AND hasToken(lowerUTF8(message), 'timeout')
   AND env != 'staging'
 GROUP BY par_heure
 ORDER BY doc_count DESC, par_heure ASC
@@ -118,7 +118,7 @@ Le script Painless devient une expression `WITH`. Le `match` plein texte devient
 
 Les dates sont calculées en UTC, comme dans Elasticsearch, quel que soit le fuseau du serveur ClickHouse : c’est le rôle des `'UTC'` du SQL. Si votre serveur et vos colonnes sont déjà en UTC, déclarez `timezone: UTC` dans la configuration et le SQL s’en passe.
 
-Passerelle signale aussi que `heure` gagnerait à être une colonne matérialisée et que `message` mérite un index `tokenbf_v1`. Le `ALTER TABLE` correspondant est prêt à copier.
+Passerelle signale aussi que `heure` gagnerait à être une colonne matérialisée et que `message` mérite un index `text`. Le `ALTER TABLE` correspondant est prêt à copier.
 
 ## Une lecture pour chacun
 
@@ -268,10 +268,20 @@ L’analyseur standard d’Elasticsearch ne découpe pas un texte comme `hasToke
 
 | `text_match` | Ce que Passerelle écrit | Équivalence |
 |---|---|---|
-| `tokens` (par défaut) | `hasTokenCaseInsensitive(message, 'timeout')` pour un mot simple ; les fragments d’un mot composé doivent en plus se suivre | Un mot simple trouve aussi ses occurrences collées par `_`, `.` ou une apostrophe : `user` trouve `user_id` |
+| `tokens` (par défaut) | `hasToken(lowerUTF8(message), 'timeout')` pour un mot simple ; les fragments d’un mot composé doivent en plus se suivre | Un mot simple trouve aussi ses occurrences collées par `_`, `.` ou une apostrophe : `user` trouve `user_id` |
 | `strict` | La même recherche, suivie d’une expression régulière qui vérifie que le mot apparaît entier | Identique à Elasticsearch sur tous les cas du banc de tests |
 
-Dans les deux modes, `hasToken` reste en tête de condition : c’est lui que l’index `tokenbf_v1` exploite. Une phrase (`match_phrase`) est cherchée mots à la suite, quels que soient les séparateurs : `connection reset` trouve `connection-reset`.
+La casse est ignorée comme le fait Elasticsearch, lettres accentuées comprises : `échec` trouve `Échec`. C’est le rôle de `lowerUTF8()`, là où `hasTokenCaseInsensitive()` ne connaît que l’ASCII.
+
+Dans les deux modes, `hasToken` reste en tête de condition : c’est lui qu’un index `text` exploite, pourvu qu’il soit construit sur la même expression. Passerelle en donne le DDL avec chaque requête concernée :
+
+```sql
+ALTER TABLE logs.events
+    ADD INDEX idx_message_text lowerUTF8(message) TYPE text(tokenizer = splitByNonAlpha);
+ALTER TABLE logs.events MATERIALIZE INDEX idx_message_text;
+```
+
+Sans l’index, le SQL donne le même résultat en lisant toute la colonne. Une phrase (`match_phrase`) est cherchée mots à la suite, quels que soient les séparateurs : `connection reset` trouve `connection-reset`.
 
 ### Listes noires et listes blanches
 

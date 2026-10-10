@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE arrayExists(t -> editDistanceUTF8(t, 'conection') <= 1, tokens(lowerUTF8(message)));
+WHERE arrayExists(t -> editDistanceUTF8(t, 'échc') <= 1, tokens(lowerUTF8(message)));

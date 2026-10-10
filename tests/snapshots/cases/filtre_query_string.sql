@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE status BETWEEN 500 AND 599 AND service != 'api' AND hasTokenCaseInsensitive(message, 'timeout');
+WHERE status BETWEEN 500 AND 599 AND service != 'api' AND hasToken(lowerUTF8(message), 'timeout');

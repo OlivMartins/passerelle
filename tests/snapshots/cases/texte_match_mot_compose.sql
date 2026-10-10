@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE hasTokenCaseInsensitive(message, 'user');
+WHERE hasToken(lowerUTF8(message), 'user');

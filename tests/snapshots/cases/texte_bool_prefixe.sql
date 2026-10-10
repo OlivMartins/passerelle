@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE (hasTokenCaseInsensitive(message, 'peer') OR match(message, '(?i)(?:^|[^\\p{L}\\p{N}_])upstr'));
+WHERE (hasToken(lowerUTF8(message), 'peer') OR match(message, '(?i)(?:^|[^\\p{L}\\p{N}_])upstr'));

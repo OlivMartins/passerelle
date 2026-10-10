@@ -4,5 +4,5 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE hasTokenCaseInsensitive(message, 'connection')
-  AND hasTokenCaseInsensitive(message, 'upstream');
+WHERE hasToken(lowerUTF8(message), 'connection')
+  AND hasToken(lowerUTF8(message), 'upstream');

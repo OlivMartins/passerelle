@@ -4,8 +4,8 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE hasTokenCaseInsensitive(message, 'payload')
-  AND hasTokenCaseInsensitive(message, 'don')
-  AND hasTokenCaseInsensitive(message, 't')
-  AND hasTokenCaseInsensitive(message, 'retry')
+WHERE hasToken(lowerUTF8(message), 'payload')
+  AND hasToken(lowerUTF8(message), 'don')
+  AND hasToken(lowerUTF8(message), 't')
+  AND hasToken(lowerUTF8(message), 'retry')
   AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_.\'’]|(?:^|[^\\p{L}_])[.\'’])payload(?:[^\\p{L}\\p{N}_.,\'’]|[.,\'’](?:$|[^\\p{L}\\p{N}_]))[^\\p{L}\\p{N}_]*don\'t(?:[^\\p{L}\\p{N}_.,\'’]|[.,\'’](?:$|[^\\p{L}\\p{N}_]))[^\\p{L}\\p{N}_]*retry(?:$|[^\\p{L}\\p{N}_.\'’]|[.\'’](?:$|[^\\p{L}_]))');

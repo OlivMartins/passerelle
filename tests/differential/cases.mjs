@@ -215,6 +215,14 @@ export const CASES = [
   { id: 'texte_sqs_parenthese_en_trop', dsl: total({ simple_query_string: { query: 'timeout) reset', fields: ['message'] } }) },
   { id: 'texte_sqs_operateur_et', dsl: total({ simple_query_string: { query: 'upstream timeout -reset', fields: ['message'], default_operator: 'and' } }) },
   { id: 'texte_sqs_flou', dsl: total({ simple_query_string: { query: 'conection~1', fields: ['message'] } }) },
+  // Casse des lettres accentuées : les documents contiennent « Échec », la requête le cherche en minuscules
+  { id: 'texte_majuscule_accentuee', dsl: total({ match: { message: 'échec' } }) },
+  { id: 'texte_majuscule_accentuee_strict', config: STRICT, dsl: total({ match: { message: 'échec' } }) },
+  { id: 'texte_majuscule_accentuee_phrase', dsl: total({ match_phrase: { message: 'échec réseau' } }) },
+  { id: 'texte_majuscule_accentuee_prefixe', dsl: total({ match_phrase_prefix: { message: 'échec rés' } }) },
+  { id: 'texte_majuscule_accentuee_joker', dsl: total({ wildcard: { message: 'éch*' } }) },
+  { id: 'texte_majuscule_accentuee_flou', dsl: total({ fuzzy: { message: { value: 'échc', fuzziness: 1 } } }) },
+  { id: 'texte_majuscule_accentuee_query_string', dsl: total({ query_string: { query: 'message:(échec AND NOT timeout)' } }) },
 
   /* ---------- Tri et pagination des documents ---------- */
   { id: 'tri_search_after', dsl: { size: 10, sort: [{ [TS]: 'desc' }], search_after: [T10] } },
