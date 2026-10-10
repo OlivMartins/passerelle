@@ -21,6 +21,7 @@ import { BASE, DAY } from './dataset.mjs';
 const TS = '@timestamp';
 const T10 = BASE + 2 * DAY; // 2026-03-10T00:00:00Z
 const PARIS = ['UTC', 'Europe/Paris'];
+const STRICT = { clickhouse: { text_match: 'strict' } };
 const total = query => ({ size: 0, track_total_hits: true, query });
 const perDay = aggs => ({ size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day' }, aggs } } });
 const CLASSE = "if (doc['latency_ms'].value < 100) { emit('rapide'); } else if (doc['latency_ms'].value < 1000) { emit('normal'); } else { emit('lent'); }";
@@ -164,12 +165,38 @@ export const CASES = [
   { id: 'texte_match_casse', dsl: total({ match: { message: 'RESET' } }) },
   { id: 'texte_match_accent', dsl: total({ match: { message: 'RÉSEAU' } }) },
   { id: 'texte_match_apostrophe', dsl: total({ match: { message: "don't" } }) },
-  { id: 'texte_match_ip', known: 'l’analyseur standard garde « 10.0.0.1 » entier ; la traduction cherche 10 OU 0 OU 1', dsl: total({ match: { message: '10.0.0.1' } }) },
-  { id: 'texte_match_mot_compose', known: 'pour Elasticsearch « user_id » est un seul mot : « user » ne le trouve pas', dsl: total({ match: { message: 'user' } }) },
-  { id: 'texte_match_identifiant', known: 'pour Elasticsearch « user_id » est un seul mot ; la traduction cherche user OU id', dsl: total({ match: { message: 'user_id' } }) },
-  { id: 'texte_match_decimal', known: 'pour Elasticsearch « 3.14s » est un seul mot ; la traduction cherche 3 OU 14', dsl: total({ match: { message: '3.14' } }) },
-  { id: 'texte_match_phrase', known: 'la phrase est cherchée comme sous-chaîne exacte : « connection-reset » et les espaces multiples sont manqués', dsl: total({ match_phrase: { message: 'connection reset' } }) },
-  { id: 'texte_phrase_prefixe', known: 'la phrase est cherchée comme sous-chaîne exacte : « connection-reset » et les espaces multiples sont manqués', dsl: total({ match_phrase_prefix: { message: 'connection res' } }) },
+  { id: 'texte_match_ip', dsl: total({ match: { message: '10.0.0.1' } }) },
+  { id: 'texte_match_mot_compose', known: 'mode tokens : « user » trouve aussi « user_id », qu’Elasticsearch tient pour un seul mot (voir le cas _strict)', dsl: total({ match: { message: 'user' } }) },
+  { id: 'texte_match_identifiant', dsl: total({ match: { message: 'user_id' } }) },
+  { id: 'texte_match_decimal', dsl: total({ match: { message: '3.14' } }) },
+  { id: 'texte_match_phrase', dsl: total({ match_phrase: { message: 'connection reset' } }) },
+  { id: 'texte_phrase_prefixe', dsl: total({ match_phrase_prefix: { message: 'connection res' } }) },
+  { id: 'texte_match_fichier', dsl: total({ match: { message: 'index.html' } }) },
+  { id: 'texte_match_fragment', known: 'mode tokens : « html » est trouvé dans « index.html », qu’Elasticsearch tient pour un seul mot (voir le cas _strict)', dsl: total({ match: { message: 'html' } }) },
+  { id: 'texte_match_trait_union', dsl: total({ match: { message: 'payment-service' } }) },
+  { id: 'texte_match_apostrophe_seule', dsl: total({ match: { message: "can't" } }) },
+  { id: 'texte_match_minimum', dsl: total({ match: { message: { query: 'connection reset peer upstream', minimum_should_match: 3 } } }) },
+  { id: 'texte_phrase_trait_union', dsl: total({ match_phrase: { message: 'payment service' } }) },
+  { id: 'texte_phrase_trois_mots', dsl: total({ match_phrase: { message: 'reset by peer' } }) },
+  { id: 'texte_phrase_prefixe_long', dsl: total({ match_phrase_prefix: { message: 'upstream timeout aft' } }) },
+  { id: 'texte_bool_prefixe', dsl: total({ match_bool_prefix: { message: 'peer upstr' } }) },
+  { id: 'texte_joker_query_string', dsl: total({ query_string: { query: 'message:conn* AND NOT message:"by peer"' } }) },
+  { id: 'texte_joker_interne', dsl: total({ wildcard: { message: 't?meo*' } }) },
+  { id: 'texte_multi_match_et', dsl: total({ multi_match: { query: 'connection upstream', fields: ['message'], operator: 'and' } }) },
+  // Mode strict : chaque mot est vérifié par une expression régulière qui suit le découpage d’Elasticsearch
+  { id: 'texte_match_mot_compose_strict', config: STRICT, dsl: total({ match: { message: 'user' } }) },
+  { id: 'texte_match_decimal_strict', config: STRICT, dsl: total({ match: { message: '3.14' } }) },
+  { id: 'texte_match_fragment_strict', config: STRICT, dsl: total({ match: { message: 'html' } }) },
+  { id: 'texte_match_ip_strict', config: STRICT, dsl: total({ match: { message: '10.0.0.1' } }) },
+  { id: 'texte_match_identifiant_strict', config: STRICT, dsl: total({ match: { message: 'user_id' } }) },
+  { id: 'texte_match_fichier_strict', config: STRICT, dsl: total({ match: { message: 'index.html' } }) },
+  { id: 'texte_match_apostrophe_strict', config: STRICT, dsl: total({ match: { message: "don't" } }) },
+  { id: 'texte_match_accent_strict', config: STRICT, dsl: total({ match: { message: 'RÉSEAU délai' } }) },
+  { id: 'texte_match_nombre_strict', config: STRICT, dsl: total({ match: { message: '3' } }) },
+  { id: 'texte_phrase_strict', config: STRICT, dsl: total({ match_phrase: { message: 'connection reset' } }) },
+  { id: 'texte_phrase_prefixe_strict', config: STRICT, dsl: total({ match_phrase_prefix: { message: 'connection res' } }) },
+  { id: 'texte_phrase_ponctuation_strict', config: STRICT, dsl: total({ match_phrase: { message: 'payload don\'t retry' } }) },
+  { id: 'texte_query_string_strict', config: STRICT, dsl: total({ query_string: { query: 'message:(user OR id) AND NOT message:html' } }) },
   // simple_query_string : opérateurs appliqués de gauche à droite, négation combinée par l’opérateur par défaut, rien n’est refusé
   { id: 'texte_sqs_negation', dsl: total({ simple_query_string: { query: 'timeout -upstream', fields: ['message'] } }) },
   { id: 'texte_sqs_ou', dsl: total({ simple_query_string: { query: 'timeout | reset', fields: ['message'] } }) },

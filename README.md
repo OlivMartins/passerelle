@@ -262,6 +262,17 @@ Sans `columns`, Passerelle traduit comme si toutes les colonnes étaient simples
 
 Si vos colonnes de texte ne sont pas `Nullable` et qu’une chaîne vide y représente un champ absent, ajoutez `empty_as_missing: true` : `exists` devient `colonne != ''`, et les regroupements ignorent les chaînes vides.
 
+### Recherche plein texte : lisible ou stricte
+
+L’analyseur standard d’Elasticsearch ne découpe pas un texte comme `hasToken()` : pour lui, `user_id`, `10.0.0.1`, `index.html` et `don't` sont chacun un seul mot. Passerelle découpe le texte cherché comme Elasticsearch, puis cherche chaque mot.
+
+| `text_match` | Ce que Passerelle écrit | Équivalence |
+|---|---|---|
+| `tokens` (par défaut) | `hasTokenCaseInsensitive(message, 'timeout')` pour un mot simple ; les fragments d’un mot composé doivent en plus se suivre | Un mot simple trouve aussi ses occurrences collées par `_`, `.` ou une apostrophe : `user` trouve `user_id` |
+| `strict` | La même recherche, suivie d’une expression régulière qui vérifie que le mot apparaît entier | Identique à Elasticsearch sur tous les cas du banc de tests |
+
+Dans les deux modes, `hasToken` reste en tête de condition : c’est lui que l’index `tokenbf_v1` exploite. Une phrase (`match_phrase`) est cherchée mots à la suite, quels que soient les séparateurs : `connection reset` trouve `connection-reset`.
+
 ### Listes noires et listes blanches
 
 Un `terms`, une série de `should` sur le même champ (le filtre « est l’un de » de Kibana) ou des `OR` dans une `query_string` sont réunis en un seul `IN`.

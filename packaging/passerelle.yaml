@@ -24,6 +24,7 @@ clickhouse:
   columns: {}
   empty_as_missing: false             # true : dans une colonne String non Nullable, la chaîne vide représente un champ absent
   composite_mode: page                # stream : une agrégation composite devient une seule requête, sans pagination, lue en flux
+  text_match: tokens                  # strict : chaque mot cherché est vérifié par une expression régulière, pour le découpage exact d'Elasticsearch
   lists:
     threshold: 0                      # au-delà de ce nombre de valeurs, une liste (terms, should…) quitte le SQL pour une table ; 0 : jamais
     table: ''                         # table des listes ; vide : passerelle_lists dans la base de données

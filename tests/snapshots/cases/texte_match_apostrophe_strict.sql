@@ -6,4 +6,4 @@ SELECT
 FROM logs.events
 WHERE hasTokenCaseInsensitive(message, 'don')
   AND hasTokenCaseInsensitive(message, 't')
-  AND positionCaseInsensitiveUTF8(message, 'don\'t') > 0;
+  AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_.\'’]|(?:^|[^\\p{L}_])[.\'’])don\'t(?:$|[^\\p{L}\\p{N}_.\'’]|[.\'’](?:$|[^\\p{L}_]))');

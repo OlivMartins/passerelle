@@ -160,7 +160,6 @@ function isTextField(ctx, field) {
   if (String(field).endsWith('.keyword')) return false;
   return (ctx.cfg.clickhouse.text_fields || []).includes(base);
 }
-function tokensOf(s) { return String(s).toLowerCase().match(/[\p{L}\p{N}]+/gu) || []; }
 function textIndexNote(ctx, col) {
   ctx.textCols.add(col);
 }
@@ -538,6 +537,72 @@ function rangeClause(ctx, field, spec0) {
   if (parts.length === 2 && spec.gte !== undefined && spec.lte !== undefined && !isDate) return `${f} BETWEEN ${chVal(spec.gte)} AND ${chVal(spec.lte)}`;
   return andJoin(parts);
 }
+/* ---------- Recherche plein texte ---------- */
+/*
+ * Un champ text d’Elasticsearch est découpé en mots par l’analyseur standard (règles Unicode UAX#29), puis mis
+ * en minuscules. Ses mots ne sont pas ceux de hasToken() : pour lui, « user_id », « 10.0.0.1 », « 3.14s »,
+ * « example.com » et « don't » sont chacun UN mot, alors que ClickHouse coupe sur tout caractère ASCII non
+ * alphanumérique. Chercher « 10.0.0.1 » comme 10 OU 0 OU 1 ramène presque tout.
+ *
+ * esTokens() reproduit le découpage d’Elasticsearch sur le texte cherché. Chaque mot est ensuite cherché :
+ *   - par hasTokenCaseInsensitive() sur ses fragments, que l’index tokenbf_v1 sait exploiter ;
+ *   - et, si le mot contient un séparateur ou si clickhouse.text_match vaut « strict », par une expression
+ *     régulière qui vérifie que le mot apparaît bien entier.
+ * En mode « tokens » (par défaut), un mot simple n’est cherché que par hasToken : « user » trouve aussi
+ * « user_id », ce qu’Elasticsearch ne fait pas. Le mode « strict » ajoute la vérification à chaque mot.
+ */
+function esTokens(text) {
+  const chars = [...String(text).toLowerCase()];
+  const letter = c => /\p{L}/u.test(c); const digit = c => /\p{N}/u.test(c);
+  const out = []; let cur = '';
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i];
+    if (letter(c) || digit(c) || c === '_') { cur += c; continue; }
+    // Un point ou une apostrophe entre deux lettres, un point ou une virgule entre deux chiffres, ne coupent pas le mot
+    const prev = cur ? chars[i - 1] : ''; const next = chars[i + 1] || '';
+    if (cur && ((/[.'’]/.test(c) && letter(prev) && letter(next)) || (/[.,']/.test(c) && digit(prev) && digit(next)))) { cur += c; continue; }
+    if (cur) out.push(cur);
+    cur = '';
+  }
+  if (cur) out.push(cur);
+  return out.filter(t => /[\p{L}\p{N}]/u.test(t));
+}
+// Fragments d’un mot au sens de hasToken() : suites de caractères alphanumériques ASCII ou non ASCII
+const hasTokenParts = token => token.split(/[\x00-\x2f\x3a-\x40\x5b-\x60\x7b-\x7f]+/).filter(Boolean);
+const strictText = ctx => ctx.cfg.clickhouse.text_match === 'strict';
+/*
+ * Expression régulière (RE2) qui trouve une suite de mots entiers, séparés par autre chose que des lettres et
+ * des chiffres. « strict » applique les règles de jonction d’Elasticsearch aux deux bouts et entre les mots :
+ * « user » n’est pas trouvé dans « user_id » ni dans « user.name », « 3.14 » ne l’est pas dans « 3.14s ».
+ * prefix : le dernier mot peut se prolonger (match_phrase_prefix).
+ */
+function wordsRegex(tokens, strict, prefix) {
+  const W = '\\p{L}\\p{N}_';
+  const first = tokens[0]; const last = tokens[tokens.length - 1];
+  const digitFirst = /^\p{N}/u.test(first); const digitLast = /\p{N}$/u.test(last);
+  let left = `(?:^|[^${W}])`; let right = `(?:$|[^${W}])`; let sep = '[^\\p{L}\\p{N}]+';
+  if (strict) {
+    left = digitFirst ? `(?:^|[^${W}.,']|(?:^|[^\\p{N}])[.,'])` : `(?:^|[^${W}.'’]|(?:^|[^\\p{L}_])[.'’])`;
+    right = digitLast ? `(?:$|[^${W}.,']|[.,'](?:$|[^\\p{N}]))` : `(?:$|[^${W}.'’]|[.'’](?:$|[^\\p{L}_]))`;
+    sep = `(?:[^${W}.,'’]|[.,'’](?:$|[^${W}]))[^${W}]*`;
+  }
+  return `(?i)${left}${tokens.map(escRe).join(sep)}${prefix ? '' : right}`;
+}
+// Le document contient ce mot (au sens d’Elasticsearch)
+function wordCond(ctx, f, token) {
+  const parts = hasTokenParts(token);
+  const pre = [...new Set(parts)].map(p => hasTok(f, p));
+  if (strictText(ctx)) return andJoin(pre.concat([`match(${f}, ${chStr(wordsRegex([token], true, false))})`]));
+  // Mot simple : hasToken suffit. Mot à séparateurs : ses fragments doivent en plus se suivre.
+  return parts.length === 1 && parts[0] === token ? pre[0] : andJoin(pre.concat([`positionCaseInsensitiveUTF8(${f}, ${chStr(token)}) > 0`]));
+}
+// Le document contient ces mots à la suite ; prefix : le dernier n’est qu’un début de mot
+function phraseCond(ctx, f, tokens, prefix) {
+  if (tokens.length === 1 && !prefix) return wordCond(ctx, f, tokens[0]);
+  const complete = prefix ? tokens.slice(0, -1) : tokens;
+  const pre = [...new Set(complete.flatMap(hasTokenParts))].map(p => hasTok(f, p));
+  return andJoin(pre.concat([`match(${f}, ${chStr(wordsRegex(tokens, strictText(ctx), prefix))})`]));
+}
 function matchClause(ctx, field, o, type) {
   const q = o.query;
   if (field === '*' || field === '_all') return orJoin(textFieldsOr(ctx).map(tf => matchClause(ctx, tf, o, type)));
@@ -549,31 +614,32 @@ function matchClause(ctx, field, o, type) {
     return `${f} = ${chVal(q)}`;
   }
   textIndexNote(ctx, f);
-  const toks = [...new Set(tokensOf(q))];
-  if (!toks.length) { ctx.stats.ok++; return null; }
+  const words = esTokens(q);
+  if (!words.length) { ctx.stats.ok++; return null; }
+  if (!strictText(ctx)) ctx.notes.add('info', 'Recherche plein texte par tokens', 'Chaque mot est cherché par hasTokenCaseInsensitive(), que l’index tokenbf_v1 sait exploiter. Un mot simple trouve aussi ses occurrences collées à un autre par « _ », « . » ou une apostrophe (user dans user_id), ce qu’Elasticsearch ne fait pas. Pour une équivalence stricte, clickhouse.text_match: strict ajoute à chaque mot une vérification par expression régulière.');
   if (type === 'match') {
     if (o.fuzziness !== undefined && String(o.fuzziness) !== '0') {
       ctx.stats.approx++;
       ctx.notes.add('warn', 'Fuzziness ignorée', `La tolérance aux fautes de frappe sur « ${field} » est ignorée : recherche exacte par token. Voir ngramDistance() si nécessaire.`);
     } else ctx.stats.ok++;
-    const conds = toks.map(t => hasTok(f, t));
+    const unique = [...new Set(words)];
+    const conds = unique.map(w => wordCond(ctx, f, w));
     const op = String(o.operator || 'or').toLowerCase();
-    H(ctx, 'text', `${field} contient ${toks.map(t => `« ${t} »`).join(op === 'and' ? ' et ' : ' ou ')}`);
+    H(ctx, 'text', `${field} contient ${unique.map(t => `« ${t} »`).join(op === 'and' ? ' et ' : ' ou ')}`);
     if (op === 'and') return andJoin(conds);
     const k = msmCount(o.minimum_should_match, conds.length);
     if (k && k > 1) return k >= conds.length ? andJoin(conds) : `${conds.map(c => countable(ctx, c)).join(' + ')} >= ${k}`;
     return orJoin(conds);
   }
+  ctx.stats.ok++;
   if (type === 'match_phrase') {
-    ctx.stats.ok++;
     H(ctx, 'text', `${field} contient « ${String(q).trim()} »`);
-    if (toks.length === 1 && String(q).trim().toLowerCase() === toks[0]) return hasTok(f, toks[0]);
-    return andJoin(toks.map(t => hasTok(f, t)).concat([`positionCaseInsensitiveUTF8(${f}, ${chStr(String(q).trim())}) > 0`]));
+    return phraseCond(ctx, f, words, false);
   }
-  ctx.stats.approx++;
-  ctx.notes.add('warn', `${type} approximé`, 'Le préfixe du dernier mot est recherché par ILIKE, sans analyse de tokens.');
   H(ctx, 'text', `${field} contient « ${String(q).trim()}… »`);
-  return `${f} ILIKE ${chStr('%' + likeEscape(String(q).trim()) + '%')}`;
+  if (type === 'match_phrase_prefix') return phraseCond(ctx, f, words, true);
+  // match_bool_prefix : chaque mot peut suffire, le dernier n’étant qu’un début de mot
+  return orJoin(words.slice(0, -1).map(w => wordCond(ctx, f, w)).concat([phraseCond(ctx, f, words.slice(-1), true)]));
 }
 function tq(ctx, q) {
   // « filtering » signale à mapField qu’un champ est lu depuis une clause de requête
@@ -644,9 +710,12 @@ function clauseSQL(ctx, q) {
       let like = likeEscape(v).replace(/\*/g, '%').replace(/\?/g, '_');
       if (/^[*?]/.test(v)) ctx.leadingWildcard = f;
       if (isTextField(ctx, field)) {
-        ctx.stats.approx++;
-        ctx.notes.add('warn', 'Wildcard sur champ texte', `Elasticsearch applique le motif à chaque token de « ${field} » ; ici il s’applique à la valeur entière (ILIKE '%…%').`);
-        return `${f} ILIKE ${chStr('%' + like.replace(/^%|%$/g, '') + '%')}`;
+        // Elasticsearch confronte le motif à chaque mot du champ : * et ? ne débordent pas du mot
+        ctx.stats.ok++;
+        textIndexNote(ctx, f);
+        const W = '[\\p{L}\\p{N}_]';
+        const pattern = v.toLowerCase().split(/([*?])/).map(p => (p === '*' ? `${W}*` : p === '?' ? W : escRe(p))).join('');
+        return `match(${f}, ${chStr(`(?i)(?:^|[^\\p{L}\\p{N}_])${pattern}(?:$|[^\\p{L}\\p{N}_])`)})`;
       }
       ctx.stats.ok++;
       return onValues(ctx, field, x => `${x} ${ci ? 'ILIKE' : 'LIKE'} ${chStr(like)}`);
@@ -686,12 +755,12 @@ function clauseSQL(ctx, q) {
       const op = String(body.operator || 'or').toLowerCase();
       if (/phrase/.test(mtype)) return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query }, mtype === 'phrase' ? 'match_phrase' : 'match_phrase_prefix')));
       if (op === 'and' || type === 'combined_fields') {
-        const toks = [...new Set(tokensOf(body.query))];
+        const toks = [...new Set(esTokens(body.query))];
         const tf = fields.filter(f => isTextField(ctx, f)); const kf = fields.filter(f => !isTextField(ctx, f));
         ctx.stats.ok++;
         tf.forEach(f => textIndexNote(ctx, mapField(ctx, f)));
         H(ctx, 'text', `${fields.join(', ')} contiennent ${toks.map(t => `« ${t} »`).join(' et ')}`);
-        const tokConds = tf.length ? andJoin(toks.map(t => orJoin(tf.map(f => hasTok(mapField(ctx, f), t))))) : null;
+        const tokConds = tf.length ? andJoin(toks.map(t => orJoin(tf.map(f => wordCond(ctx, mapField(ctx, f), t))))) : null;
         return orJoin([tokConds].concat(kf.map(f => `${mapField(ctx, f)} = ${chVal(body.query)}`)).filter(x => x !== null));
       }
       return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query, minimum_should_match: body.minimum_should_match, fuzziness: body.fuzziness }, 'match')));

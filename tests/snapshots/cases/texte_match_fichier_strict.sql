@@ -1,0 +1,9 @@
+-- Couverture : 1 directs, 0 à vérifier, 0 à reprendre
+
+-- Total (track_total_hits)
+SELECT
+    count() AS total
+FROM logs.events
+WHERE hasTokenCaseInsensitive(message, 'index')
+  AND hasTokenCaseInsensitive(message, 'html')
+  AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_.\'’]|(?:^|[^\\p{L}_])[.\'’])index\\.html(?:$|[^\\p{L}\\p{N}_.\'’]|[.\'’](?:$|[^\\p{L}_]))');

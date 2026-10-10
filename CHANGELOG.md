@@ -15,6 +15,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 - Schéma des colonnes : la clé facultative `clickhouse.columns` donne le type ClickHouse de chaque colonne. La traduction s’en sert pour les champs facultatifs (`Nullable`), multivalués (`Array`), les entiers et les dates. `clickhouse.empty_as_missing` déclare qu’une chaîne vide représente un champ absent.
 
+- Recherche plein texte : option `clickhouse.text_match: strict`, qui vérifie chaque mot par une expression régulière suivant le découpage de l’analyseur standard d’Elasticsearch. Le mode par défaut, `tokens`, garde `hasToken` seul pour un mot simple.
 - Listes nommées : au-delà de `clickhouse.lists.threshold` valeurs, une liste (`terms`, série de `should`, `OR` d’une `query_string`) quitte le SQL pour une table, désignée par l’empreinte de son contenu ou par un nom déclaré dans `clickhouse.lists.names`. Le `CREATE TABLE` et les `INSERT` sont fournis par l’API (champ `lists`) et par la CLI (fichier `.lists.sql`). Une requête de plus de 256 Kio, que ClickHouse refuse par défaut, est signalée.
 - Agrégation `composite` : option `clickhouse.composite_mode: stream`, qui produit une seule requête sans pagination, à lire en flux, quand le client parcourt tous les groupes.
 
@@ -31,6 +32,8 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Corrigé
 
+- Recherche plein texte : le texte cherché est découpé comme le fait l’analyseur standard. `match` sur `10.0.0.1` cherchait 10 OU 0 OU 1 (337 documents au lieu de 42) ; `user_id`, `index.html` ou `3.14` étaient de même éclatés. Les fragments d’un mot composé doivent maintenant être tous présents et se suivre.
+- `match_phrase` et `match_phrase_prefix` cherchaient la phrase comme sous-chaîne exacte : `connection reset` manquait `connection-reset` et les espaces multiples (300 documents au lieu de 900). Les mots sont cherchés à la suite, quels que soient les séparateurs. `match_bool_prefix` et les jokers sur un champ texte s’appliquent mot par mot.
 - Agrégation `global` imbriquée dans une autre : déclarée « à reprendre », comme Elasticsearch la refuse.
 - Agrégation `composite` : `order: desc` sur une source était ignoré, tout comme `missing_bucket` et `missing_order`. Chaque source garde son sens de tri, et une clé `null` se place et se pagine comme dans Elasticsearch.
 - Colonnes `Nullable` (avec `clickhouse.columns`) : `must_not`, `NOT`, `exclude` et `minimum_should_match` écartaient les lignes `NULL`, qu’Elasticsearch garde. Les négations deviennent `(col != x OR col IS NULL)`, les conditions comptées `ifNull(…, 0)`.

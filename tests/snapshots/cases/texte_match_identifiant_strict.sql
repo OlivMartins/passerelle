@@ -6,4 +6,4 @@ SELECT
 FROM logs.events
 WHERE hasTokenCaseInsensitive(message, 'user')
   AND hasTokenCaseInsensitive(message, 'id')
-  AND positionCaseInsensitiveUTF8(message, 'user_id') > 0;
+  AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_.\'’]|(?:^|[^\\p{L}_])[.\'’])user_id(?:$|[^\\p{L}\\p{N}_.\'’]|[.\'’](?:$|[^\\p{L}_]))');

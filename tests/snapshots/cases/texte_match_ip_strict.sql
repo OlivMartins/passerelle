@@ -7,4 +7,4 @@ FROM logs.events
 WHERE hasTokenCaseInsensitive(message, '10')
   AND hasTokenCaseInsensitive(message, '0')
   AND hasTokenCaseInsensitive(message, '1')
-  AND positionCaseInsensitiveUTF8(message, '10.0.0.1') > 0;
+  AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_.,\']|(?:^|[^\\p{N}])[.,\'])10\\.0\\.0\\.1(?:$|[^\\p{L}\\p{N}_.,\']|[.,\'](?:$|[^\\p{N}]))');

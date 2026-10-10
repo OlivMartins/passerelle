@@ -18,7 +18,8 @@ const DEFAULT_CONFIG = {
     columns: {},
     empty_as_missing: false,
     composite_mode: 'page',
-    lists: { threshold: 0, table: '', names: {} }
+    lists: { threshold: 0, table: '', names: {} },
+    text_match: 'tokens'
   },
   kafka: {
     bootstrap_servers: '',

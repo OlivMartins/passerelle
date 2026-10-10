@@ -8,7 +8,7 @@ SELECT
     message,
     trace.id
 FROM logs.events
-WHERE (hasTokenCaseInsensitive(message, 'timeout') OR (hasTokenCaseInsensitive(message, 'connection') AND hasTokenCaseInsensitive(message, 'reset') AND positionCaseInsensitiveUTF8(message, 'connection reset') > 0))
+WHERE (hasTokenCaseInsensitive(message, 'timeout') OR (hasTokenCaseInsensitive(message, 'connection') AND hasTokenCaseInsensitive(message, 'reset') AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_])connection[^\\p{L}\\p{N}]+reset(?:$|[^\\p{L}\\p{N}_])')))
   AND level != 'DEBUG'
   AND timestamp >= now() - INTERVAL 15 MINUTE
   AND startsWith(host.name, 'web-')
@@ -20,7 +20,7 @@ LIMIT 50;
 SELECT
     count() AS total
 FROM logs.events
-WHERE (hasTokenCaseInsensitive(message, 'timeout') OR (hasTokenCaseInsensitive(message, 'connection') AND hasTokenCaseInsensitive(message, 'reset') AND positionCaseInsensitiveUTF8(message, 'connection reset') > 0))
+WHERE (hasTokenCaseInsensitive(message, 'timeout') OR (hasTokenCaseInsensitive(message, 'connection') AND hasTokenCaseInsensitive(message, 'reset') AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_])connection[^\\p{L}\\p{N}]+reset(?:$|[^\\p{L}\\p{N}_])')))
   AND level != 'DEBUG'
   AND timestamp >= now() - INTERVAL 15 MINUTE
   AND startsWith(host.name, 'web-');

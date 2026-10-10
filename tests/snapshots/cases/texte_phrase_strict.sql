@@ -6,4 +6,4 @@ SELECT
 FROM logs.events
 WHERE hasTokenCaseInsensitive(message, 'connection')
   AND hasTokenCaseInsensitive(message, 'reset')
-  AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_])connection[^\\p{L}\\p{N}]+reset(?:$|[^\\p{L}\\p{N}_])');
+  AND match(message, '(?i)(?:^|[^\\p{L}\\p{N}_.\'’]|(?:^|[^\\p{L}_])[.\'’])connection(?:[^\\p{L}\\p{N}_.,\'’]|[.,\'’](?:$|[^\\p{L}\\p{N}_]))[^\\p{L}\\p{N}_]*reset(?:$|[^\\p{L}\\p{N}_.\'’]|[.\'’](?:$|[^\\p{L}_]))');
