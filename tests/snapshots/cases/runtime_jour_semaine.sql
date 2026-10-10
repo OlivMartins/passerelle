@@ -7,7 +7,6 @@ SELECT
     jour AS j,
     count() AS doc_count
 FROM logs.events
-WHERE isNotNull(jour)
 GROUP BY j
 ORDER BY j ASC
 LIMIT 7;

@@ -141,7 +141,12 @@ function mapField(ctx, field) {
     ctx.notes.add('info', 'Suffixe .keyword retiré', `« ${name} » devient « ${base} » : ClickHouse stocke la valeur brute, sans sous-champ analysé.`);
     name = base;
   }
-  if (ctx.runtime[name] && !ctx.runtime[name].busy) { ctx.columns.add(ctx.runtime[name].alias); return ctx.runtime[name].alias; }
+  if (ctx.runtime[name] && !ctx.runtime[name].busy) {
+    ctx.columns.add(ctx.runtime[name].alias);
+    // Lu depuis une clause de requête : le champ runtime sert de filtre
+    if (ctx.filtering) ctx.runtime[name].filtered = true;
+    return ctx.runtime[name].alias;
+  }
   const fm = ctx.cfg.clickhouse.field_mapping || {};
   if (Object.prototype.hasOwnProperty.call(fm, name) && fm[name]) name = fm[name];
   if (name === '_id') ctx.notes.add('warn', 'Champ _id', 'Elasticsearch génère _id ; dans ClickHouse il faut une colonne équivalente (par ex. un UUID ou un identifiant métier).');
@@ -243,6 +248,109 @@ function negateWith(s, nullable) {
 }
 // Condition comptée dans une somme (minimum_should_match) : NULL ferait de toute la somme un NULL
 const countable = (ctx, c) => (mayBeNull(ctx, c) ? `ifNull(${c}, 0)` : `(${c})`);
+/* ---------- Filtre sur un champ runtime ---------- */
+/*
+ * Un champ runtime de classification émet une constante par branche :
+ *     if (latence < 100) emit('rapide'); else if (latence < 1000) emit('normal'); else emit('lent');
+ * Filtrer sur sa valeur (classe = 'lent') oblige ClickHouse à le calculer pour chaque ligne. Le filtre est
+ * donc remonté aux colonnes sources (latence >= 1000) : même résultat, mais la clé de tri et les index
+ * redeviennent utilisables. Renvoie undefined quand le script ne s’y prête pas (le filtre porte alors sur
+ * l’alias), et null quand toutes les valeurs émises sont recherchées (il n’y a alors rien à filtrer).
+ */
+function runtimeFilter(ctx, field, values) {
+  const rt = ctx.runtime[String(field).replace(/\.keyword$/, '')];
+  if (!rt || rt.busy || !rt.tree) return undefined;
+  const wanted = new Set(values.map(String));
+  const constant = v => (v.lit !== undefined ? v.lit : v.ty === 'num' && /^-?\d+(\.\d+)?$/.test(v.sql) ? Number(v.sql) : undefined);
+  // Expressions booléennes : true, false, une condition SQL, { and: [...] } ou { or: [...] }
+  const both = (op, a, b) => ({ [op]: [a, b].flatMap(x => (isObj(x) && x[op] ? x[op] : [x])) });
+  const and = (a, b) => (a === false || b === false ? false : a === true ? b : b === true ? a : both('and', a, b));
+  const or = (a, b) => (a === true || b === true ? true : a === false ? b : b === false ? a : both('or', a, b));
+  let leaves = 0; let invertible = true;
+  // Condition sous laquelle la branche émet une valeur recherchée. Les simplifications suivent l’arbre :
+  // « c OU (NON c ET suite) » se réduit à « c OU suite », comme le fait un lecteur du script.
+  const match = (function walk(node) {
+    if (node.k === 'none') return false; // branche qui n’émet rien : aucune valeur ne lui correspond
+    if (node.k === 'val') {
+      const value = constant(node.v);
+      if (value === undefined) invertible = false;
+      leaves++;
+      return wanted.has(String(value));
+    }
+    const then = walk(node.t); const otherwise = walk(node.e);
+    if (then === true && otherwise === true) return true;
+    if (then === true) return or(node.c, otherwise);
+    if (otherwise === true) return or(negate(ctx, node.c), then);
+    return or(and(node.c, then), and(negate(ctx, node.c), otherwise));
+  })(rt.tree);
+  if (!invertible || leaves < 2) return undefined;
+  if (match === false) return 'false';
+  if (match === true) return null; // toutes les branches émettent une valeur recherchée : rien à filtrer
+  // Rendu en SQL ; null signifie « toujours vrai »
+  const conds = e => (isObj(e) && e.and ? tightenBounds(e.and.map(sqlOf).filter(x => x !== null)) : [sqlOf(e)]);
+  function sqlOf(e) {
+    if (typeof e === 'string') return e;
+    if (e.and) return andJoin(conds(e));
+    const lists = e.or.map(conds);
+    if (lists.some(l => !l.length || l.includes(null))) return null;
+    const branches = mergeIntervals(lists);
+    return branches === null ? null : branches.length === 1 ? andJoin(branches[0]) : orJoin(branches.map(b => andJoin(b)));
+  }
+  const sql = sqlOf(match);
+  if (sql === null) return null;
+  if (sql.length > 400) return undefined;
+  ctx.notes.add('opt', `Filtre sur « ${rt.name} » remonté aux colonnes`, `Le champ runtime « ${rt.name} » classe les lignes selon des conditions simples. Le filtre sur sa valeur est réécrit avec ces conditions : ClickHouse n’a plus à calculer le champ pour chaque ligne, et peut s’appuyer sur la clé de tri et les index des colonnes sources.`);
+  return sql;
+}
+const BOUND = /^(.+) (>=|>|<=|<) (-?\d+(?:\.\d+)?)$/;
+// Parmi les comparaisons d’une même expression à des nombres, garde la borne basse et la borne haute les plus strictes
+function tightenBounds(conds) {
+  const out = []; const bounds = new Map();
+  for (const c of conds) {
+    const m = topHas(c, /^ (AND|OR) /) ? null : BOUND.exec(c);
+    if (!m) { out.push(c); continue; }
+    const lhs = m[1]; const lower = m[2][0] === '>'; const strict = m[2].length === 1; const n = Number(m[3]);
+    if (!bounds.has(lhs)) { bounds.set(lhs, { lo: null, hi: null }); out.push({ lhs }); }
+    const side = lower ? 'lo' : 'hi'; const cur = bounds.get(lhs)[side];
+    const tighter = !cur || (lower ? n > cur.n : n < cur.n) || (n === cur.n && strict);
+    if (tighter) bounds.get(lhs)[side] = { n, strict, sql: c };
+  }
+  return out.flatMap(x => (typeof x === 'string' ? [x] : [bounds.get(x.lhs).lo, bounds.get(x.lhs).hi].filter(Boolean).map(b => b.sql)));
+}
+// Réunit les branches qui sont des intervalles contigus d’une même expression : [100, 1000[ et [1000, +∞[ donnent [100, +∞[.
+// Renvoie null si la réunion couvre toutes les valeurs : il n’y a alors rien à écrire de sûr.
+function mergeIntervals(branches) {
+  const interval = conds => {
+    const ms = conds.map(c => BOUND.exec(c));
+    if (!conds.length || conds.length > 2 || ms.some(m => !m) || new Set(ms.map(m => m[1])).size !== 1) return null;
+    const iv = { lhs: ms[0][1], lo: null, hi: null };
+    for (const m of ms) {
+      const side = m[2][0] === '>' ? 'lo' : 'hi';
+      if (iv[side]) return null;
+      iv[side] = { n: Number(m[3]), strict: m[2].length === 1 };
+    }
+    return iv;
+  };
+  const items = branches.map(conds => ({ conds, iv: interval(conds) }));
+  for (let changed = true; changed;) {
+    changed = false;
+    search: for (let i = 0; i < items.length; i++) {
+      for (let j = 0; j < items.length; j++) {
+        const a = items[i].iv; const b = items[j].iv;
+        // a finit là où b commence, et une seule des deux bornes inclut ce point
+        if (i === j || !a || !b || a.lhs !== b.lhs || !a.hi || !b.lo || a.hi.n !== b.lo.n || a.hi.strict === b.lo.strict) continue;
+        items[i] = { iv: { lhs: a.lhs, lo: a.lo, hi: b.hi } };
+        items.splice(j, 1);
+        changed = true;
+        break search;
+      }
+    }
+  }
+  const render = iv => [iv.lo && `${iv.lhs} ${iv.lo.strict ? '>' : '>='} ${iv.lo.n}`, iv.hi && `${iv.lhs} ${iv.hi.strict ? '<' : '<='} ${iv.hi.n}`].filter(Boolean);
+  const out = items.map(x => (x.iv ? render(x.iv) : x.conds));
+  return out.some(conds => !conds.length) ? null : out;
+}
+
 /* ---------- Listes de valeurs ---------- */
 /*
  * Une liste noire ou blanche arrive de trois façons : un terms, une suite de should sur le même champ
@@ -466,6 +574,12 @@ function matchClause(ctx, field, o, type) {
   return `${f} ILIKE ${chStr('%' + likeEscape(String(q).trim()) + '%')}`;
 }
 function tq(ctx, q) {
+  // « filtering » signale à mapField qu’un champ est lu depuis une clause de requête
+  ctx.filtering = (ctx.filtering || 0) + 1;
+  try { return clauseSQL(ctx, q); }
+  finally { ctx.filtering--; }
+}
+function clauseSQL(ctx, q) {
   if (!isObj(q) || !Object.keys(q).length) return null;
   const type = Object.keys(q)[0]; const body = q[type];
   switch (type) {
@@ -476,16 +590,20 @@ function tq(ctx, q) {
       const [field, raw] = fieldEntry(body);
       let v = raw, ci = false;
       if (isObj(raw)) { v = raw.value; ci = !!raw.case_insensitive; }
-      const f = mapField(ctx, field); ctx.stats.ok++;
       H(ctx, 'filters', `${field} = ${v}`);
+      const sources = ci ? undefined : runtimeFilter(ctx, field, [v]);
+      if (sources !== undefined) { ctx.stats.ok++; return sources; }
+      const f = mapField(ctx, field); ctx.stats.ok++;
       if (ci) return onValues(ctx, field, x => `lower(${x}) = ${chStr(String(v).toLowerCase())}`);
       return isArrayField(ctx, field) ? `has(${f}, ${chVal(v)})` : `${f} = ${chVal(v)}`;
     }
     case 'terms': {
       const [field, vals] = fieldEntry(body);
       if (!Array.isArray(vals)) return todo(ctx, 'terms lookup', 'La recherche de termes dans un autre index demande une sous-requête ClickHouse (IN (SELECT …)) écrite à la main.');
-      const f = mapField(ctx, field); ctx.stats.ok++;
       H(ctx, 'filters', `${field} ∈ {${vals.slice(0, 4).join(', ')}${vals.length > 4 ? '…' : ''}}`);
+      const sources = runtimeFilter(ctx, field, vals);
+      if (sources !== undefined) { ctx.stats.ok++; return sources; }
+      const f = mapField(ctx, field); ctx.stats.ok++;
       if (isArrayField(ctx, field)) return vals.length === 1 ? `has(${f}, ${chVal(vals[0])})` : `hasAny(${f}, [${vals.map(chVal).join(', ')}])`;
       return inList(ctx, f, vals.map(chVal));
     }
@@ -841,7 +959,9 @@ function buildLevel(ctx, name, def) {
       // Elasticsearch ne crée pas de groupe pour les documents qui n’ont pas le champ,
       // sauf missing_bucket (source d’un composite), qui les réunit sous une clé null
       if (body.missing === undefined && !body.missing_bucket) {
-        if (computed || (colType && colType.nullable)) L.where.push(`isNotNull(${k})`);
+        // Un champ runtime qui émet toujours une valeur n’a pas besoin de ce filtre
+        const rtField = body.script ? null : ctx.runtime[String(body.field || '').replace(/\.keyword$/, '')];
+        if (body.script || (rtField && rtField.nullable !== false) || (colType && colType.nullable)) L.where.push(`isNotNull(${k})`);
         else if (absent) L.where.push(`${k} != ''`);
       }
       incl(k, body.include, false); incl(k, body.exclude, true);
@@ -1398,13 +1518,13 @@ function translateRequest(input, cfg, opts, columns) {
     r.busy = true;
     try {
       const out = painlessToSQL(ctx, src, { mode: 'emit', params: (isObj(sc) && sc.params) || {}, rtType: def.type });
-      r.sql = out.sql;
+      r.sql = out.sql; r.tree = out.tree; r.name = name;
+      // Le script lit une colonne du même nom que le champ : l’alias est distingué (hors chaînes, qui ne sont pas des colonnes)
+      if (new RegExp('(^|[^A-Za-z0-9_])' + escRe(r.alias) + '($|[^A-Za-z0-9_])').test(out.sql.replace(/'(?:[^'\\]|\\.)*'/g, "''"))) r.alias = chIdent(rawAlias(name + '_rt'));
       // Le champ runtime vaut NULL s’il lit une colonne Nullable, ou quand le script n’émet rien
-      if (mayBeNull(ctx, r.sql) || /\bNULL\b/.test(r.sql.replace(/'(?:[^'\\]|\\.)*'/g, "''"))) ctx.nullableCols.add(r.alias);
-      if (new RegExp('(^|[^A-Za-z0-9_])' + escRe(r.alias) + '($|[^A-Za-z0-9_])').test(out.sql)) r.alias = chIdent(rawAlias(name + '_rt'));
+      r.nullable = mayBeNull(ctx, r.sql) || /\bNULL\b/.test(r.sql.replace(/'(?:[^'\\]|\\.)*'/g, "''"));
+      if (r.nullable) ctx.nullableCols.add(r.alias);
       ctx.stats.ok++; H(ctx, 'runtime', name);
-      const chType = { keyword: 'String', long: 'Int64', double: 'Float64', date: 'DateTime64(3)', boolean: 'Bool', ip: 'String' }[def.type] || 'String';
-      ctx.notes.add('opt', `Matérialiser « ${name} »`, 'Un champ runtime est recalculé à chaque requête. Stocké comme colonne MATERIALIZED, il est calculé une fois à l’insertion et peut être indexé.', `ALTER TABLE ${table}\n    ADD COLUMN ${r.alias} Nullable(${chType}) MATERIALIZED ${r.sql};`);
     } catch (e) {
       r.sql = `NULL /* à traduire : ${e.message.replace(/\*\//g, '')} */`;
       ctx.stats.ko++; ctx.notes.add('err', `Champ runtime « ${name} » non traduit`, `Painless : ${e.message}.`, src);
@@ -1455,6 +1575,16 @@ function translateRequest(input, cfg, opts, columns) {
   if (statements.some(s => /IN \(\n/.test(s.sql))) ctx.notes.add('info', 'Top N imbriqués', 'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits par une sous-requête IN puis LIMIT n BY, avec des comptes exacts là où Elasticsearch les estime par shard.');
   const sql = statements.map(s => `-- ${s.title}\n${withClause(ctx, s.sql)};`).join('\n\n');
   const statementsOut = statements.map(s => ({ title: s.title, sql: withClause(ctx, s.sql) }));
+  // Champs runtime : conseil de matérialisation, avec un index quand le champ sert de filtre
+  for (const r of Object.values(ctx.runtime)) {
+    if (!r.tree) continue;
+    const chType = { keyword: 'String', long: 'Int64', double: 'Float64', date: 'DateTime64(3)', boolean: 'Bool', ip: 'String' }[r.type] || 'String';
+    const column = `ALTER TABLE ${table}\n    ADD COLUMN ${r.alias} ${r.nullable ? `Nullable(${chType})` : chType} MATERIALIZED ${r.sql};`;
+    const bare = r.alias.replace(/`/g, '');
+    const index = `ALTER TABLE ${table}\n    ADD INDEX idx_${bare} ${r.alias} TYPE bloom_filter GRANULARITY 4;\nALTER TABLE ${table} MATERIALIZE INDEX idx_${bare};`;
+    if (r.filtered) ctx.notes.add('opt', `Matérialiser et indexer « ${r.name} »`, 'Ce champ runtime sert de filtre. Calculé à la volée, il oblige ClickHouse à lire chaque ligne : ni la clé de tri ni les index ne peuvent l’aider, ce qui pèse d’autant plus qu’il est comparé à une longue liste. Stocké comme colonne MATERIALIZED, il est calculé une fois à l’insertion ; un index de saut permet alors d’écarter des blocs entiers.', `${column}\n${index}`);
+    else ctx.notes.add('opt', `Matérialiser « ${r.name} »`, 'Un champ runtime est recalculé à chaque requête. Stocké comme colonne MATERIALIZED, il est calculé une fois à l’insertion et peut être indexé.', column);
+  }
   // Listes nommées : la table à créer et les lignes à y insérer accompagnent le SQL
   const lists = [...ctx.lists.values()].map(l => {
     const rows = l.values.map(v => `(${chStr(l.name)}, ${l.integers ? `'${v}'` : v})`);

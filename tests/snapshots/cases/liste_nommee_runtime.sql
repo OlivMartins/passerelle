@@ -10,7 +10,6 @@ SELECT
     sum(count()) OVER (PARTITION BY svc) AS svc_doc_count
 FROM logs.events
 WHERE hote NOT IN (SELECT value FROM logs.passerelle_lists WHERE name = 'l_9d8e1e49ee4e')
-  AND isNotNull(hote)
   AND service IN (
     SELECT
         service AS svc

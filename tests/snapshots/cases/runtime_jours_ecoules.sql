@@ -7,7 +7,6 @@ SELECT
     reste AS r,
     count() AS doc_count
 FROM logs.events
-WHERE isNotNull(reste)
 GROUP BY r
 ORDER BY r ASC
 LIMIT 10;

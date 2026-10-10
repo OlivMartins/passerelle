@@ -7,7 +7,6 @@ SELECT
     b,
     count() AS doc_count
 FROM logs.events
-WHERE isNotNull(b)
 GROUP BY b
 ORDER BY b ASC
 LIMIT 40;

@@ -20,6 +20,8 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Modifié
 
+- Filtre sur un champ runtime de classification (un script qui émet une constante par branche) : il est réécrit sur les colonnes sources. `classe = 'lent'` devient `latency_ms >= 1000`, ce qui rend la clé de tri et les index utilisables. Quand le script ne s’y prête pas, la remarque de matérialisation propose aussi un index de saut.
+- Un champ runtime qui émet toujours une valeur n’ajoute plus de `isNotNull()` au regroupement, et son DDL de matérialisation n’est plus `Nullable`.
 - Les égalités sur une même colonne reliées par `OR` (série de `should`, `dis_max`, `query_string`) sont réunies en un seul `IN`. Une série de motifs `*texte*` sur un même champ devient un `multiSearchAny`.
 - Agrégation `composite` : le curseur `after` est une condition `WHERE` écrite clé par clé (`k1 > v1 OR (k1 = v1 AND k2 > v2) …`) et non plus une comparaison de tuples en `HAVING`. ClickHouse peut ainsi la confronter à la clé de tri de la table : 112 granules lus sur 3 125 dans l’essai, contre 3 125.
 - Les calculs de date précisent désormais le fuseau `'UTC'` dans le SQL (`toStartOfDay(now('UTC') - INTERVAL 7 DAY)`, `toHour(timestamp, 'UTC')`), parce qu’Elasticsearch calcule en UTC alors que ClickHouse suit le fuseau du serveur. La nouvelle option `clickhouse.timezone: UTC` déclare un serveur et des colonnes en UTC : le SQL retrouve alors sa forme courte.

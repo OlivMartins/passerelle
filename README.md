@@ -109,7 +109,6 @@ FROM logs.events
 WHERE timestamp >= toStartOfDay(now('UTC') - INTERVAL 7 DAY)
   AND hasTokenCaseInsensitive(message, 'timeout')
   AND env != 'staging'
-  AND isNotNull(heure)
 GROUP BY par_heure
 ORDER BY doc_count DESC, par_heure ASC
 LIMIT 24;

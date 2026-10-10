@@ -7,7 +7,6 @@ SELECT
     quart AS q,
     count() AS doc_count
 FROM logs.events
-WHERE isNotNull(quart)
 GROUP BY q
 ORDER BY q ASC
 LIMIT 10;

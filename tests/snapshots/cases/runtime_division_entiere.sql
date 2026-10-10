@@ -7,7 +7,6 @@ SELECT
     tranche AS b,
     count() AS doc_count
 FROM logs.events
-WHERE isNotNull(tranche)
 GROUP BY b
 ORDER BY b ASC
 LIMIT 40;

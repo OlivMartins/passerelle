@@ -775,7 +775,8 @@ function painlessToSQL(ctx, src, o) {
   o = o || {};
   const prog = pparse(String(src));
   const r = pexec(ctx, prog, {}, o);
-  return { sql: prender(r), ty: prType(r) };
+  // tree : l’arbre de décision du script (conditions et valeurs émises), dont un filtre peut remonter les branches
+  return { sql: prender(r), ty: prType(r), tree: r };
 }
 
 /* ---------- Lucene (query_string) ---------- */

@@ -8,7 +8,6 @@ SELECT
     count() AS doc_count
 FROM logs.events
 WHERE timestamp < parseDateTime64BestEffort('2026-03-08T03:00:00Z', 3, 'UTC')
-  AND isNotNull(heure)
 GROUP BY h
 ORDER BY h ASC
 LIMIT 24;
