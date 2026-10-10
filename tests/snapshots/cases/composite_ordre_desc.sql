@@ -3,7 +3,7 @@
 -- Agrégation c
 SELECT
     service AS svc,
-    env AS env,
+    env,
     level AS lvl,
     status AS st,
     count() AS doc_count

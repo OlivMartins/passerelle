@@ -9,6 +9,8 @@
  *                'raison'                       quel que soit le schéma et le fuseau
  *                { N: 'raison' }                seulement avec le schéma Nullable (D : valeurs par défaut)
  *                { '@Europe/Paris': 'raison' }  seulement quand le serveur ClickHouse est dans ce fuseau
+ *   unsupported  construction valide pour Elasticsearch mais hors de portée de la traduction : le cas
+ *              réussit si elle est déclarée « à reprendre » et si le SQL s’arrête au lieu de répondre
  *   tz         fuseaux du serveur ClickHouse à essayer (défaut : UTC seul)
  *   composite  nom de l’agrégation composite à paginer jusqu’au bout des deux côtés
  *   tol        tolérance relative pour les mesures approchées (cardinality, percentiles)
@@ -26,6 +28,9 @@ export const CASES = [
   /* ---------- Regroupements ---------- */
   { id: 'agg_terms_metriques', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { lat: { avg: { field: 'latency_ms' } }, mx: { max: { field: 'bytes' } } } } } } },
   { id: 'agg_terms_nom_du_champ', dsl: { size: 0, aggs: { service: { terms: { field: 'service' } } } } },
+  // Agrégations nommées comme une colonne citée ailleurs dans la requête : l’alias ne doit pas la masquer
+  { id: 'agg_alias_masque_colonne', dsl: { size: 0, query: { term: { host: 'web-1' } }, aggs: { host: { terms: { field: 'service' } } } } },
+  { id: 'agg_metrique_nom_du_champ', dsl: { size: 0, query: { range: { bytes: { gte: 50000 } } }, aggs: { svc: { terms: { field: 'service' }, aggs: { bytes: { sum: { field: 'bytes' } }, moy: { avg: { field: 'bytes' } } } } } } },
   { id: 'agg_terms_imbriques', dsl: { size: 0, aggs: { svc: { terms: { field: 'service', size: 3 }, aggs: { h: { terms: { field: 'host', size: 2 }, aggs: { lat: { avg: { field: 'latency_ms' } } } } } } } } },
   { id: 'agg_terms_3_niveaux', dsl: { size: 0, aggs: { svc: { terms: { field: 'service', size: 3 }, aggs: { lvl: { terms: { field: 'level', size: 2 }, aggs: { st: { terms: { field: 'status', size: 2 } } } } } } } } },
   { id: 'agg_terms_tri_metrique', dsl: { size: 0, aggs: { h: { terms: { field: 'host', size: 5, order: { lat: 'desc' } }, aggs: { lat: { avg: { field: 'latency_ms' } } } } } } },
@@ -65,7 +70,7 @@ export const CASES = [
   { id: 'pipeline_moving_max', known: 'sur une fenêtre vide, Elasticsearch renvoie null', dsl: perDay({ s: { sum: { field: 'bytes' } }, mv: { moving_fn: { buckets_path: 's', window: 2, script: 'MovingFunctions.max(values)' } } }) },
   { id: 'pipeline_max_bucket', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { s: { sum: { field: 'bytes' } } } }, mx: { max_bucket: { buckets_path: 'svc>s' } } } } },
   { id: 'pipeline_bucket_selector', dsl: { size: 0, aggs: { h: { terms: { field: 'host', size: 20 }, aggs: { lat: { avg: { field: 'latency_ms' } }, garde: { bucket_selector: { buckets_path: { v: 'lat' }, script: 'params.v > 1500' } } } } } } },
-  { id: 'pipeline_bucket_sort', known: 'le tri écrit { champ: { order } } n’est pas compris : erreur SQL', dsl: { size: 0, aggs: { h: { terms: { field: 'host', size: 20 }, aggs: { lat: { avg: { field: 'latency_ms' } }, top: { bucket_sort: { sort: [{ lat: { order: 'desc' } }], size: 3 } } } } } } },
+  { id: 'pipeline_bucket_sort', dsl: { size: 0, aggs: { h: { terms: { field: 'host', size: 20 }, aggs: { lat: { avg: { field: 'latency_ms' } }, top: { bucket_sort: { sort: [{ lat: { order: 'desc' } }], size: 3 } } } } } } },
 
   /* ---------- Filtres ---------- */
   { id: 'filtre_bool_documents', dsl: { size: 20, sort: [{ [TS]: 'desc' }], query: { bool: { filter: [{ term: { level: 'ERROR' } }, { range: { status: { gte: 500 } } }] } } } },
@@ -74,7 +79,13 @@ export const CASES = [
   { id: 'filtre_regexp', dsl: total({ regexp: { host: 'web-[1-3]' } }) },
   { id: 'filtre_term_insensible', dsl: total({ term: { service: { value: 'search', case_insensitive: true } } }) },
   { id: 'filtre_query_string', dsl: total({ query_string: { query: 'status:[500 TO 599] AND NOT service:api AND message:timeout' } }) },
-  { id: 'filtre_query_string_invalide', known: 'Elasticsearch refuse la requête (HTTP 400) ; la traduction en garde le début sans rien signaler', dsl: total({ query_string: { query: 'status:500) AND service:api' } }) },
+  // Requêtes qu’Elasticsearch refuse (HTTP 400) : la traduction doit les refuser ou les déclarer « à reprendre »
+  { id: 'filtre_query_string_invalide', dsl: total({ query_string: { query: 'status:500) AND service:api' } }) },
+  { id: 'filtre_query_string_operateur_double', dsl: total({ query_string: { query: 'status:500 OR OR status:404' } }) },
+  { id: 'filtre_query_string_guillemet', dsl: total({ query_string: { query: '"connection reset' } }) },
+  { id: 'requete_size_invalide', dsl: { size: '10; DROP TABLE x' } },
+  // Clause valide pour Elasticsearch mais hors de portée : la traduction doit s’arrêter, pas renvoyer un résultat faux
+  { id: 'filtre_clause_non_traduite', unsupported: 'more_like_this', dsl: total({ bool: { must_not: [{ more_like_this: { fields: ['message'], like: 'timeout', min_term_freq: 1, min_doc_freq: 1 } }] } }) },
   { id: 'filtre_liste_terms', dsl: total({ bool: { filter: [{ terms: { host: ['web-1', 'web-2', 'web-3', 'Web-A', 'élan-1', 'inconnu'] } }], must_not: [{ terms: { status: [404, 503] } }] } }) },
   { id: 'filtre_liste_should', dsl: total({ bool: { should: [{ match_phrase: { host: 'web-1' } }, { match_phrase: { host: 'web-2' } }, { term: { host: 'db_01' } }, { terms: { host: ['Web-A', 'web-6'] } }], minimum_should_match: 1 } }) },
   { id: 'filtre_should_minimum', known: { N: 'une condition sur une colonne NULL rend toute la somme NULL' }, dsl: total({ bool: { should: [{ term: { env: 'prod' } }, { term: { level: 'ERROR' } }, { range: { latency_ms: { gte: 2000 } } }], minimum_should_match: 2 } }) },
@@ -105,7 +116,14 @@ export const CASES = [
   { id: 'texte_match_decimal', known: 'pour Elasticsearch « 3.14s » est un seul mot ; la traduction cherche 3 OU 14', dsl: total({ match: { message: '3.14' } }) },
   { id: 'texte_match_phrase', known: 'la phrase est cherchée comme sous-chaîne exacte : « connection-reset » et les espaces multiples sont manqués', dsl: total({ match_phrase: { message: 'connection reset' } }) },
   { id: 'texte_phrase_prefixe', known: 'la phrase est cherchée comme sous-chaîne exacte : « connection-reset » et les espaces multiples sont manqués', dsl: total({ match_phrase_prefix: { message: 'connection res' } }) },
-  { id: 'texte_simple_query_string', known: 'dans simple_query_string « -mot » se combine par OU (opérateur par défaut) ; la traduction le combine par ET', dsl: total({ simple_query_string: { query: 'timeout -upstream', fields: ['message'] } }) },
+  // simple_query_string : opérateurs appliqués de gauche à droite, négation combinée par l’opérateur par défaut, rien n’est refusé
+  { id: 'texte_sqs_negation', dsl: total({ simple_query_string: { query: 'timeout -upstream', fields: ['message'] } }) },
+  { id: 'texte_sqs_ou', dsl: total({ simple_query_string: { query: 'timeout | reset', fields: ['message'] } }) },
+  { id: 'texte_sqs_et', dsl: total({ simple_query_string: { query: 'timeout +upstream', fields: ['message'] } }) },
+  { id: 'texte_sqs_groupe', dsl: total({ simple_query_string: { query: '(timeout | reset) +upstream', fields: ['message'] } }) },
+  { id: 'texte_sqs_parenthese_en_trop', dsl: total({ simple_query_string: { query: 'timeout) reset', fields: ['message'] } }) },
+  { id: 'texte_sqs_operateur_et', dsl: total({ simple_query_string: { query: 'upstream timeout -reset', fields: ['message'], default_operator: 'and' } }) },
+  { id: 'texte_sqs_flou', dsl: total({ simple_query_string: { query: 'conection~1', fields: ['message'] } }) },
 
   /* ---------- Tri et pagination des documents ---------- */
   { id: 'tri_search_after', dsl: { size: 10, sort: [{ [TS]: 'desc' }], search_after: [T10] } },
@@ -117,7 +135,7 @@ export const CASES = [
   { id: 'runtime_classe', dsl: { size: 0, runtime_mappings: { classe: { type: 'keyword', script: CLASSE } }, query: { term: { classe: 'lent' } }, aggs: { svc: { terms: { field: 'service' } }, c: { terms: { field: 'classe' } } } } },
   { id: 'runtime_liste_noire', dsl: { size: 0, runtime_mappings: { classe: { type: 'keyword', script: CLASSE }, hote: { type: 'keyword', script: "emit(doc['host'].value.toLowerCase())" } }, query: { bool: { filter: [{ terms: { classe: ['normal', 'lent'] } }], must_not: [{ terms: { hote: ['web-1', 'web-a', 'db_01'] } }] } }, aggs: { h: { terms: { field: 'hote', size: 20 } } } } },
   { id: 'runtime_division_entiere', known: 'la division de deux entiers est entière en Painless, décimale dans ClickHouse', dsl: { size: 0, runtime_mappings: { tranche: { type: 'long', script: "emit(doc['latency_ms'].value / 100)" } }, aggs: { b: { terms: { field: 'tranche', size: 40, order: { _key: 'asc' } } } } } },
-  { id: 'runtime_alias_agregation', known: 'une agrégation qui porte le nom du champ runtime produit un alias cyclique : erreur SQL', dsl: { size: 0, runtime_mappings: { b: { type: 'long', script: "emit(doc['status'].value)" } }, aggs: { b: { terms: { field: 'b', size: 40, order: { _key: 'asc' } } } } } },
+  { id: 'runtime_alias_agregation', dsl: { size: 0, runtime_mappings: { b: { type: 'long', script: "emit(doc['status'].value)" } }, aggs: { b: { terms: { field: 'b', size: 40, order: { _key: 'asc' } } } } } },
   { id: 'runtime_heure_fuseau', tz: PARIS, known: { '@Europe/Paris': 'getHour() est en UTC dans Elasticsearch ; toHour() suit le fuseau du serveur' }, dsl: { size: 0, runtime_mappings: { heure: { type: 'long', script: "emit(doc['@timestamp'].value.getHour())" } }, query: { range: { [TS]: { lt: '2026-03-08T03:00:00Z' } } }, aggs: { h: { terms: { field: 'heure', size: 24, order: { _key: 'asc' } } } } } },
 
   /* ---------- Agrégation composite, paginée jusqu’au bout ---------- */

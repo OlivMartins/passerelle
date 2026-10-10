@@ -7,8 +7,8 @@
  *   node scripts/test.mjs            compare
  *   node scripts/test.mjs --update   réécrit les instantanés après un changement voulu
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { join, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CASES } from '../tests/differential/cases.mjs';
 import { INDEX, configOverride } from '../tests/differential/dataset.mjs';
@@ -29,7 +29,7 @@ const check = (ok, label, detail) => {
 };
 
 /* ---------- Instantanés ---------- */
-const snapshots = { total: 0, different: 0 };
+const snapshots = { total: 0, different: 0, seen: new Set() };
 // En-tête d’un instantané : la couverture annoncée et les remarques « à vérifier » / « à reprendre »
 function withHeader(r, mark) {
   const lines = [`${mark} Couverture : ${r.stats.ok} directs, ${r.stats.approx} à vérifier, ${r.stats.ko} à reprendre`];
@@ -39,6 +39,7 @@ function withHeader(r, mark) {
 function snapshot(rel, content) {
   const file = join(ROOT, 'tests/snapshots', rel);
   snapshots.total++;
+  snapshots.seen.add(rel);
   if (UPDATE) { mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, content); return; }
   const expected = existsSync(file) ? readFileSync(file, 'utf8') : null;
   if (expected === content) return;
@@ -68,8 +69,35 @@ for (const c of CASES) {
   const r = E.translateDSL(JSON.stringify(c.dsl), benchConfig, { index: INDEX });
   snapshot(`cases/${c.id}.sql`, r.error ? `-- Erreur : ${r.error}\n` : withHeader(r, '--') + r.sql + '\n');
 }
+// Un instantané sans cas ni exemple correspondant est un reste : supprimé par --update, signalé sinon
+for (const rel of readdirSync(join(ROOT, 'tests/snapshots'), { recursive: true }).map(p => p.split(sep).join('/'))) {
+  if (!/\.(sql|yaml)$/.test(rel) || snapshots.seen.has(rel)) continue;
+  if (UPDATE) rmSync(join(ROOT, 'tests/snapshots', rel));
+  else { snapshots.different++; check(false, `instantané ${rel}`, 'aucun cas ni exemple ne lui correspond'); }
+}
 if (!UPDATE) check(snapshots.different === 0, `${snapshots.total} instantanés comparés`, snapshots.different ? `${snapshots.different} différents (détail ci-dessus) ; si le changement est voulu : npm run test:update` : '');
 else process.stdout.write(`${snapshots.total} instantanés écrits dans tests/snapshots\n`);
+
+/* ---------- Garde-fous ---------- */
+const tr = dsl => E.translateDSL(JSON.stringify(dsl), benchConfig, { index: INDEX });
+// Des conditions successives doublent le SQL à chaque « if » : le script doit être déclaré à reprendre, vite et sans SQL démesuré
+const branchy = 'def x = 0; ' + Array.from({ length: 30 }, (_, i) => `if (doc['a'].value > ${i}) { x = x + ${i}; }`).join(' ') + ' emit(x);';
+const started = Date.now();
+const capped = tr({ size: 0, runtime_mappings: { r: { type: 'long', script: branchy } }, aggs: { b: { terms: { field: 'r' } } } });
+check(capped.stats.ko === 1 && Date.now() - started < 2000 && capped.sql.length < 5000, 'script Painless trop ramifié : déclaré à reprendre, sans explosion du SQL');
+// Un nombre invalide est refusé, jamais recopié dans le SQL
+check(/size/.test(tr({ size: '10; DROP TABLE x' }).error || ''), 'size invalide : traduction refusée');
+const badInterval = tr({ size: 0, aggs: { h: { histogram: { field: 'latency_ms', interval: '1) + sleep(3' } } } });
+check(badInterval.stats.ko === 1 && !/sleep/.test(badInterval.sql), 'intervalle invalide : agrégation à reprendre, rien n’est recopié');
+const badPoint = tr({ query: { geo_distance: { distance: '5km', loc: { lat: '0) OR 1=1 --', lon: 2 } } } });
+check(/latitude/.test(badPoint.error || ''), 'coordonnée invalide : traduction refusée');
+// Un nom de clause inconnu reste dans une chaîne SQL échappée
+const odd = tr({ query: { "x') OR 1=1 --": {} } });
+check(odd.stats.ko === 1 && odd.sql.includes("throwIf(1, 'Passerelle : x\\') OR 1=1 -- à traduire')"), 'clause inconnue : nom échappé, requête arrêtée par throwIf');
+// query_string mal formée : à reprendre, comme Elasticsearch la refuse
+for (const q of ['status:500) AND service:api', 'status:(500', '(status:500', 'status:500 OR OR status:404', '"connection reset', 'status:[500 TO', 'timeout AND']) {
+  check(tr({ query: { query_string: { query: q } } }).stats.ko === 1, `query_string mal formée déclarée à reprendre : ${q}`);
+}
 
 // Les secrets passent par des variables d’environnement, jamais par la configuration générée
 const ls = E.translateLogstash(rd('examples/logstash/routage.conf'), E.DEFAULT_CONFIG);

@@ -183,8 +183,10 @@ function compareRows(esRows, chRows, tol) {
   const keyNames = [...new Set(esRows.flatMap(r => Object.keys(r.keys)))];
   const metricNames = [...new Set(esRows.flatMap(r => Object.keys(r.m)))];
   const keyOf = get => JSON.stringify(keyNames.map(k => normKey(get(k))));
+  // Une agrégation qui porte le nom d’une colonne citée par la requête est suffixée _agg par la traduction
+  const col = (row, name) => (name in row || !(`${name}_agg` in row) ? row[name] : row[`${name}_agg`]);
   const esKeys = esRows.map(r => keyOf(k => r.keys[k]));
-  const chKeys = chRows.map(r => keyOf(k => r[k]));
+  const chKeys = chRows.map(r => keyOf(k => col(r, k)));
   const chByKey = new Map(chKeys.map((k, i) => [k, chRows[i]]));
   const esSet = new Set(esKeys);
   const missing = esKeys.filter(k => !chByKey.has(k));
@@ -194,7 +196,7 @@ function compareRows(esRows, chRows, tol) {
     const c = chByKey.get(esKeys[i]);
     if (!c) return;
     if (!same(r.doc_count, c.doc_count)) diffs.push(`${esKeys[i]} doc_count ES ${r.doc_count} / CH ${c.doc_count}`);
-    for (const m of metricNames) if (!same(r.m[m], c[m], tol)) diffs.push(`${esKeys[i]} ${m} ES ${short(r.m[m])} / CH ${short(c[m])}`);
+    for (const m of metricNames) if (!same(r.m[m], col(c, m), tol)) diffs.push(`${esKeys[i]} ${m} ES ${short(r.m[m])} / CH ${short(col(c, m))}`);
   });
   const common = new Set(esKeys.filter(k => chByKey.has(k)));
   const sameOrder = JSON.stringify(esKeys.filter(k => common.has(k))) === JSON.stringify(chKeys.filter(k => common.has(k)));
@@ -259,6 +261,13 @@ async function runCase(c, ctx) {
   if (r.status !== 200) {
     // Elasticsearch refuse la requête : la traduction doit le signaler (« à reprendre »), pas produire un SQL silencieux
     return t.stats.ko ? { verdict: '=', detail: `refusée des deux côtés : ${esError(r)}`, t } : { verdict: 'ES✗', detail: `${esError(r)} — la traduction produit pourtant du SQL sans rien signaler`, t };
+  }
+  if (c.unsupported) {
+    // Construction hors de portée : la traduction doit la déclarer « à reprendre » et le SQL doit s’arrêter
+    // sur le message de Passerelle, au lieu de renvoyer un résultat.
+    const errors = t.statements.map(s => query(ctx.dir, s.sql, ctx.tz).error || '');
+    const stopped = t.stats.ko > 0 && errors.some(e => /Passerelle : .* à traduire/.test(e));
+    return { verdict: stopped ? '=' : '≠', detail: stopped ? 'déclarée à reprendre, le SQL s’arrête' : `attendu : à reprendre et SQL arrêté ; obtenu ko=${t.stats.ko}, ${errors.join(' | ') || 'exécution sans erreur'}`, t };
   }
   const defs = c.dsl.aggs || c.dsl.aggregations || {};
   const diffs = [];

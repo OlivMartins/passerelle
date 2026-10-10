@@ -2,7 +2,7 @@
 
 -- Agrégation c
 SELECT
-    env AS env,
+    env,
     service AS svc,
     count() AS doc_count
 FROM logs.events

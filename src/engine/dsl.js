@@ -64,10 +64,11 @@ function mapField(ctx, field) {
     ctx.notes.add('info', 'Suffixe .keyword retiré', `« ${name} » devient « ${base} » : ClickHouse stocke la valeur brute, sans sous-champ analysé.`);
     name = base;
   }
-  if (ctx.runtime[name] && !ctx.runtime[name].busy) return ctx.runtime[name].alias;
+  if (ctx.runtime[name] && !ctx.runtime[name].busy) { ctx.columns.add(ctx.runtime[name].alias); return ctx.runtime[name].alias; }
   const fm = ctx.cfg.clickhouse.field_mapping || {};
   if (Object.prototype.hasOwnProperty.call(fm, name) && fm[name]) name = fm[name];
   if (name === '_id') ctx.notes.add('warn', 'Champ _id', 'Elasticsearch génère _id ; dans ClickHouse il faut une colonne équivalente (par ex. un UUID ou un identifiant métier).');
+  ctx.columns.add(name);
   return chIdent(name);
 }
 function isTextField(ctx, field) {
@@ -83,7 +84,10 @@ function hasTok(f, t) { return `hasTokenCaseInsensitive(${f}, ${chStr(t)})`; }
 function todo(ctx, what, detail) {
   ctx.stats.ko++;
   ctx.notes.add('err', `${what} non traduit`, detail);
-  return `1 /* à traduire : ${what} */`;
+  // Une clause non traduite ne doit pas laisser un SQL qui s’exécute et renvoie un résultat faux
+  // (dans un must_not, l’ancien « 1 » écartait toutes les lignes) : throwIf arrête la requête
+  // avec un message explicite, y compris sous EXPLAIN.
+  return `throwIf(1, ${chStr(`Passerelle : ${what} à traduire`)})`;
 }
 function fieldEntry(body) {
   const k = Object.keys(body).find(x => !['boost', '_name', 'queryName'].includes(x));
@@ -328,11 +332,13 @@ function tq(ctx, q) {
     }
     case 'query_string': case 'simple_query_string': {
       const defFields = body.default_field ? (body.default_field === '*' ? textFieldsOr(ctx) : [body.default_field]) : body.fields ? body.fields.map(f => String(f).replace(/\^[\d.]+$/, '')) : textFieldsOr(ctx);
+      const simple = type === 'simple_query_string';
       let ast;
-      try { ast = luceneParse(body.query, body.default_operator); }
+      try { ast = simple ? simpleQueryParse(body.query, body.default_operator) : luceneParse(body.query, body.default_operator); }
       catch (e) { return todo(ctx, 'query_string', `${e.message} — requête : ${body.query}`); }
+      if (ast === null) { ctx.stats.ok++; return 'false'; }
       ctx.cap.push([]);
-      const out = luceneSQL(ctx, ast, defFields);
+      const out = luceneSQL(ctx, ast, defFields, simple ? (c, f, tok) => simpleLeaf(c, f, tok, body.default_operator) : luceneLeaf);
       ctx.cap.pop();
       H(ctx, 'text', `la recherche « ${body.query} » est satisfaite`);
       return out;
@@ -359,6 +365,7 @@ function tq(ctx, q) {
       const field = Object.keys(body).find(k => !['distance', 'distance_type', 'validation_method', '_name', 'boost', 'ignore_unmapped'].includes(k));
       let pt = body[field]; let lat, lon;
       if (Array.isArray(pt)) [lon, lat] = pt; else if (isObj(pt)) ({ lat, lon } = pt); else if (typeof pt === 'string') [lat, lon] = pt.split(',').map(Number);
+      lat = chNum(lat, 'geo_distance (latitude)'); lon = chNum(lon, 'geo_distance (longitude)');
       const m = /^([\d.]+)\s*(km|m|mi|yd|ft)?$/.exec(String(body.distance));
       const meters = m ? +m[1] * ({ km: 1000, m: 1, mi: 1609.344, yd: 0.9144, ft: 0.3048 }[m[2] || 'm']) : 0;
       const f = mapField(ctx, field); ctx.stats.approx++;
@@ -370,12 +377,20 @@ function tq(ctx, q) {
       return todo(ctx, type, `La clause « ${type} » n’a pas d’équivalent automatique en SQL.`);
   }
 }
-function luceneSQL(ctx, n, defFields) {
-  if (n.op === 'and') return andJoin(n.a.map(x => luceneSQL(ctx, x, defFields)));
-  if (n.op === 'or') return orJoin(n.a.map(x => luceneSQL(ctx, x, defFields)));
-  if (n.op === 'not') { const s = luceneSQL(ctx, n.a[0], defFields); return s === null ? 'false' : negate(s); }
+function luceneSQL(ctx, n, defFields, leaf) {
+  if (n.op === 'and') return andJoin(n.a.map(x => luceneSQL(ctx, x, defFields, leaf)));
+  if (n.op === 'or') return orJoin(n.a.map(x => luceneSQL(ctx, x, defFields, leaf)));
+  if (n.op === 'not') { const s = luceneSQL(ctx, n.a[0], defFields, leaf); return s === null ? 'false' : negate(s); }
   const fields = n.field ? [n.field] : defFields;
-  return orJoin(fields.map(f => luceneLeaf(ctx, f, n.tok)));
+  return orJoin(fields.map(f => leaf(ctx, f, n.tok)));
+}
+// Terme d’une requête simple_query_string : pas de syntaxe champ:valeur, d’intervalle ni de joker interne
+function simpleLeaf(ctx, field, tok, defaultOp) {
+  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.v } });
+  if (tok.t === 'fuzzy') return tq(ctx, { fuzzy: { [field]: tok.n === null ? { value: tok.v } : { value: tok.v, fuzziness: tok.n } } });
+  if (tok.t === 'prefix') return tq(ctx, { wildcard: { [field]: { value: tok.v + '*' } } });
+  if (isTextField(ctx, field)) return tq(ctx, { match: { [field]: { query: tok.v, operator: defaultOp || 'or' } } });
+  return tq(ctx, { term: { [field]: /^-?\d+(\.\d+)?$/.test(tok.v) ? Number(tok.v) : tok.v } });
 }
 function luceneLeaf(ctx, field, tok) {
   if (field === '_exists_') return tq(ctx, { exists: { field: tok.v } });
@@ -425,7 +440,23 @@ const FIXED_UNIT = { ms: 'MILLISECOND', s: 'SECOND', m: 'MINUTE', h: 'HOUR', d: 
 const FIXED_FR = { ms: 'ms', s: 's', m: 'min', h: 'h', d: 'j' };
 const aggType = def => Object.keys(def).find(k => !['aggs', 'aggregations', 'meta'].includes(k));
 const aggChildren = def => def.aggs || def.aggregations || {};
-function aliasOf(name) { return chIdent(String(name).replace(/[^A-Za-z0-9_]/g, '_').replace(/^(\d)/, '_$1')); }
+/*
+ * Alias de colonne de résultat.
+ *
+ * ClickHouse préfère un alias de SELECT à la colonne du même nom, dans toute la requête. Une agrégation
+ * « host » posée sur le champ service donnerait « service AS host » : un filtre WHERE host = … porterait
+ * alors sur service, en silence. De même sum(bytes) AS bytes rend illégal tout autre usage de bytes.
+ * Un alias qui porte le nom d’une colonne citée par la requête reçoit donc le suffixe _agg.
+ * translateDSL relève ces colonnes par une première passe, puis traduit pour de bon.
+ */
+const aliasGuard = { columns: new Set(), renamed: new Map() };
+function rawAlias(name) { return String(name).replace(/[^A-Za-z0-9_]/g, '_').replace(/^(\d)/, '_$1'); }
+function aliasOf(name) {
+  const raw = rawAlias(name);
+  if (!aliasGuard.columns.has(raw)) return chIdent(raw);
+  aliasGuard.renamed.set(String(name), `${raw}_agg`);
+  return chIdent(`${raw}_agg`);
+}
 
 function valueExpr(ctx, body) {
   let e;
@@ -460,13 +491,13 @@ function metricDef(ctx, name, type, body) {
     }
     case 'percentiles': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
-      const ps = (body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => +(p / 100).toFixed(4));
+      const ps = (body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => +(chNum(p, 'percentiles.percents') / 100).toFixed(4));
       ctx.notes.add('info', 'percentiles → quantilesTDigest()', 'Même algorithme (t-digest) qu’Elasticsearch : résultats comparables. Le résultat est un tableau dans l’ordre des percentiles demandés.');
       return [{ alias: A, render: c => (c ? `quantilesTDigestIf(${ps.join(', ')})(${x}, ${c})` : `quantilesTDigest(${ps.join(', ')})(${x})`) }];
     }
     case 'percentile_ranks': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
-      return (body.values || []).map(v => ({ alias: aliasOf(`${name}_${String(v).replace(/\W/g, '_')}`), render: c => (c ? `round(100 * countIf(${pArg(x)} <= ${v} AND ${c}) / countIf(${x}, ${c}), 3)` : `round(100 * countIf(${pArg(x)} <= ${v}) / count(${x}), 3)`) }));
+      return (body.values || []).map(v => chNum(v, 'percentile_ranks.values')).map(v => ({ alias: aliasOf(`${name}_${String(v).replace(/\W/g, '_')}`), render: c => (c ? `round(100 * countIf(${pArg(x)} <= ${v} AND ${c}) / countIf(${x}, ${c}), 3)` : `round(100 * countIf(${pArg(x)} <= ${v}) / count(${x}), 3)`) }));
     }
     case 'weighted_avg': {
       ctx.stats.ok++; const v = valueExpr(ctx, body.value || {}); const w = valueExpr(ctx, body.weight || {});
@@ -486,7 +517,7 @@ function metricDef(ctx, name, type, body) {
     }
     default:
       todo(ctx, `agrégation ${type}`, `« ${name} » (${type}) n’a pas d’équivalent automatique.`);
-      return [{ alias: A, render: () => `NULL /* à traduire : ${type} */` }];
+      return [{ alias: A, render: () => `NULL /* à traduire : ${chComment(type)} */` }];
   }
 }
 function resolveBucketsPath(level, path) {
@@ -498,21 +529,30 @@ function resolveBucketsPath(level, path) {
   const m = level.metrics.find(x => x.alias === aliasOf(`${clean}_${sub}`)) || level.metrics.find(x => x.alias === aliasOf(clean));
   return m ? m.alias : aliasOf(clean);
 }
+// Accepte les trois écritures d’Elasticsearch : "champ", { champ: "desc" } et { champ: { order: "desc" } }
 function parseOrder(order, def) {
   if (!order) return def;
-  const arr = Array.isArray(order) ? order : Object.entries(order).map(([k, v]) => ({ [k]: v }));
-  return arr.map(o => { const k = Object.keys(o)[0]; return { by: k === '_term' ? '_key' : k, dir: String(o[k]).toLowerCase() }; });
+  const arr = Array.isArray(order) ? order : typeof order === 'string' ? [order] : Object.entries(order).map(([k, v]) => ({ [k]: v }));
+  return arr.map(o => {
+    if (typeof o === 'string') return { by: o === '_term' ? '_key' : o, dir: 'asc' };
+    const k = Object.keys(o)[0];
+    const dir = String(isObj(o[k]) ? o[k].order || 'asc' : o[k]).toLowerCase();
+    if (dir !== 'asc' && dir !== 'desc') throw new Error(`sens de tri inconnu pour ${k} : ${JSON.stringify(o[k])}`);
+    return { by: k === '_term' ? '_key' : k, dir };
+  });
 }
 function buildLevel(ctx, name, def) {
   const type = aggType(def); const body = def[type] || {};
   const L = { name, type, keys: [], where: [], having: [], order: [{ by: '_count', dir: 'desc' }, { by: '_key', dir: 'asc' }], size: null, limitable: false, fill: null, global: false, metrics: [], pipes: [], windows: [], sorted: false };
-  const A = aliasOf(name);
+  // Un regroupement qui porte le nom de son propre champ (service: terms service) ne masque rien : pas de suffixe
+  const ownColumn = typeof body.field === 'string' && !body.script && body.missing === undefined && /^(terms|significant_terms|rare_terms|significant_text)$/.test(type) ? mapField(ctx, body.field) : null;
+  const A = ownColumn !== null && ownColumn === chIdent(rawAlias(name)) ? ownColumn : aliasOf(name);
   const incl = (k, inc, neg) => {
     if (inc === undefined) return;
     let c;
     if (typeof inc === 'string') c = `match(${k}, ${chStr('^(?:' + inc + ')$')})`;
     else if (Array.isArray(inc)) c = `${k} IN (${inc.map(chVal).join(', ')})`;
-    else if (isObj(inc) && inc.num_partitions) c = `cityHash64(${k}) % ${inc.num_partitions} = ${inc.partition || 0}`;
+    else if (isObj(inc) && inc.num_partitions) c = `cityHash64(${k}) % ${chInt(inc.num_partitions, 'num_partitions')} = ${chInt(inc.partition || 0, 'partition')}`;
     if (c) L.where.push(neg ? `NOT (${c})` : c);
   };
   switch (type) {
@@ -524,12 +564,12 @@ function buildLevel(ctx, name, def) {
       if (body.missing === undefined && (body.script || ctx.runtime[String(body.field || '').replace(/\.keyword$/, '')])) L.where.push(`isNotNull(${k})`);
       incl(k, body.include, false); incl(k, body.exclude, true);
       if (type === 'rare_terms') {
-        L.having.push(`doc_count <= ${body.max_doc_count || 1}`); L.order = [{ by: '_count', dir: 'asc' }, { by: '_key', dir: 'asc' }];
+        L.having.push(`doc_count <= ${chInt(body.max_doc_count || 1, 'max_doc_count')}`); L.order = [{ by: '_count', dir: 'asc' }, { by: '_key', dir: 'asc' }];
         ctx.stats.ok++; H(ctx, 'groups', `valeurs rares de ${body.field}`);
       } else {
-        L.size = body.size !== undefined ? body.size : 10; L.limitable = true;
+        L.size = body.size !== undefined ? chInt(body.size, 'terms.size') : 10; L.limitable = true;
         L.order = parseOrder(body.order, L.order);
-        if ((body.min_doc_count || 1) > 1) L.having.push(`doc_count >= ${body.min_doc_count}`);
+        if ((body.min_doc_count || 1) > 1) L.having.push(`doc_count >= ${chInt(body.min_doc_count, 'min_doc_count')}`);
         if (body.min_doc_count === 0) ctx.notes.add('warn', 'min_doc_count: 0', 'Les valeurs sans document ne peuvent pas apparaître via GROUP BY : il faudrait une jointure avec la liste des valeurs attendues.');
         if (type !== 'terms') { ctx.stats.approx++; ctx.notes.add('warn', `${type} approximé`, 'Le score de significativité n’est pas calculé : regroupement simple par fréquence.'); } else ctx.stats.ok++;
         H(ctx, 'groups', `par ${body.field || 'script'} (${L.size} premiers)`);
@@ -538,7 +578,7 @@ function buildLevel(ctx, name, def) {
     }
     case 'multi_terms': {
       (body.terms || []).forEach((t, i) => { const k = mapField(ctx, t.field); ctx.groupCols.add(k); L.keys.push({ sql: k, alias: aliasOf(`${name}_${t.field}`) }); });
-      L.size = body.size !== undefined ? body.size : 10; L.limitable = true; L.order = parseOrder(body.order, L.order);
+      L.size = body.size !== undefined ? chInt(body.size, 'multi_terms.size') : 10; L.limitable = true; L.order = parseOrder(body.order, L.order);
       ctx.stats.ok++; H(ctx, 'groups', `par ${(body.terms || []).map(t => t.field).join(' + ')} (${L.size} premiers)`);
       break;
     }
@@ -559,12 +599,12 @@ function buildLevel(ctx, name, def) {
       L.keys.push({ sql: key, alias: A });
       L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) L.fill = step;
-      else if (body.min_doc_count > 1) L.having.push(`doc_count >= ${body.min_doc_count}`);
+      else if (body.min_doc_count > 1) L.having.push(`doc_count >= ${chInt(body.min_doc_count, 'min_doc_count')}`);
       H(ctx, 'groups', hum);
       break;
     }
     case 'histogram': {
-      const f = mapField(ctx, body.field); const iv = body.interval || 1; const off = body.offset || 0;
+      const f = mapField(ctx, body.field); const iv = chNum(body.interval || 1, 'histogram.interval'); const off = chNum(body.offset || 0, 'histogram.offset');
       const key = off ? `floor((${f} - ${off}) / ${iv}) * ${iv} + ${off}` : `floor(${f} / ${iv}) * ${iv}`;
       L.keys.push({ sql: key, alias: A }); L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) L.fill = String(iv);
@@ -608,17 +648,17 @@ function buildLevel(ctx, name, def) {
       (body.sources || []).forEach(src => {
         const sn = Object.keys(src)[0]; const st = Object.keys(src[sn])[0]; const sb = src[sn][st];
         const sub = buildLevel(ctx, sn, { [st]: sb });
-        sub.keys.forEach(k => L.keys.push(k)); L.where.push(...sub.where);
+        sub.keys.forEach(k => L.keys.push(Object.assign({ source: sn }, k))); L.where.push(...sub.where);
       });
-      L.size = body.size || 10; L.order = L.keys.map(k => ({ by: k.alias, dir: 'asc', raw: true }));
-      if (body.after) { const vals = L.keys.map(k => chVal(body.after[k.alias.replace(/`/g, '')])); L.having.push(`(${L.keys.map(k => k.alias).join(', ')}) > (${vals.join(', ')})`); }
+      L.size = chInt(body.size || 10, 'composite.size'); L.order = L.keys.map(k => ({ by: k.alias, dir: 'asc', raw: true }));
+      if (body.after) { const vals = L.keys.map(k => chVal(body.after[k.source])); L.having.push(`(${L.keys.map(k => k.alias).join(', ')}) > (${vals.join(', ')})`); }
       L.composite = true; ctx.stats.ok++;
       ctx.notes.add('info', 'composite → pagination par tuple', 'La page suivante se lit en passant les dernières clés dans after : la clause HAVING (clés) > (…) reproduit ce curseur.');
       break;
     }
     case 'geohash_grid': case 'geotile_grid': {
-      const f = mapField(ctx, body.field); L.keys.push({ sql: `geohashEncode(${f}.1, ${f}.2, ${body.precision || 5})`, alias: A });
-      L.size = body.size || 10000; L.limitable = true; ctx.stats.approx++;
+      const f = mapField(ctx, body.field); L.keys.push({ sql: `geohashEncode(${f}.1, ${f}.2, ${chInt(body.precision || 5, 'precision')})`, alias: A });
+      L.size = chInt(body.size || 10000, 'size'); L.limitable = true; ctx.stats.approx++;
       ctx.notes.add('warn', type, 'Traduit en geohashEncode sur une colonne Point (lon, lat) ; les tuiles geotile diffèrent des geohash.');
       break;
     }
@@ -662,6 +702,8 @@ function orderInSub(L) {
   });
 }
 function keyLevels(path) { return path.filter(l => l.keys.length); }
+// « x AS x » est inutile, et ClickHouse le refuse quand x est déjà un champ runtime défini par WITH (alias déclaré deux fois)
+function selectAs(k) { return k.sql === k.alias ? k.sql : `${k.sql} AS ${k.alias}`; }
 function pathWhere(env, path, upto) {
   let start = 0;
   for (let i = 0; i <= upto; i++) if (path[i].global) start = i;
@@ -681,7 +723,7 @@ function restriction(ctx, env, path, upto) {
   const inner = restriction(ctx, env, path, j - 1);
   if (inner) where.push(inner);
   const sub = sqlSelect({
-    select: keys.map(k => `${k.sql} AS ${k.alias}`),
+    select: keys.map(selectAs),
     from: env.table, where,
     groupBy: keys.map(k => k.alias),
     having: path[j].having.map(h => h.replace(/\bdoc_count\b/g, 'count()')),
@@ -698,7 +740,7 @@ function aggQuery(ctx, env, path) {
   const where = pathWhere(env, path, k);
   const r = restriction(ctx, env, path, k - 1);
   if (r) where.push(r);
-  const select = keys.map(x => `${x.sql} AS ${x.alias}`).concat(['count() AS doc_count']).concat(L.metrics.map(m => `${m.render(null)} AS ${m.alias}`));
+  const select = keys.map(selectAs).concat(['count() AS doc_count']).concat(L.metrics.map(m => `${m.render(null)} AS ${m.alias}`));
   const order = []; const parentKL = keyLevels(path.slice(0, k));
   parentKL.forEach((pl, i) => {
     const pkeys = parentKL.slice(0, i + 1).flatMap(l => l.keys).map(x => x.alias);
@@ -726,15 +768,15 @@ function aggQuery(ctx, env, path) {
         ctx.stats.ok++;
       } else if (p.type === 'bucket_sort') {
         if (b.sort) { L.order = parseOrder(b.sort, L.order); L.sorted = true; }
-        limitOverride = { n: b.size, offset: b.from || 0 }; ctx.stats.ok++;
+        limitOverride = { n: b.size === undefined ? undefined : chInt(b.size, 'bucket_sort.size'), offset: chInt(b.from || 0, 'bucket_sort.from') }; ctx.stats.ok++;
       } else if (['cumulative_sum', 'derivative', 'serial_diff', 'moving_fn', 'moving_avg'].includes(p.type)) {
         if (!ownKey) throw new Error('pipeline sans clé d’ordre');
         const m = res(bp); const src = m === 'doc_count' ? 'count()' : m;
         let e;
         if (p.type === 'cumulative_sum') e = `sum(${src}) ${win('ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')}`;
-        else if (p.type === 'derivative' || p.type === 'serial_diff') { const lag = b.lag || 1; e = `${src} - lagInFrame(${src}, ${lag}) ${win(`ROWS BETWEEN ${lag} PRECEDING AND CURRENT ROW`)}`; ctx.notes.add('info', `${p.type} : premier point`, 'Le premier point vaut sa propre valeur (lagInFrame renvoie 0) là où Elasticsearch renvoie null.'); }
+        else if (p.type === 'derivative' || p.type === 'serial_diff') { const lag = chInt(b.lag || 1, 'lag'); e =`${src} - lagInFrame(${src}, ${lag}) ${win(`ROWS BETWEEN ${lag} PRECEDING AND CURRENT ROW`)}`; ctx.notes.add('info', `${p.type} : premier point`, 'Le premier point vaut sa propre valeur (lagInFrame renvoie 0) là où Elasticsearch renvoie null.'); }
         else {
-          const w = b.window || 5; const sh = b.shift || 0;
+          const w = chInt(b.window || 5, 'window'); const sh = chInt(b.shift || 0, 'shift');
           const fnm = /max\(/.test(b.script || '') ? 'max' : /min\(/.test(b.script || '') ? 'min' : /sum\(/.test(b.script || '') ? 'sum' : /stdDev/.test(b.script || '') ? 'stddevPop' : 'avg';
           if (/linearWeightedAvg|ewma|holt/.test(b.script || '') || p.type === 'moving_avg') ctx.notes.add('warn', `${p.name} : moyenne simple`, 'Les moyennes pondérées (linéaire, ewma, holt) sont remplacées par une moyenne simple sur la fenêtre.');
           e = `${fnm}(${src}) ${win(`ROWS BETWEEN ${w - sh} PRECEDING AND ${sh > 0 ? sh - 1 + ' FOLLOWING' : '1 PRECEDING'}`)}`;
@@ -760,11 +802,13 @@ function walkAggs(ctx, env, aggs, parentPath, out) {
   for (const [name, def] of Object.entries(aggs || {})) {
     const t = aggType(def);
     if (!t) continue;
-    const L = buildLevel(ctx, name, def);
+    let L;
+    try { L = buildLevel(ctx, name, def); }
+    catch (e) { todo(ctx, `agrégation ${name}`, e.message); continue; }
     const path = parentPath.concat([L]);
     const needSelf = L.metrics.length || L.pipes.length || !L.children.length;
     if (needSelf && !(t === 'sampler' && !L.metrics.length && L.children.length)) {
-      try { out.push({ title: `Agrégation ${path.map(p => p.name).join(' › ')}`, sql: aggQuery(ctx, env, path), path: path.map(p => p.name) }); }
+      try { out.push({ title: `Agrégation ${path.map(p => p.name).join(' › ')}`, sql: aggQuery(ctx, env, path), path: path.map(p => p.name), keyAlias: L.keys.length ? L.keys[L.keys.length - 1].alias : null }); }
       catch (e) { todo(ctx, `agrégation ${name}`, e.message); }
     }
     if (L.topHits) L.topHits.forEach(th => out.push({ title: `Top hits ${path.map(p => p.name).join(' › ')} › ${th.name}`, sql: topHitsQuery(ctx, env, path, th) }));
@@ -779,7 +823,8 @@ function topHitsQuery(ctx, env, path, th) {
   const cols = selectList(ctx, b); const order = sortList(ctx, b.sort);
   ctx.stats.ok++;
   ctx.notes.add('opt', `top_hits « ${th.name} » → LIMIT n BY`, 'LIMIT n BY renvoie les n meilleurs documents de chaque groupe en une seule passe triée.');
-  return sqlSelect({ select: keys.map(k => `${k.sql} AS ${k.alias}`).concat(cols), from: env.table, where, orderBy: keys.map(k => k.alias).concat(order), limitBy: keys.length ? { n: b.size || 3, by: keys.map(k => k.alias) } : null, limit: keys.length ? null : b.size || 3 });
+  const n = chInt(b.size || 3, 'top_hits.size');
+  return sqlSelect({ select: keys.map(selectAs).concat(cols), from: env.table, where, orderBy: keys.map(k => k.alias).concat(order), limitBy: keys.length ? { n, by: keys.map(k => k.alias) } : null, limit: keys.length ? null : n });
 }
 function rootAggs(ctx, env, aggs) {
   const out = [];
@@ -802,8 +847,8 @@ function rootAggs(ctx, env, aggs) {
     const target = out.find(q => q.path && q.path.length === 1 && q.path[0] === aggName);
     if (!target || bp.split('>').length > 2) { todo(ctx, `pipeline ${s.type}`, `buckets_path « ${bp} » trop profond pour une traduction automatique.`); continue; }
     const m = metric ? aliasOf(metric.replace(/\..*$/, '')) : 'doc_count';
-    const col = metric === '_count' ? 'doc_count' : m; const key = aliasOf(aggName); const A = aliasOf(s.name);
-    const sel = { avg_bucket: [`avg(${col}) AS ${A}`], sum_bucket: [`sum(${col}) AS ${A}`], min_bucket: [`min(${col}) AS ${A}`, `argMin(${key}, ${col}) AS ${aliasOf(s.name + '_key')}`], max_bucket: [`max(${col}) AS ${A}`, `argMax(${key}, ${col}) AS ${aliasOf(s.name + '_key')}`], stats_bucket: [`count() AS ${aliasOf(s.name + '_count')}`, `min(${col}) AS ${aliasOf(s.name + '_min')}`, `max(${col}) AS ${aliasOf(s.name + '_max')}`, `avg(${col}) AS ${aliasOf(s.name + '_avg')}`, `sum(${col}) AS ${aliasOf(s.name + '_sum')}`], extended_stats_bucket: [`avg(${col}) AS ${aliasOf(s.name + '_avg')}`, `stddevPop(${col}) AS ${aliasOf(s.name + '_std_deviation')}`], percentiles_bucket: [`quantilesTDigest(${(s.body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => p / 100).join(', ')})(${col}) AS ${A}`] }[s.type];
+    const col = metric === '_count' ? 'doc_count' : m; const key = target.keyAlias || aliasOf(aggName); const A = aliasOf(s.name);
+    const sel = { avg_bucket: [`avg(${col}) AS ${A}`], sum_bucket: [`sum(${col}) AS ${A}`], min_bucket: [`min(${col}) AS ${A}`, `argMin(${key}, ${col}) AS ${aliasOf(s.name + '_key')}`], max_bucket: [`max(${col}) AS ${A}`, `argMax(${key}, ${col}) AS ${aliasOf(s.name + '_key')}`], stats_bucket: [`count() AS ${aliasOf(s.name + '_count')}`, `min(${col}) AS ${aliasOf(s.name + '_min')}`, `max(${col}) AS ${aliasOf(s.name + '_max')}`, `avg(${col}) AS ${aliasOf(s.name + '_avg')}`, `sum(${col}) AS ${aliasOf(s.name + '_sum')}`], extended_stats_bucket: [`avg(${col}) AS ${aliasOf(s.name + '_avg')}`, `stddevPop(${col}) AS ${aliasOf(s.name + '_std_deviation')}`], percentiles_bucket: [`quantilesTDigest(${(s.body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => chNum(p, 'percents') / 100).join(', ')})(${col}) AS ${A}`] }[s.type];
     out.push({ title: `Pipeline ${s.name}`, sql: `SELECT\n${sel.map(x => '    ' + x).join(',\n')}\nFROM (\n${indent(target.sql, '    ')}\n)` });
     ctx.stats.ok++;
   }
@@ -864,7 +909,8 @@ function sortList(ctx, sort) {
   return out;
 }
 function hitsQuery(ctx, env, dsl, where) {
-  const size = dsl.size !== undefined ? dsl.size : 10;
+  const size = dsl.size !== undefined ? chInt(dsl.size, 'size') : 10;
+  const from = chInt(dsl.from || 0, 'from');
   if (!size) return null;
   const cols = selectList(ctx, dsl);
   let order = sortList(ctx, dsl.sort);
@@ -890,7 +936,7 @@ function hitsQuery(ctx, env, dsl, where) {
   if (dsl.highlight) ctx.notes.add('info', 'highlight ignoré', 'La mise en évidence se fait côté application en SQL.');
   const human = `renvoie ${size} document${size > 1 ? 's' : ''}` + (order.length ? ` triés par ${order[0].replace(/ DESC.*/, ' (décroissant)').replace(/ ASC.*/, '')}` : '') + (dsl.collapse ? `, un par ${dsl.collapse.field}` : '');
   ctx.human.hits = human;
-  return sqlSelect({ select: cols, from: env.table, where: w, orderBy: order, limitBy, limit: size, offset: dsl.from || 0, settings });
+  return sqlSelect({ select: cols, from: env.table, where: w, orderBy: order, limitBy, limit: size, offset: from, settings });
 }
 
 /* ---------- Entrée principale ---------- */
@@ -937,8 +983,21 @@ function sentence(h) {
   return out.replace(/\s+,/g, ',') + '.';
 }
 function translateDSL(input, cfg, opts) {
+  // Première passe à blanc : elle relève les colonnes citées, que les alias de la seconde passe éviteront
+  const columns = new Set();
+  aliasGuard.columns = new Set(); aliasGuard.renamed = new Map();
+  try {
+    translateRequest(input, cfg, opts, columns);
+    aliasGuard.columns = columns; aliasGuard.renamed = new Map();
+    return translateRequest(input, cfg, opts, new Set());
+  } finally {
+    aliasGuard.columns = new Set(); aliasGuard.renamed = new Map();
+  }
+}
+function translateRequest(input, cfg, opts, columns) {
   opts = opts || {};
   const ctx = makeDslCtx(cfg);
+  ctx.columns = columns;
   let text = String(input || '').trim(); let index = opts.index || ''; let endpoint = '_search';
   if (!text) return { empty: true };
   const m = /^(GET|POST)\s+(\S+)[^\n]*\n?/i.exec(text);
@@ -957,7 +1016,7 @@ function translateDSL(input, cfg, opts) {
   const env = { table, baseWhere: [] };
   // Champs runtime
   const rtm = dsl.runtime_mappings || {};
-  for (const name of Object.keys(rtm)) ctx.runtime[name] = { alias: aliasOf(name), type: rtm[name].type, sql: null };
+  for (const name of Object.keys(rtm)) ctx.runtime[name] = { alias: chIdent(rawAlias(name)), type: rtm[name].type, sql: null };
   for (const [name, def] of Object.entries(rtm)) {
     const r = ctx.runtime[name];
     if (!def.script) { ctx.notes.add('info', `Champ runtime « ${name} » sans script`, 'Il masque simplement un champ existant : la colonne est lue directement.'); delete ctx.runtime[name]; continue; }
@@ -966,7 +1025,7 @@ function translateDSL(input, cfg, opts) {
     try {
       const out = painlessToSQL(ctx, src, { mode: 'emit', params: (isObj(sc) && sc.params) || {}, rtType: def.type });
       r.sql = out.sql;
-      if (new RegExp('(^|[^A-Za-z0-9_])' + escRe(r.alias) + '($|[^A-Za-z0-9_])').test(out.sql)) r.alias = aliasOf(name + '_rt');
+      if (new RegExp('(^|[^A-Za-z0-9_])' + escRe(r.alias) + '($|[^A-Za-z0-9_])').test(out.sql)) r.alias = chIdent(rawAlias(name + '_rt'));
       ctx.stats.ok++; H(ctx, 'runtime', name);
       const chType = { keyword: 'String', long: 'Int64', double: 'Float64', date: 'DateTime64(3)', boolean: 'Bool', ip: 'String' }[def.type] || 'String';
       ctx.notes.add('opt', `Matérialiser « ${name} »`, 'Un champ runtime est recalculé à chaque requête. Stocké comme colonne MATERIALIZED, il est calculé une fois à l’insertion et peut être indexé.', `ALTER TABLE ${table}\n    ADD COLUMN ${r.alias} Nullable(${chType}) MATERIALIZED ${r.sql};`);
@@ -982,22 +1041,28 @@ function translateDSL(input, cfg, opts) {
   catch (e) { return { error: `Requête non analysable : ${e.message}` }; }
   env.baseWhere = where;
   const statements = [];
-  if (endpoint === '_count') {
-    statements.push({ title: 'Comptage', sql: sqlSelect({ select: ['count() AS count'], from: table, where }) });
-    ctx.human.hits = 'compte les documents';
-  } else {
-    if (dsl.aggs || dsl.aggregations) {
-      ctx.aggMode = true;
-      statements.push(...rootAggs(ctx, env, dsl.aggs || dsl.aggregations));
+  try {
+    if (endpoint === '_count') {
+      statements.push({ title: 'Comptage', sql: sqlSelect({ select: ['count() AS count'], from: table, where }) });
+      ctx.human.hits = 'compte les documents';
+    } else {
+      if (dsl.aggs || dsl.aggregations) {
+        ctx.aggMode = true;
+        statements.push(...rootAggs(ctx, env, dsl.aggs || dsl.aggregations));
+      }
+      let hw = where;
+      if (dsl.post_filter) { ctx.humanOff++; hw = where.concat(conjunctsOf(ctx, dsl.post_filter)); ctx.humanOff--; ctx.notes.add('info', 'post_filter', 'Appliqué uniquement à la liste des documents, pas aux agrégations, comme dans Elasticsearch.'); }
+      const hq = hitsQuery(ctx, env, dsl, hw);
+      if (hq) {
+        statements.push({ title: 'Documents', sql: hq });
+        if (dsl.size === undefined && (dsl.aggs || dsl.aggregations)) ctx.notes.add('info', 'size absent', 'Elasticsearch renvoie aussi 10 documents par défaut. Ajoutez "size": 0 pour ne garder que les agrégations.');
+      }
+      if (dsl.track_total_hits === true || (dsl.track_total_hits === undefined && hq && false)) statements.push({ title: 'Total (track_total_hits)', sql: sqlSelect({ select: ['count() AS total'], from: table, where: hw }) });
     }
-    let hw = where;
-    if (dsl.post_filter) { ctx.humanOff++; hw = where.concat(conjunctsOf(ctx, dsl.post_filter)); ctx.humanOff--; ctx.notes.add('info', 'post_filter', 'Appliqué uniquement à la liste des documents, pas aux agrégations, comme dans Elasticsearch.'); }
-    const hq = hitsQuery(ctx, env, dsl, hw);
-    if (hq) {
-      statements.push({ title: 'Documents', sql: hq });
-      if (dsl.size === undefined && (dsl.aggs || dsl.aggregations)) ctx.notes.add('info', 'size absent', 'Elasticsearch renvoie aussi 10 documents par défaut. Ajoutez "size": 0 pour ne garder que les agrégations.');
-    }
-    if (dsl.track_total_hits === true || (dsl.track_total_hits === undefined && hq && false)) statements.push({ title: 'Total (track_total_hits)', sql: sqlSelect({ select: ['count() AS total'], from: table, where: hw }) });
+  } catch (e) {
+    // Paramètre invalide (taille, sens de tri…) ou construction hors de portée : mieux vaut refuser
+    // la requête, comme Elasticsearch le fait d’un paramètre invalide, que renvoyer un SQL douteux
+    return { error: `Traduction impossible : ${e.message}` };
   }
   if (!statements.length) statements.push({ title: 'Comptage', sql: sqlSelect({ select: ['count() AS count'], from: table, where }) });
   // Conseils
@@ -1014,6 +1079,7 @@ function translateDSL(input, cfg, opts) {
   if (statements.some(s => /IN \(\n/.test(s.sql))) ctx.notes.add('info', 'Top N imbriqués', 'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits par une sous-requête IN puis LIMIT n BY, avec des comptes exacts là où Elasticsearch les estime par shard.');
   const sql = statements.map(s => `-- ${s.title}\n${withClause(ctx, s.sql)};`).join('\n\n');
   const statementsOut = statements.map(s => ({ title: s.title, sql: withClause(ctx, s.sql) }));
+  for (const [name, alias] of aliasGuard.renamed) ctx.notes.add('warn', `Agrégation « ${name} » renommée ${alias}`, `${rawAlias(name)} est aussi une colonne citée par la requête : un alias du même nom la masquerait partout, y compris dans WHERE. La colonne de résultat s’appelle donc ${alias}.`);
   const order = { err: 0, warn: 1, opt: 2, info: 3 };
   ctx.notes.list.sort((a, b) => order[a.level] - order[b.level]);
   return { sql, statements: statementsOut, notes: ctx.notes.list, stats: ctx.stats, table, index, matched, human: ctx.human, sentence: sentence(ctx.human) };

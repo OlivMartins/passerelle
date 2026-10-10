@@ -2,7 +2,7 @@
 
 -- Agrégation service
 SELECT
-    service AS service,
+    service,
     count() AS doc_count
 FROM logs.events
 GROUP BY service

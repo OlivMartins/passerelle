@@ -65,6 +65,23 @@ function chVal(v) {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   return chStr(v);
 }
+/*
+ * Nombre fourni par la requête et recopié tel quel dans le SQL (taille, intervalle, coordonnée…).
+ * Seul un nombre fini est accepté, ou une chaîne purement numérique comme le tolère Elasticsearch :
+ * toute autre valeur est refusée, comme Elasticsearch le fait avec une erreur 400.
+ */
+function chNum(v, what) {
+  const n = typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(v) ? Number(v) : v;
+  if (typeof n !== 'number' || !Number.isFinite(n)) throw new Error(`${what} : nombre attendu, reçu ${JSON.stringify(v)}`);
+  return n;
+}
+function chInt(v, what) {
+  const n = chNum(v, what);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${what} : entier positif attendu, reçu ${JSON.stringify(v)}`);
+  return n;
+}
+/* Texte libre placé dans un commentaire SQL : il ne doit pas pouvoir le refermer */
+function chComment(s) { return String(s).replace(/\*\//g, '* /').replace(/[\r\n]+/g, ' '); }
 
 /* Analyse lexicale légère pour savoir si une expression SQL doit être parenthésée */
 function scanTop(s, cb) {
@@ -609,8 +626,16 @@ function pmcall(ctx, n, env, o) {
   throw new Error(`méthode « .${name}() » non prise en charge`);
 }
 const P_NONE = { k: 'none' };
+/*
+ * Chaque « if » sans else recopie la suite du script dans ses deux branches : n conditions successives
+ * donnent 2^n chemins, donc un SQL illisible puis un temps de traduction déraisonnable.
+ * Au-delà de ce plafond, le script est déclaré « à reprendre ».
+ */
+const PAINLESS_MAX_STEPS = 500;
 function hasEmit(stmts) { return JSON.stringify(stmts).includes('"name":"emit"'); }
 function pexec(ctx, stmts, env, o) {
+  o.steps = (o.steps || 0) + 1;
+  if (o.steps > PAINLESS_MAX_STEPS) throw new Error('script trop ramifié (conditions successives) pour une expression SQL lisible');
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i]; const rest = stmts.slice(i + 1);
     if (s.k === 'nop') continue;
@@ -665,16 +690,19 @@ function luceneTokens(qs) {
     if (c === '"') {
       let j = i + 1, v = '';
       while (j < qs.length && qs[j] !== '"') { if (qs[j] === '\\') { v += qs[j + 1] || ''; j += 2; } else v += qs[j++]; }
+      if (j >= qs.length) throw new Error('guillemet non fermé');
       i = j + 1; if (qs[i] === '~') { i++; while (/\d/.test(qs[i] || '')) i++; }
       toks.push({ t: 'phrase', v }); continue;
     }
     if (c === '[' || c === '{') {
       let j = i + 1; while (j < qs.length && qs[j] !== ']' && qs[j] !== '}') j++;
+      if (j >= qs.length) throw new Error('intervalle non fermé');
       toks.push({ t: 'range', v: qs.slice(i + 1, j), lo: c === '[', hi: qs[j] === ']' }); i = j + 1; continue;
     }
     if (c === '/') {
       let j = i + 1, v = '';
       while (j < qs.length && qs[j] !== '/') { if (qs[j] === '\\' && qs[j + 1] === '/') { v += '/'; j += 2; } else v += qs[j++]; }
+      if (j >= qs.length) throw new Error('expression régulière non fermée');
       toks.push({ t: 'regex', v }); i = j + 1; continue;
     }
     let s = '';
@@ -722,20 +750,99 @@ function luceneParse(qs, defaultOp) {
     if (t.t === 'PLUS') { next(); return unary(); }
     return primary();
   }
+  // Elasticsearch refuse une requête mal formée (HTTP 400) : l’analyse doit échouer de la même façon
+  function close() {
+    if (!peek() || peek().t !== ')') throw new Error('parenthèse non fermée');
+    next();
+  }
   function primary() {
     const t = next();
     if (!t) throw new Error('requête query_string incomplète');
-    if (t.t === '(') { const e = orE(); if (peek() && peek().t === ')') next(); return e; }
+    if (t.t === '(') { const e = orE(); close(); return e; }
     if (t.t === 'field') {
       const nt = peek();
-      if (nt && nt.t === '(') { next(); const e = orE(); if (peek() && peek().t === ')') next(); assign(e, t.v); return e; }
+      if (nt && nt.t === '(') { next(); const e = orE(); close(); assign(e, t.v); return e; }
       const leaf = primary(); assign(leaf, t.v); return leaf;
     }
     if (t.t === ')') throw new Error('parenthèse fermante inattendue');
+    if (t.t === 'AND' || t.t === 'OR' || t.t === 'NOT' || t.t === 'PLUS') throw new Error(`opérateur ${t.t} inattendu`);
     return { op: 'leaf', field: null, tok: t };
   }
   const e = orE();
+  if (p < toks.length) throw new Error(toks[p].t === ')' ? 'parenthèse fermante en trop' : 'fin de requête inattendue');
   return e;
+}
+
+/* ---------- simple_query_string ---------- */
+/*
+ * Syntaxe distincte de query_string, et jamais refusée par Elasticsearch : un caractère en trop est ignoré.
+ *   +  ET      |  OU      -mot  négation      "…"  phrase      mot*  préfixe      mot~N  flou      ( )  priorité
+ * Les opérateurs s’appliquent de gauche à droite, sans priorité entre eux : a | b + c vaut (a OU b) ET c.
+ * Sans opérateur, deux termes sont reliés par l’opérateur par défaut. Une négation forme une clause à part
+ * entière : avec OU par défaut, « a -b » vaut a OU (NON b).
+ */
+function simpleQueryParse(qs, defaultOp) {
+  const text = String(qs);
+  const defOp = String(defaultOp || 'OR').toUpperCase() === 'AND' ? 'and' : 'or';
+  const isSpace = c => c === ' ' || c === '\t' || c === '\n' || c === '\r';
+  const endsToken = c => c === '"' || c === '|' || c === '+' || c === '(' || c === ')' || isSpace(c);
+
+  function parse(from, to) {
+    let i = from;
+    let top = null; let pending = null; let previous = null; let negations = 0;
+    function add(branch) {
+      if (negations % 2 === 1) branch = { op: 'not', a: [branch] };
+      negations = 0;
+      if (top === null) { top = branch; pending = null; return; }
+      const op = pending || defOp;
+      if (previous !== op) top = { op, a: [top] };
+      top.a.push(branch);
+      previous = op; pending = null;
+    }
+    while (i < to) {
+      const c = text[i];
+      if (c === '(') {
+        // Cherche la parenthèse fermante correspondante, hors des phrases
+        let depth = 1; let j = i + 1; let inPhrase = false;
+        for (; j < to && depth > 0; j++) {
+          if (text[j] === '"') inPhrase = !inPhrase;
+          else if (!inPhrase && text[j] === '(') depth++;
+          else if (!inPhrase && text[j] === ')') depth--;
+        }
+        if (depth > 0) { i++; negations = 0; continue; }
+        const sub = parse(i + 1, j - 1);
+        i = j;
+        if (sub) add(sub); else negations = 0;
+        continue;
+      }
+      if (c === ')') { i++; negations = 0; continue; }
+      if (c === '"') {
+        const end = text.indexOf('"', i + 1);
+        if (end < 0 || end >= to) { i++; negations = 0; continue; }
+        const phrase = text.slice(i + 1, end);
+        i = end + 1;
+        if (text[i] === '~') { i++; while (i < to && /\d/.test(text[i])) i++; }
+        if (phrase.trim()) add({ op: 'leaf', field: null, tok: { t: 'phrase', v: phrase } }); else negations = 0;
+        continue;
+      }
+      if (c === '+') { if (pending === null && top !== null) pending = 'and'; i++; negations = 0; continue; }
+      if (c === '|') { if (pending === null && top !== null) pending = 'or'; i++; negations = 0; continue; }
+      if (c === '-') { negations++; i++; continue; }
+      if (isSpace(c)) { i++; negations = 0; continue; }
+      let word = '';
+      while (i < to) {
+        if (text[i] === '\\' && i + 1 < to) { word += text[i + 1]; i += 2; continue; }
+        if (endsToken(text[i])) break;
+        word += text[i++];
+      }
+      const fuzzy = /^(.+)~(\d*)$/.exec(word);
+      if (fuzzy) add({ op: 'leaf', field: null, tok: { t: 'fuzzy', v: fuzzy[1], n: fuzzy[2] === '' ? null : +fuzzy[2] } });
+      else if (word.length > 1 && word.endsWith('*')) add({ op: 'leaf', field: null, tok: { t: 'prefix', v: word.slice(0, -1) } });
+      else if (word) add({ op: 'leaf', field: null, tok: { t: 'term', v: word } });
+    }
+    return top;
+  }
+  return parse(0, text.length);
 }
 
 

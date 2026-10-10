@@ -4,7 +4,7 @@
 WITH
     status AS b
 SELECT
-    b AS b,
+    b,
     count() AS doc_count
 FROM logs.events
 WHERE isNotNull(b)
