@@ -21,6 +21,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Modifié
 
+- Configuration Vector générée : l’API de Vector écoute sur `127.0.0.1:8686` et non plus sur toutes les interfaces. Elle n’a pas d’authentification.
 - Agrégations `range`, `date_range`, `ip_range` et `filters` : calculées par agrégation conditionnelle (un `countIf` par plage, puis `ARRAY JOIN`) au lieu d’un `arrayJoin` qui construisait un tableau pour chaque ligne. Quand elles servent de parent à un autre regroupement, des plages numériques disjointes deviennent un `multiIf`.
 - Agrégations imbriquées : le filtre commun et chaque top N sont nommés par des CTE (`base`, `top_<nom>`) au lieu d’être recopiés dans des sous-requêtes emboîtées. Le SQL se lit de haut en bas ; le plan d’exécution ne change pas.
 - Filtre sur un champ runtime de classification (un script qui émet une constante par branche) : il est réécrit sur les colonnes sources. `classe = 'lent'` devient `latency_ms >= 1000`, ce qui rend la clé de tri et les index utilisables. Quand le script ne s’y prête pas, la remarque de matérialisation propose aussi un index de saut.
