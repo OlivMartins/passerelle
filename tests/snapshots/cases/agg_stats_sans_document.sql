@@ -15,6 +15,6 @@ SELECT
     varPopOrNull(bytes) AS es_variance,
     stddevPopOrNull(bytes) AS es_std_deviation,
     sumOrNull(bytes * bytes) AS es_sum_of_squares,
-    count(user) AS vc,
     avgWeightedOrNull(latency_ms, bytes) AS wa
-FROM logs.events;
+FROM logs.events
+WHERE service = 'aucun';

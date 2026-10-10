@@ -16,4 +16,4 @@ WHERE service IN (
     LIMIT 10
 )
 GROUP BY svc, d
-ORDER BY svc_doc_count DESC, svc, d ASC;
+ORDER BY svc_doc_count DESC, svc, d ASC WITH FILL STEP INTERVAL 1 HOUR;

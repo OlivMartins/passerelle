@@ -515,10 +515,20 @@ function valueExpr(ctx, body) {
   return e;
 }
 const HM = { avg: 'moyenne', sum: 'somme', min: 'minimum', max: 'maximum', value_count: 'nombre de valeurs', cardinality: 'nombre distinct', stats: 'statistiques', extended_stats: 'statistiques étendues', percentiles: 'percentiles', percentile_ranks: 'rangs centiles', weighted_avg: 'moyenne pondérée', top_metrics: 'dernière valeur' };
-/* Renvoie [{alias, render(cond)}] */
+/*
+ * Appel d’agrégat. « cond » ajoute le combinateur -If. « mayBeEmpty » signale un calcul qui peut ne porter
+ * sur aucune ligne (mesure globale, sous-filtre, tranche ajoutée par WITH FILL) : Elasticsearch répond alors
+ * null pour min, max, avg… là où ClickHouse répond 0 ou nan. Le combinateur -OrNull rétablit le null.
+ */
+const NULL_WHEN_EMPTY = new Set(['min', 'max', 'avg', 'varPop', 'stddevPop', 'avgWeighted']);
+function aggCall(fn, args, cond, mayBeEmpty) {
+  const orNull = mayBeEmpty && NULL_WHEN_EMPTY.has(fn) ? 'OrNull' : '';
+  return cond ? `${fn}If${orNull}(${args}, ${cond})` : `${fn}${orNull}(${args})`;
+}
+/* Renvoie [{alias, render(cond, mayBeEmpty)}] */
 function metricDef(ctx, name, type, body) {
   const A = aliasOf(name);
-  const simple = (fn, x) => [{ alias: A, render: c => (c ? `${fn}If(${x}, ${c})` : `${fn}(${x})`) }];
+  const simple = (fn, x) => [{ alias: A, render: (c, e) => aggCall(fn, x, c, e) }];
   const fieldName = body.field || (body.script ? 'script' : '?');
   if (HM[type]) H(ctx, 'metrics', `${HM[type]} de ${fieldName}`);
   switch (type) {
@@ -532,8 +542,9 @@ function metricDef(ctx, name, type, body) {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
       const cols = [['count', 'count'], ['min', 'min'], ['max', 'max'], ['avg', 'avg'], ['sum', 'sum']];
       if (type === 'extended_stats') cols.push(['varPop', 'variance'], ['stddevPop', 'std_deviation']);
-      const out = cols.map(([fn, suf]) => ({ alias: aliasOf(`${name}_${suf}`), render: c => (c ? `${fn}If(${x}, ${c})` : `${fn}(${x})`) }));
-      if (type === 'extended_stats') out.push({ alias: aliasOf(`${name}_sum_of_squares`), render: c => (c ? `sumIf(${pArg(x)} * ${pArg(x)}, ${c})` : `sum(${pArg(x)} * ${pArg(x)})`) });
+      const out = cols.map(([fn, suf]) => ({ alias: aliasOf(`${name}_${suf}`), render: (c, e) => aggCall(fn, x, c, e) }));
+      // Sans document, Elasticsearch renvoie 0 pour sum mais null pour sum_of_squares
+      if (type === 'extended_stats') out.push({ alias: aliasOf(`${name}_sum_of_squares`), render: (c, e) => aggCall(e ? 'sumOrNull' : 'sum', `${pArg(x)} * ${pArg(x)}`, c, false) });
       return out;
     }
     case 'percentiles': {
@@ -548,7 +559,7 @@ function metricDef(ctx, name, type, body) {
     }
     case 'weighted_avg': {
       ctx.stats.ok++; const v = valueExpr(ctx, body.value || {}); const w = valueExpr(ctx, body.weight || {});
-      return [{ alias: A, render: c => (c ? `avgWeightedIf(${v}, ${w}, ${c})` : `avgWeighted(${v}, ${w})`) }];
+      return [{ alias: A, render: (c, e) => aggCall('avgWeighted', `${v}, ${w}`, c, e) }];
     }
     case 'top_metrics': {
       ctx.stats.ok++;
@@ -634,13 +645,15 @@ function buildLevel(ctx, name, def) {
       let ci = body.calendar_interval || (body.interval && CAL[body.interval] ? body.interval : null);
       let fi = body.fixed_interval || (!ci && body.interval) || null;
       if (type === 'auto_date_histogram') { ci = 'hour'; ctx.stats.approx++; ctx.notes.add('warn', 'auto_date_histogram', `L’intervalle automatique (${body.buckets || 10} tranches) est fixé à l’heure : ajustez selon la période.`); } else ctx.stats.ok++;
-      let key, step, hum;
-      if (ci && CAL[ci]) { const [fn, unit, fr] = CAL[ci]; key = `${fn}(${f}${tzA})`; step = `INTERVAL 1 ${unit}`; hum = `par ${fr}`; }
+      // bucket(x) : début de la tranche qui contient x, pour la colonne comme pour les bornes de extended_bounds
+      let bucket, step, hum;
+      if (ci && CAL[ci]) { const [fn, unit, fr] = CAL[ci]; bucket = x => `${fn}(${x}${tzA})`; step = `INTERVAL 1 ${unit}`; hum = `par ${fr}`; }
       else {
         const m = /^(\d+)(ms|s|m|h|d)$/.exec(String(fi || '1h'));
         const n = m ? m[1] : '1', u = m ? m[2] : 'h';
-        key = `toStartOfInterval(${f}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`; step = `INTERVAL ${n} ${FIXED_UNIT[u]}`; hum = `par tranche de ${n} ${FIXED_FR[u]}`;
+        bucket = x => `toStartOfInterval(${x}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`; step = `INTERVAL ${n} ${FIXED_UNIT[u]}`; hum = `par tranche de ${n} ${FIXED_FR[u]}`;
       }
+      const key = bucket(f);
       if (body.offset) ctx.notes.add('warn', 'offset de date_histogram', `Le décalage « ${body.offset} » n’est pas appliqué : utilisez toStartOfInterval(…, origin) si besoin.`);
       if (body.hard_bounds) {
         if (body.hard_bounds.min !== undefined) L.where.push(`${f} >= ${dateBoundSQL(ctx, body.hard_bounds.min, tz)}`);
@@ -649,16 +662,27 @@ function buildLevel(ctx, name, def) {
       // Semaine, mois, trimestre et année donnent une clé de type Date ; les autres intervalles, un DateTime
       L.keys.push({ sql: key, alias: A, date: { asDate: !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
       L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
-      if ((body.min_doc_count || 0) === 0) L.fill = step;
-      else if (body.min_doc_count > 1) L.having.push(`doc_count >= ${chInt(body.min_doc_count, 'min_doc_count')}`);
+      if ((body.min_doc_count || 0) === 0) {
+        L.fill = step;
+        // extended_bounds étend la série de tranches au-delà des données (Kibana y met la période affichée)
+        const eb = body.extended_bounds || {};
+        if (eb.min !== undefined && eb.min !== null) L.fillFrom = bucket(dateBoundSQL(ctx, eb.min, tz));
+        if (eb.max !== undefined && eb.max !== null) L.fillTo = `${bucket(dateBoundSQL(ctx, eb.max, tz))} + ${step}`;
+      } else if (body.min_doc_count > 1) L.having.push(`doc_count >= ${chInt(body.min_doc_count, 'min_doc_count')}`);
       H(ctx, 'groups', hum);
       break;
     }
     case 'histogram': {
       const f = mapField(ctx, body.field); const iv = chNum(body.interval || 1, 'histogram.interval'); const off = chNum(body.offset || 0, 'histogram.offset');
-      const key = off ? `floor((${f} - ${off}) / ${iv}) * ${iv} + ${off}` : `floor(${f} / ${iv}) * ${iv}`;
+      const bucket = x => (off ? `floor((${x} - ${off}) / ${iv}) * ${iv} + ${off}` : `floor(${x} / ${iv}) * ${iv}`);
+      const key = bucket(f);
       L.keys.push({ sql: key, alias: A }); L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
-      if ((body.min_doc_count || 0) === 0) L.fill = String(iv);
+      if ((body.min_doc_count || 0) === 0) {
+        L.fill = String(iv);
+        const eb = body.extended_bounds || {};
+        if (eb.min !== undefined && eb.min !== null) L.fillFrom = bucket(chNum(eb.min, 'extended_bounds.min'));
+        if (eb.max !== undefined && eb.max !== null) L.fillTo = `${bucket(chNum(eb.max, 'extended_bounds.max'))} + ${iv}`;
+      }
       ctx.stats.ok++; H(ctx, 'groups', `par tranches de ${iv} sur ${body.field}`);
       break;
     }
@@ -727,7 +751,7 @@ function buildLevel(ctx, name, def) {
     else if (ct === 'filter' && Object.values(aggChildren(cdef)).every(d => METRIC_TYPES.has(aggType(d)))) {
       ctx.humanOff++; const c = tq(ctx, cb) || '1'; ctx.humanOff--;
       L.metrics.push({ alias: aliasOf(`${cn}_doc_count`), render: () => `countIf(${c})` });
-      for (const [mn, md] of Object.entries(aggChildren(cdef))) { const mt = aggType(md); metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}).forEach(m => L.metrics.push({ alias: m.alias, render: () => m.render(c) })); }
+      for (const [mn, md] of Object.entries(aggChildren(cdef))) { const mt = aggType(md); metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}).forEach(m => L.metrics.push({ alias: m.alias, render: () => m.render(c, true) })); }
       ctx.stats.ok++;
       ctx.notes.add('opt', `Filtre « ${cn} » fusionné`, 'Plutôt qu’une requête de plus, le sous-filtre est calculé dans la même passe grâce aux combinateurs -If (countIf, avgIf…).');
     } else L.children.push({ name: cn, def: cdef });
@@ -791,7 +815,11 @@ function aggQuery(ctx, env, path) {
   const where = pathWhere(env, path, k);
   const r = restriction(ctx, env, path, k - 1);
   if (r) where.push(r);
-  const select = keys.map(selectAs).concat(['count() AS doc_count']).concat(L.metrics.map(m => `${m.render(null)} AS ${m.alias}`));
+  // Les tranches vides d’un histogramme sont ajoutées par WITH FILL, sur sa clé triée en ordre croissant.
+  // Pas avec un pipeline : une fonction de fenêtre est calculée avant l’ajout et ne verrait pas ces lignes.
+  const fills = !!L.fill && !L.pipes.length && L.keys.length > 0 && L.order.length > 0 && L.order[0].by === '_key' && L.order[0].dir === 'asc';
+  const mayBeEmpty = keys.length === 0 || fills;
+  const select = keys.map(selectAs).concat(['count() AS doc_count']).concat(L.metrics.map(m => `${m.render(null, mayBeEmpty)} AS ${m.alias}`));
   const order = []; const parentKL = keyLevels(path.slice(0, k));
   parentKL.forEach((pl, i) => {
     const pkeys = parentKL.slice(0, i + 1).flatMap(l => l.keys).map(x => x.alias);
@@ -825,21 +853,35 @@ function aggQuery(ctx, env, path) {
         const m = res(bp); const src = m === 'doc_count' ? 'count()' : m;
         let e;
         if (p.type === 'cumulative_sum') e = `sum(${src}) ${win('ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')}`;
-        else if (p.type === 'derivative' || p.type === 'serial_diff') { const lag = chInt(b.lag || 1, 'lag'); e =`${src} - lagInFrame(${src}, ${lag}) ${win(`ROWS BETWEEN ${lag} PRECEDING AND CURRENT ROW`)}`; ctx.notes.add('info', `${p.type} : premier point`, 'Le premier point vaut sa propre valeur (lagInFrame renvoie 0) là où Elasticsearch renvoie null.'); }
-        else {
+        else if (p.type === 'derivative' || p.type === 'serial_diff') {
+          // Les premiers points n’ont pas de prédécesseur : null dans Elasticsearch. Sur une valeur Nullable,
+          // lagInFrame renvoie NULL hors de la fenêtre (et non 0), donc la différence aussi.
+          const lag = chInt(b.lag || 1, 'lag');
+          e = `${src} - lagInFrame(toNullable(${src}), ${lag}) ${win(`ROWS BETWEEN ${lag} PRECEDING AND CURRENT ROW`)}`;
+        } else {
           const w = chInt(b.window || 5, 'window'); const sh = chInt(b.shift || 0, 'shift');
           const fnm = /max\(/.test(b.script || '') ? 'max' : /min\(/.test(b.script || '') ? 'min' : /sum\(/.test(b.script || '') ? 'sum' : /stdDev/.test(b.script || '') ? 'stddevPop' : 'avg';
           if (/linearWeightedAvg|ewma|holt/.test(b.script || '') || p.type === 'moving_avg') ctx.notes.add('warn', `${p.name} : moyenne simple`, 'Les moyennes pondérées (linéaire, ewma, holt) sont remplacées par une moyenne simple sur la fenêtre.');
-          e = `${fnm}(${src}) ${win(`ROWS BETWEEN ${w - sh} PRECEDING AND ${sh > 0 ? sh - 1 + ' FOLLOWING' : '1 PRECEDING'}`)}`;
+          // Fenêtre vide (premières tranches) : null dans Elasticsearch, sauf pour une somme qui vaut 0
+          const arg = fnm === 'sum' ? src : `toNullable(${src})`;
+          e = `${fnm}(${arg}) ${win(`ROWS BETWEEN ${w - sh} PRECEDING AND ${sh > 0 ? sh - 1 + ' FOLLOWING' : '1 PRECEDING'}`)}`;
         }
         select.push(`${e} AS ${aliasOf(p.name)}`); ctx.stats.ok++;
       } else todo(ctx, `pipeline ${p.type}`, `« ${p.name} » n’a pas d’équivalent automatique.`);
     } catch (e) { todo(ctx, `pipeline ${p.name}`, e.message); }
   }
   order.push(...levelOrder(L));
-  const onlyHist = kl.length === 1 && kl[0] === L && L.fill && !L.pipes.length;
-  const orderBy = onlyHist ? [`${ownKey} ASC WITH FILL STEP ${L.fill}`] : order.filter(Boolean);
-  if (onlyHist) ctx.notes.add('opt', 'Tranches vides comblées (WITH FILL)', 'Comme date_histogram avec min_doc_count: 0, les intervalles sans document sont générés par ClickHouse au lieu d’être comblés côté client.');
+  const orderBy = order.filter(Boolean);
+  if (fills) {
+    // WITH FILL porte sur la dernière colonne de tri. Les colonnes qui la précèdent (regroupements parents)
+    // délimitent des séries complétées séparément, chacune entre sa première et sa dernière tranche.
+    const bounds = (L.fillFrom ? `\n    FROM ${L.fillFrom}` : '') + (L.fillTo ? `\n    TO ${L.fillTo}` : '');
+    orderBy[orderBy.length - 1] = `${ownKey} ASC WITH FILL${bounds}${bounds ? '\n   ' : ''} STEP ${L.fill}`;
+    ctx.notes.add('opt', 'Tranches vides comblées (WITH FILL)', 'Comme un histogramme avec min_doc_count: 0, les intervalles sans document sont générés par ClickHouse au lieu d’être comblés côté client. Avec extended_bounds, la série est étendue jusqu’aux bornes demandées.');
+  } else if (L.fill && L.pipes.length) {
+    ctx.stats.approx++;
+    ctx.notes.add('warn', `Tranches vides non comblées (${L.name})`, 'Avec un pipeline d’agrégation, les tranches sans document ne sont pas ajoutées : le calcul porte sur les tranches présentes, alors qu’Elasticsearch compte aussi les tranches vides.');
+  }
   let limit = null, limitBy = null;
   const size = limitOverride && limitOverride.n !== undefined ? limitOverride.n : L.size;
   const offset = limitOverride ? limitOverride.offset : 0;
@@ -887,11 +929,11 @@ function rootAggs(ctx, env, aggs) {
     else if (t === 'filter' && Object.values(aggChildren(def)).every(d => METRIC_TYPES.has(aggType(d)))) {
       ctx.humanOff++; const c = tq(ctx, b) || '1'; ctx.humanOff--;
       metrics.push({ alias: aliasOf(`${name}_doc_count`), render: () => `countIf(${c})` });
-      for (const [mn, md] of Object.entries(aggChildren(def))) { const mt = aggType(md); metricDef(ctx, `${name}_${mn}`, mt, md[mt] || {}).forEach(m => metrics.push({ alias: m.alias, render: () => m.render(c) })); }
+      for (const [mn, md] of Object.entries(aggChildren(def))) { const mt = aggType(md); metricDef(ctx, `${name}_${mn}`, mt, md[mt] || {}).forEach(m => metrics.push({ alias: m.alias, render: () => m.render(c, true) })); }
       ctx.stats.ok++;
     } else rest[name] = def;
   }
-  if (metrics.length) out.push({ title: 'Mesures globales', sql: sqlSelect({ select: metrics.map(m => `${m.render(null)} AS ${m.alias}`), from: env.table, where: env.baseWhere }) });
+  if (metrics.length) out.push({ title: 'Mesures globales', sql: sqlSelect({ select: metrics.map(m => `${m.render(null, true)} AS ${m.alias}`), from: env.table, where: env.baseWhere }) });
   walkAggs(ctx, env, rest, [], out);
   for (const s of siblings) {
     const bp = String(s.body.buckets_path || ''); const [aggName, metric] = bp.split('>');

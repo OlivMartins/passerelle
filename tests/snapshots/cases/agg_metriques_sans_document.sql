@@ -2,9 +2,9 @@
 
 -- Mesures globales
 SELECT
-    min(latency_ms) AS mn,
-    max(latency_ms) AS mx,
-    avg(latency_ms) AS av,
+    minOrNull(latency_ms) AS mn,
+    maxOrNull(latency_ms) AS mx,
+    avgOrNull(latency_ms) AS av,
     sum(latency_ms) AS sm,
     count(latency_ms) AS vc
 FROM logs.events

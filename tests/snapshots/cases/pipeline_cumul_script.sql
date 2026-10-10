@@ -1,4 +1,5 @@
--- Couverture : 4 directs, 0 à vérifier, 0 à reprendre
+-- Couverture : 4 directs, 1 à vérifier, 0 à reprendre
+-- À vérifier : Tranches vides non comblées (d)
 
 -- Agrégation d
 SELECT

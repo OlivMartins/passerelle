@@ -21,7 +21,7 @@ SELECT
     toStartOfInterval(timestamp, INTERVAL 1 HOUR, 'Europe/Paris') AS par_heure,
     count() AS doc_count,
     quantilesTDigest(0.95)(latency_ms) AS latence_p95,
-    avg(latency_ms) AS latence_moy,
+    avgOrNull(latency_ms) AS latence_moy,
     sum(count()) OVER (PARTITION BY par_service) AS par_service_doc_count
 FROM logs.events
 WHERE timestamp >= now() - INTERVAL 24 HOUR
@@ -43,4 +43,4 @@ WHERE timestamp >= now() - INTERVAL 24 HOUR
     LIMIT 10
 )
 GROUP BY par_service, par_heure
-ORDER BY par_service_doc_count DESC, par_service, par_heure ASC;
+ORDER BY par_service_doc_count DESC, par_service, par_heure ASC WITH FILL STEP INTERVAL 1 HOUR;

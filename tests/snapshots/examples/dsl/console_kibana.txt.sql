@@ -8,7 +8,7 @@ SELECT
     heure_locale AS par_heure,
     count() AS doc_count,
     countIf(classe_latence = 'lent') AS lentes_doc_count,
-    maxIf(latency_ms, classe_latence = 'lent') AS lentes_lat_max
+    maxIfOrNull(latency_ms, classe_latence = 'lent') AS lentes_lat_max
 FROM logs.events
 WHERE timestamp >= toStartOfDay(now('UTC') - INTERVAL 7 DAY)
   AND isNotNull(heure_locale)

@@ -24,6 +24,10 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 - Borne de date écrite sans heure : `lte: "2026-03-10"` s’arrête à la fin du jour, comme dans Elasticsearch, et non à minuit.
 - Date math avec un arrondi suivi d’un décalage (`now/d+1h`, `…||/M+1M`) ; une expression de date illisible fait échouer la traduction au lieu d’être comparée comme une chaîne.
 - `ChronoUnit.X.between()` : unités entières écoulées (`age`), et non changements de jour ou de mois (`dateDiff`).
+- Mesures sans document : `min`, `max`, `avg`, la variance et `weighted_avg` valent `null` comme dans Elasticsearch, et non 0 ou `nan` (combinateur `-OrNull`). Concerne les mesures globales, les sous-filtres et les tranches vides d’un histogramme.
+- `extended_bounds` était ignoré : les tranches vides aux bornes sont ajoutées (`WITH FILL FROM … TO …`), pour `date_histogram` et `histogram`.
+- Histogramme imbriqué : les tranches vides sont comblées dans chaque groupe parent, et plus seulement quand l’histogramme est seul.
+- `derivative`, `serial_diff`, `moving_fn` : les premiers points, sans prédécesseur, valent `null` et non 0 ou la valeur elle-même. Un histogramme avec pipeline, dont les tranches vides ne sont pas comblées, est désormais signalé « à vérifier ».
 - `query_string` mal formée (parenthèse ou guillemet non fermé, opérateur doublé) : déclarée « à reprendre », comme Elasticsearch la refuse, au lieu d’être traduite en partie sans avertissement.
 - `simple_query_string` : analyseur dédié. Les opérateurs `+`, `|` et `-` s’appliquent de gauche à droite et une négation se combine par l’opérateur par défaut, comme dans Elasticsearch. `a | b` n’était pas filtré du tout.
 - Clause non traduite : le SQL s’arrête sur un message explicite (`throwIf`) au lieu de s’exécuter en ignorant la clause. Dans un `must_not`, l’ancien `1` écartait toutes les lignes.
