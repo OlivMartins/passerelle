@@ -182,7 +182,7 @@ function serve(opts) {
           const r = translateDSL(body, cfg, { index: url.searchParams.get('index') || '' });
           if (r.empty) return json(res, 400, { error: 'requête vide' });
           if (r.error) return json(res, 422, { error: r.error });
-          return json(res, 200, { table: r.table, sql: r.sql, statements: r.statements, notes: r.notes, coverage: coverage(r.stats), summary: r.sentence });
+          return json(res, 200, { table: r.table, sql: r.sql, statements: r.statements, lists: r.lists, notes: r.notes, coverage: coverage(r.stats), summary: r.sentence });
         }
         case '/v1/translate/logstash': {
           const fmt = url.searchParams.get('format') === 'toml' ? 'toml' : 'yaml';
@@ -275,10 +275,14 @@ function batch(kind, o) {
     if (o.out) {
       const target = path.join(o.out, path.basename(f).replace(/\.[^.]+$/, '') + (kind === 'dsl' ? '.sql' : `.${fmt}`));
       fs.writeFileSync(target, content);
-      process.stderr.write(`${r.stats.ko ? '!' : '✓'} ${f} → ${target} (${cov.percent} % traduit, ${r.stats.approx} à vérifier, ${r.stats.ko} à reprendre)\n`);
+      // Listes nommées : la table et ses lignes, à exécuter avant la requête
+      const lists = kind === 'dsl' ? r.lists : [];
+      if (lists.length) fs.writeFileSync(target.replace(/\.sql$/, '.lists.sql'), lists.map(l => l.sql).join('\n\n') + '\n');
+      process.stderr.write(`${r.stats.ko ? '!' : '✓'} ${f} → ${target} (${cov.percent} % traduit, ${r.stats.approx} à vérifier, ${r.stats.ko} à reprendre${lists.length ? `, ${lists.length} liste(s) nommée(s)` : ''})\n`);
     } else {
       process.stdout.write(content + (files.length > 1 ? '\n' : ''));
       process.stderr.write(`${r.stats.ko ? '!' : '✓'} ${f} (${cov.percent} % traduit, ${r.stats.approx} à vérifier, ${r.stats.ko} à reprendre)\n`);
+      if (kind === 'dsl' && r.lists.length) process.stderr.write(`    ${r.lists.length} liste(s) nommée(s) : ajoutez --out pour écrire leur fichier .lists.sql\n`);
     }
     if (o.verbose) r.notes.forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`));
   }
