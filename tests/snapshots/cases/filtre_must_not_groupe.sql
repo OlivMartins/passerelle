@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE ((env != 'prod' OR env IS NULL) OR level = 'ERROR');
+WHERE NOT ifNull(env = 'prod' AND level = 'INFO', 0);

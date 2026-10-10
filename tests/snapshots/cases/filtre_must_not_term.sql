@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE env != 'staging';
+WHERE (env != 'staging' OR env IS NULL);

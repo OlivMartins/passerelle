@@ -101,6 +101,13 @@ check(!/'UTC'/.test(E.translateDSL(JSON.stringify(dated), utcConfig, { index: IN
 const readme = rd('README.md');
 const readmeOut = E.translateDSL(readme.match(/```json\n([\s\S]*?)```/)[1], E.DEFAULT_CONFIG, { index: 'logs-*' });
 check(readmeOut.sql.replace(/^-- .*\n/, '').trim() === readme.match(/```sql\n([\s\S]*?)```/)[1].trim(), 'README : le SQL de l’exemple est celui que produit le moteur');
+// Sans schéma des colonnes, la traduction garde ses formes simples mais signale ce qui en dépend
+const noSchema = E.mergeConfig(benchConfig, { clickhouse: { columns: {} } });
+const blind = E.translateDSL(JSON.stringify({ query: { bool: { must_not: [{ term: { env: 'staging' } }], filter: [{ exists: { field: 'user' } }] } } }), noSchema, { index: INDEX });
+check(/env != 'staging'\n/.test(blind.sql) && blind.notes.some(n => n.level === 'warn' && n.title === 'Schéma des colonnes non fourni'), 'sans schéma : must_not et exists traduits simplement, avec une remarque « à vérifier »');
+const blindDiv = E.translateDSL(JSON.stringify({ size: 0, runtime_mappings: { t: { type: 'long', script: "emit(doc['latency_ms'].value / 100)" } }, aggs: { b: { terms: { field: 't' } } } }), noSchema, { index: INDEX });
+check(/latency_ms \/ 100/.test(blindDiv.sql) && blindDiv.notes.some(n => n.level === 'warn' && n.title === 'Division dans un script'), 'sans schéma : division Painless signalée, type des opérandes inconnu');
+check(/intDiv\(latency_ms, 100\)/.test(tr({ size: 0, runtime_mappings: { t: { type: 'long', script: "emit(doc['latency_ms'].value / 100)" } }, aggs: { b: { terms: { field: 't' } } } }).sql), 'avec schéma : division de deux entiers traduite par intDiv');
 // Un nom de clause inconnu reste dans une chaîne SQL échappée
 const odd = tr({ query: { "x') OR 1=1 --": {} } });
 check(odd.stats.ko === 1 && odd.sql.includes("throwIf(1, 'Passerelle : x\\') OR 1=1 -- à traduire')"), 'clause inconnue : nom échappé, requête arrêtée par throwIf');

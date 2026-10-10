@@ -227,6 +227,10 @@ clickhouse:
     'logs-*': logs.events             # index Elasticsearch → table ClickHouse
   field_mapping:
     '@timestamp': timestamp
+  columns:                            # types des colonnes : facultatif, mais nécessaire à une traduction fidèle
+    env: LowCardinality(Nullable(String))
+    tags: Array(String)
+    latency_ms: UInt32
 kafka:
   bootstrap_servers: kafka-1:9092,kafka-2:9092
   consumer_group: vector-logs
@@ -234,6 +238,30 @@ vector:
   acknowledgements: true              # offsets validés après écriture seulement
   shadow_mode: false
 ```
+
+### Donnez-lui le schéma de vos colonnes
+
+Elasticsearch et ClickHouse ne répondent pas pareil dès qu’un champ est facultatif, multivalué ou entier. `columns` indique à Passerelle le type de chaque colonne, et la traduction s’adapte :
+
+| Colonne | Ce que Passerelle écrit |
+|---|---|
+| `Nullable` | Un `must_not` garde les lignes `NULL`, comme Elasticsearch garde les documents sans le champ : `(env != 'staging' OR env IS NULL)`. Un regroupement les écarte. |
+| `Array` | Un champ multivalué : `has(tags, 'a')` pour un `term`, `arrayJoin(tags)` pour un regroupement, `notEmpty(tags)` pour `exists`. |
+| Entier | La division de deux entiers d’un script Painless devient `intDiv()`, entière comme en Java. |
+| Date | Une borne numérique est lue comme un instant en epoch millis. |
+
+Une requête suffit à produire ce bloc :
+
+```sql
+SELECT concat('    ', name, ': ', type)
+FROM system.columns
+WHERE database = 'logs' AND table = 'events'
+FORMAT TSVRaw
+```
+
+Sans `columns`, Passerelle traduit comme si toutes les colonnes étaient simples et non `Nullable`, et le signale par une remarque « à vérifier » sur les requêtes concernées.
+
+Si vos colonnes de texte ne sont pas `Nullable` et qu’une chaîne vide y représente un champ absent, ajoutez `empty_as_missing: true` : `exists` devient `colonne != ''`, et les regroupements ignorent les chaînes vides.
 
 ## Démarrer
 

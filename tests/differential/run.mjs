@@ -339,11 +339,11 @@ console.log(`Elasticsearch ${info.body.version.number} / ClickHouse ${chVersion}
 const docs = dataset();
 mkdirSync(WORK, { recursive: true });
 await loadElasticsearch(docs);
-const cfg = E.mergeConfig(E.DEFAULT_CONFIG, configOverride());
 const totals = { same: 0, known: 0, failed: 0 };
 const failures = [];
 for (const variant of variants) {
   const dir = loadClickHouse(docs, variant);
+  const cfg = E.mergeConfig(E.DEFAULT_CONFIG, configOverride(variant));
   console.log(`--- Schéma ${variant} : ${VARIANTS[variant]}`);
   for (const c of CASES) {
     if (ONLY && !ONLY.test(c.id)) continue;

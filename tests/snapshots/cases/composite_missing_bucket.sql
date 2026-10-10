@@ -6,6 +6,7 @@ SELECT
     service AS svc,
     count() AS doc_count
 FROM logs.events
+WHERE isNotNull(env)
 GROUP BY env, svc
 ORDER BY env ASC, svc ASC
 LIMIT 10;

@@ -2,7 +2,7 @@
 
 -- Agrégation t
 SELECT
-    arrayJoin(tags) AS t,
+    arrayJoin(if(empty(tags), ['aucun'], tags)) AS t,
     count() AS doc_count
 FROM logs.events
 GROUP BY t

@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE has(tags, 'a');
+WHERE arrayExists(x -> startsWith(x, 'b'), tags);

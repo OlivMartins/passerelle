@@ -112,15 +112,21 @@ export function clickhouseDDL(variant) {
   return `CREATE DATABASE IF NOT EXISTS logs;\nCREATE TABLE ${TABLE} (\n${cols}\n) ENGINE = MergeTree ORDER BY (service, timestamp);`;
 }
 
-/* Configuration Passerelle utilisée par le banc et par les instantanés */
-export function configOverride() {
+/*
+ * Configuration Passerelle utilisée par le banc (une par schéma) et par les instantanés (schéma N).
+ * Le schéma des colonnes est fourni : c’est lui qui permet une traduction fidèle sur les champs facultatifs,
+ * les tableaux et les entiers. Avec le schéma D, la chaîne vide représente un champ absent.
+ */
+export function configOverride(variant = 'N') {
   return {
     clickhouse: {
       default_table: TABLE,
       time_field: 'timestamp',
       text_fields: ['message'],
       index_mapping: { 'logs-*': TABLE },
-      field_mapping: { '@timestamp': 'timestamp' }
+      field_mapping: { '@timestamp': 'timestamp' },
+      columns: columns(variant),
+      empty_as_missing: variant === 'D'
     }
   };
 }

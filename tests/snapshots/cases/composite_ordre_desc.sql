@@ -8,6 +8,7 @@ SELECT
     status AS st,
     count() AS doc_count
 FROM logs.events
+WHERE isNotNull(env)
 GROUP BY svc, env, lvl, st
 ORDER BY svc ASC, env ASC, lvl ASC, st ASC
 LIMIT 25;

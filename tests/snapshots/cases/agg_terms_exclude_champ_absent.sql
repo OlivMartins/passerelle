@@ -6,6 +6,7 @@ SELECT
     count() AS doc_count
 FROM logs.events
 WHERE isNotNull(env)
+  AND env NOT IN ('dev')
 GROUP BY e
 ORDER BY doc_count DESC, e ASC
 LIMIT 10;

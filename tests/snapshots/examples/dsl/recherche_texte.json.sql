@@ -1,4 +1,5 @@
 -- Couverture : 6 directs, 0 à vérifier, 0 à reprendre
+-- À vérifier : Schéma des colonnes non fourni
 
 -- Documents
 SELECT

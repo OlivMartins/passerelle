@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE user NOT IN ('alice', 'bob');
+WHERE (user NOT IN ('alice', 'bob') OR user IS NULL);

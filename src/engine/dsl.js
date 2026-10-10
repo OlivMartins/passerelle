@@ -47,9 +47,9 @@ function dateMathSQL(ctx, dm, tz, roundUp) {
 function isDateField(ctx, field) {
   const base = String(field).replace(/\.keyword$/, '');
   if (ctx.runtime[base]) return ctx.runtime[base].type === 'date';
-  const fm = ctx.cfg.clickhouse.field_mapping || {};
-  const column = Object.prototype.hasOwnProperty.call(fm, base) && fm[base] ? fm[base] : base;
-  return column === ctx.cfg.clickhouse.time_field || guessType(ctx, base) === 'date';
+  const type = fieldType(ctx, field);
+  if (type) return type.kind === 'date';
+  return fieldColumn(ctx, field) === ctx.cfg.clickhouse.time_field || guessType(ctx, base) === 'date';
 }
 // Instant donné en epoch millis (le format par défaut d’un champ date accepte un nombre)
 const isEpoch = v => typeof v === 'number' || /^\d{5,}$/.test(String(v));
@@ -82,11 +82,50 @@ function makeDslCtx(cfg) {
   const ctx = {
     cfg, notes, stats: { ok: 0, approx: 0, ko: 0 },
     runtime: {}, human: { period: null, filters: [], excludes: [], text: [], groups: [], metrics: [], hits: null, runtime: [] },
-    cap: [], humanOff: 0, dateFields: new Set(), textCols: new Set(), groupCols: new Set(), leadingWildcard: false
+    cap: [], humanOff: 0, dateFields: new Set(), textCols: new Set(), groupCols: new Set(), leadingWildcard: false,
+    // Schéma des colonnes : table en cours, colonnes Nullable rencontrées, et constructions dont la justesse en dépend
+    table: null, schema: hasSchema(cfg), nullableCols: new Set(), schemaGaps: new Set()
   };
   ctx.mapField = f => mapField(ctx, f);
+  ctx.kindOf = f => { const t = fieldType(ctx, f); return t ? t.kind : null; };
   return ctx;
 }
+// Colonne ClickHouse d’un champ Elasticsearch : sous-champ .keyword retiré, puis field_mapping
+function fieldColumn(ctx, field) {
+  const base = String(field).replace(/\.keyword$/, '');
+  const fm = ctx.cfg.clickhouse.field_mapping || {};
+  return Object.prototype.hasOwnProperty.call(fm, base) && fm[base] ? fm[base] : base;
+}
+// Type de la colonne d’après clickhouse.columns ; null pour un champ runtime ou une colonne que le schéma ne décrit pas
+function fieldType(ctx, field) {
+  if (ctx.runtime[String(field).replace(/\.keyword$/, '')]) return null;
+  return columnType(ctx.cfg, ctx.table, fieldColumn(ctx, field));
+}
+const isArrayField = (ctx, field) => { const t = fieldType(ctx, field); return !!t && t.array; };
+/*
+ * « Le champ n’a pas de valeur » et son contraire, selon le type de la colonne :
+ * tableau vide, chaîne vide quand elle représente l’absence (empty_as_missing), NULL sinon.
+ */
+function absentSQL(ctx, field) {
+  const f = mapField(ctx, field); const t = fieldType(ctx, field);
+  if (t && t.array) return `empty(${f})`;
+  return emptyIsMissing(ctx, t) ? `${f} = ''` : `isNull(${f})`;
+}
+function presentSQL(ctx, field) {
+  const f = mapField(ctx, field); const t = fieldType(ctx, field);
+  if (t && t.array) return `notEmpty(${f})`;
+  return emptyIsMissing(ctx, t) ? `${f} != ''` : `isNotNull(${f})`;
+}
+/*
+ * Applique un prédicat aux valeurs d’un champ. Un champ multivalué d’Elasticsearch est une colonne Array :
+ * le document correspond dès qu’une de ses valeurs satisfait le prédicat.
+ */
+function onValues(ctx, field, predicate) {
+  const f = mapField(ctx, field);
+  return isArrayField(ctx, field) ? `arrayExists(x -> ${predicate('x')}, ${f})` : predicate(f);
+}
+// Une chaîne vide représente-t-elle un champ absent dans cette colonne ? (convention clickhouse.empty_as_missing)
+const emptyIsMissing = (ctx, t) => !!t && !t.nullable && !t.array && t.kind === 'string' && !!ctx.cfg.clickhouse.empty_as_missing;
 function H(ctx, kind, text) {
   if (ctx.humanOff) return;
   if (ctx.cap.length) { ctx.cap[ctx.cap.length - 1].push(text); return; }
@@ -105,6 +144,8 @@ function mapField(ctx, field) {
   if (Object.prototype.hasOwnProperty.call(fm, name) && fm[name]) name = fm[name];
   if (name === '_id') ctx.notes.add('warn', 'Champ _id', 'Elasticsearch génère _id ; dans ClickHouse il faut une colonne équivalente (par ex. un UUID ou un identifiant métier).');
   ctx.columns.add(name);
+  const type = columnType(ctx.cfg, ctx.table, name);
+  if (type && type.nullable) ctx.nullableCols.add(chIdent(name));
   return chIdent(name);
 }
 function isTextField(ctx, field) {
@@ -150,15 +191,56 @@ function splitTopAnd(s) {
   out.push(s.slice(last));
   return out.map(x => x.trim()).filter(Boolean);
 }
-function negate(s) {
+/*
+ * Le prédicat peut-il valoir NULL ? Oui s’il lit une colonne Nullable (d’après clickhouse.columns) ailleurs
+ * que dans un test de nullité. Dans WHERE, NULL vaut faux, ce qui convient à un filtre positif. Mais
+ * NOT NULL reste NULL : la ligne est écartée, alors qu’Elasticsearch garde un document qui n’a pas le champ.
+ */
+function mayBeNull(ctx, s) {
+  if (!ctx.nullableCols.size) return false;
+  const bare = String(s).replace(/'(?:[^'\\]|\\.)*'/g, "''");
+  for (const col of ctx.nullableCols) {
+    const c = escRe(col);
+    const uses = bare.match(new RegExp(`(?<![A-Za-z0-9_.\`])${c}(?![A-Za-z0-9_.\`(])`, 'g')) || [];
+    const guarded = bare.match(new RegExp(`\\b(?:isNull|isNotNull)\\(${c}\\)|\\bifNull\\(${c},|(?<![A-Za-z0-9_.\`])${c} IS (?:NOT )?NULL`, 'g')) || [];
+    if (uses.length > guarded.length) return true;
+  }
+  return false;
+}
+const OPPOSITE = { isNull: 'isNotNull', isNotNull: 'isNull', empty: 'notEmpty', notEmpty: 'empty' };
+/* Négation d’un prédicat, fidèle à must_not : un document qui n’a pas le champ ne correspond pas à la clause, donc il est gardé */
+function negate(ctx, s) { return negateWith(s, mayBeNull(ctx, s)); }
+function negateWith(s, nullable) {
   if (!topHas(s, /^ (AND|OR) /) && !/^NOT /.test(s)) {
+    const test = /^(isNull|isNotNull|empty|notEmpty)\((.*)\)$/.exec(s);
+    if (test && isWrapped(`(${test[2]})`)) return `${OPPOSITE[test[1]]}(${test[2]})`;
     let eq = -1, cnt = 0, inn = -1;
     scanTop(s, i => { if (s.startsWith(' = ', i)) { eq = i; cnt++; } if (s.startsWith(' IN (', i)) inn = i; });
-    if (cnt === 1 && inn < 0) return s.slice(0, eq) + ' != ' + s.slice(eq + 3);
-    if (inn > 0 && cnt === 0) return s.slice(0, inn) + ' NOT IN (' + s.slice(inn + 5);
+    if (cnt === 1 && inn < 0) {
+      const lhs = s.slice(0, eq); const neg = `${lhs} != ${s.slice(eq + 3)}`;
+      return nullable ? `(${neg} OR ${lhs} IS NULL)` : neg;
+    }
+    if (inn > 0 && cnt === 0) {
+      const lhs = s.slice(0, inn); const neg = `${lhs} NOT IN (${s.slice(inn + 5)}`;
+      return nullable ? `(${neg} OR ${lhs} IS NULL)` : neg;
+    }
+    let ne = -1, neCount = 0;
+    scanTop(s, i => { if (s.startsWith(' != ', i)) { ne = i; neCount++; } });
+    if (!nullable && cnt === 0 && inn < 0 && neCount === 1) return `${s.slice(0, ne)} = ${s.slice(ne + 4)}`;
+    // Comparaison seule : a >= b devient a < b, plus lisible que NOT (a >= b)
+    const FLIP = { ' >= ': ' < ', ' <= ': ' > ', ' > ': ' <= ', ' < ': ' >= ' };
+    let at = -1, found = null, comparisons = 0;
+    scanTop(s, i => { const op = Object.keys(FLIP).find(o => s.startsWith(o, i)); if (op) { at = i; found = op; comparisons++; } });
+    if (comparisons === 1 && cnt === 0 && inn < 0 && neCount === 0) {
+      const lhs = s.slice(0, at); const neg = `${lhs}${FLIP[found]}${s.slice(at + found.length)}`;
+      return nullable ? `(${neg} OR ${lhs} IS NULL)` : neg;
+    }
   }
+  if (nullable) return `NOT ifNull(${isWrapped(s) ? s.slice(1, -1) : s}, 0)`;
   return `NOT ${isWrapped(s) ? s : '(' + s + ')'}`;
 }
+// Condition comptée dans une somme (minimum_should_match) : NULL ferait de toute la somme un NULL
+const countable = (ctx, c) => (mayBeNull(ctx, c) ? `ifNull(${c}, 0)` : `(${c})`);
 function conjunctsOf(ctx, q) {
   if (isObj(q) && Object.keys(q)[0] === 'bool') return boolParts(ctx, q.bool).flatMap(splitTopAnd);
   const s = tq(ctx, q); return s === null ? [] : splitTopAnd(s);
@@ -173,8 +255,10 @@ function boolParts(ctx, b) {
     const ns = not.map(c => tq(ctx, c));
     const caught = ctx.cap.pop();
     if (!ctx.humanOff) caught.forEach(x => (ctx.cap.length ? ctx.cap[ctx.cap.length - 1].push('pas ' + x) : ctx.human.excludes.push(x)));
-    const orNs = orJoin(ns);
-    parts.push(orNs === null ? 'false' : negate(orNs));
+    // Chaque clause est niée séparément : (a != x) AND (b != y) se lit mieux que NOT (a = x OR b = y)
+    if (ns.some(n => n === null)) parts.push('false');
+    else parts.push(...[...new Set(ns)].map(n => negate(ctx, n)));
+    ctx.schemaGaps.add('must_not');
   }
   if (should.length) {
     let k = msmCount(b.minimum_should_match, should.length);
@@ -187,7 +271,7 @@ function boolParts(ctx, b) {
       if (caught.length) H(ctx, 'filters', k === 1 ? caught.join(' ou ') : `au moins ${k} parmi : ${caught.join(', ')}`);
       if (k === 1) { const o = orJoin(cs); if (o !== null) parts.push(o); }
       else if (k >= cs.length) parts.push(...cs.filter(x => x !== null));
-      else parts.push(`${cs.map(c => (c === null ? '1' : `(${c})`)).join(' + ')} >= ${k}`);
+      else parts.push(`${cs.map(c => (c === null ? '1' : countable(ctx, c))).join(' + ')} >= ${k}`);
     }
   }
   return parts;
@@ -200,6 +284,8 @@ function rangeClause(ctx, field, spec0) {
   }
   const f = mapField(ctx, field);
   const tz = spec.time_zone; const fmt = spec.format || '';
+  // Champ multivalué : il suffit qu’une valeur soit dans la plage
+  const multi = isArrayField(ctx, field);
   const parts = []; let isDate = false; let lower = null, upper = null; const hum = [];
   const OPS = [['gte', '>=', '≥'], ['gt', '>', '>'], ['lte', '<=', '≤'], ['lt', '<', '<']];
   // Champ date : connu comme tel, ou comparé à une date. Un nombre y est alors un instant en epoch millis.
@@ -227,7 +313,7 @@ function rangeClause(ctx, field, spec0) {
       throw new Error(`expression de date non reconnue pour ${field} : ${v}`);
     } else sql = chVal(v);
     if (date) isDate = true;
-    parts.push(`${f} ${s} ${sql}`);
+    parts.push(`${multi ? 'x' : f} ${s} ${sql}`);
     hum.push(`${hs} ${date ? humanDate(v) : v}`);
   }
   if (isDate) {
@@ -237,6 +323,7 @@ function rangeClause(ctx, field, spec0) {
     else H(ctx, 'period', `${field} ${hum.join(' et ')}`);
   } else H(ctx, 'filters', `${field} ${hum.join(' et ')}`);
   ctx.stats.ok++;
+  if (multi) return `arrayExists(x -> ${parts.join(' AND ')}, ${f})`;
   if (parts.length === 2 && spec.gte !== undefined && spec.lte !== undefined && !isDate) return `${f} BETWEEN ${chVal(spec.gte)} AND ${chVal(spec.lte)}`;
   return andJoin(parts);
 }
@@ -263,7 +350,7 @@ function matchClause(ctx, field, o, type) {
     H(ctx, 'text', `${field} contient ${toks.map(t => `« ${t} »`).join(op === 'and' ? ' et ' : ' ou ')}`);
     if (op === 'and') return andJoin(conds);
     const k = msmCount(o.minimum_should_match, conds.length);
-    if (k && k > 1) return k >= conds.length ? andJoin(conds) : `${conds.map(c => `(${c})`).join(' + ')} >= ${k}`;
+    if (k && k > 1) return k >= conds.length ? andJoin(conds) : `${conds.map(c => countable(ctx, c)).join(' + ')} >= ${k}`;
     return orJoin(conds);
   }
   if (type === 'match_phrase') {
@@ -290,28 +377,39 @@ function tq(ctx, q) {
       if (isObj(raw)) { v = raw.value; ci = !!raw.case_insensitive; }
       const f = mapField(ctx, field); ctx.stats.ok++;
       H(ctx, 'filters', `${field} = ${v}`);
-      return ci ? `lower(${f}) = ${chStr(String(v).toLowerCase())}` : `${f} = ${chVal(v)}`;
+      if (ci) return onValues(ctx, field, x => `lower(${x}) = ${chStr(String(v).toLowerCase())}`);
+      return isArrayField(ctx, field) ? `has(${f}, ${chVal(v)})` : `${f} = ${chVal(v)}`;
     }
     case 'terms': {
       const [field, vals] = fieldEntry(body);
       if (!Array.isArray(vals)) return todo(ctx, 'terms lookup', 'La recherche de termes dans un autre index demande une sous-requête ClickHouse (IN (SELECT …)) écrite à la main.');
       const f = mapField(ctx, field); ctx.stats.ok++;
       H(ctx, 'filters', `${field} ∈ {${vals.slice(0, 4).join(', ')}${vals.length > 4 ? '…' : ''}}`);
+      if (isArrayField(ctx, field)) return vals.length === 1 ? `has(${f}, ${chVal(vals[0])})` : `hasAny(${f}, [${vals.map(chVal).join(', ')}])`;
       return vals.length === 1 ? `${f} = ${chVal(vals[0])}` : `${f} IN (${vals.map(chVal).join(', ')})`;
     }
     case 'range': { const [field, spec] = fieldEntry(body); return rangeClause(ctx, field, spec); }
     case 'exists': {
-      const f = mapField(ctx, body.field); ctx.stats.ok++;
+      const f = mapField(ctx, body.field); const type = fieldType(ctx, body.field);
       H(ctx, 'filters', `${body.field} renseigné`);
-      ctx.notes.add('info', 'exists → isNotNull', 'Pour une colonne non Nullable (valeur par défaut au lieu de NULL), remplacez par notEmpty(col) ou col != 0 selon le type.');
+      // Un champ existe s’il a au moins une valeur : tableau non vide, colonne non NULL, ou chaîne non vide selon la convention
+      if (type && type.array) { ctx.stats.ok++; return `notEmpty(${f})`; }
+      if (type && !type.nullable && emptyIsMissing(ctx, type)) { ctx.stats.ok++; return `${f} != ''`; }
+      if (type && !type.nullable) {
+        ctx.stats.approx++;
+        ctx.notes.add('warn', `exists sur ${body.field}`, 'La colonne n’est pas Nullable : un champ absent y prend la valeur par défaut et ne se distingue plus d’un champ renseigné, la condition est donc toujours vraie. Si la chaîne vide représente l’absence, activez clickhouse.empty_as_missing.');
+        return `isNotNull(${f})`;
+      }
+      ctx.stats.ok++;
+      if (!type && !ctx.runtime[String(body.field).replace(/\.keyword$/, '')]) ctx.schemaGaps.add('exists');
       return `isNotNull(${f})`;
     }
     case 'prefix': {
       const [field, raw] = fieldEntry(body);
       const v = isObj(raw) ? raw.value : raw; const ci = isObj(raw) && raw.case_insensitive;
-      const f = mapField(ctx, field); ctx.stats.ok++;
+      ctx.stats.ok++;
       H(ctx, 'filters', `${field} commence par « ${v} »`);
-      return ci ? `startsWith(lower(${f}), ${chStr(String(v).toLowerCase())})` : `startsWith(${f}, ${chStr(v)})`;
+      return onValues(ctx, field, x => (ci ? `startsWith(lower(${x}), ${chStr(String(v).toLowerCase())})` : `startsWith(${x}, ${chStr(v)})`));
     }
     case 'wildcard': {
       const [field, raw] = fieldEntry(body);
@@ -320,8 +418,8 @@ function tq(ctx, q) {
       const f = mapField(ctx, field);
       if (v === '*') return tq(ctx, { exists: { field } });
       H(ctx, 'filters', `${field} ~ ${v}`);
-      if (!/[*?]/.test(v)) { ctx.stats.ok++; return `${f} = ${chStr(v)}`; }
-      if (/^[^*?]+\*$/.test(v) && !ci && !isTextField(ctx, field)) { ctx.stats.ok++; return `startsWith(${f}, ${chStr(v.slice(0, -1))})`; }
+      if (!/[*?]/.test(v)) { ctx.stats.ok++; return isArrayField(ctx, field) ? `has(${f}, ${chStr(v)})` : `${f} = ${chStr(v)}`; }
+      if (/^[^*?]+\*$/.test(v) && !ci && !isTextField(ctx, field)) { ctx.stats.ok++; return onValues(ctx, field, x => `startsWith(${x}, ${chStr(v.slice(0, -1))})`); }
       let like = likeEscape(v).replace(/\*/g, '%').replace(/\?/g, '_');
       if (/^[*?]/.test(v)) ctx.leadingWildcard = f;
       if (isTextField(ctx, field)) {
@@ -330,7 +428,7 @@ function tq(ctx, q) {
         return `${f} ILIKE ${chStr('%' + like.replace(/^%|%$/g, '') + '%')}`;
       }
       ctx.stats.ok++;
-      return `${f} ${ci ? 'ILIKE' : 'LIKE'} ${chStr(like)}`;
+      return onValues(ctx, field, x => `${x} ${ci ? 'ILIKE' : 'LIKE'} ${chStr(like)}`);
     }
     case 'regexp': {
       const [field, raw] = fieldEntry(body);
@@ -338,7 +436,7 @@ function tq(ctx, q) {
       const f = mapField(ctx, field);
       if (/[@#&~<>]/.test(v)) { ctx.stats.approx++; ctx.notes.add('warn', 'Syntaxe regexp Lucene', 'Les opérateurs Lucene @ # & ~ <n-m> n’existent pas en RE2 : vérifiez l’expression.'); } else ctx.stats.ok++;
       H(ctx, 'filters', `${field} correspond à /${v}/`);
-      return `match(${f}, ${chStr('^(?:' + v + ')$')})`;
+      return onValues(ctx, field, x => `match(${x}, ${chStr('^(?:' + v + ')$')})`);
     }
     case 'fuzzy': {
       const [field, raw] = fieldEntry(body);
@@ -427,7 +525,7 @@ function tq(ctx, q) {
 function luceneSQL(ctx, n, defFields, leaf) {
   if (n.op === 'and') return andJoin(n.a.map(x => luceneSQL(ctx, x, defFields, leaf)));
   if (n.op === 'or') return orJoin(n.a.map(x => luceneSQL(ctx, x, defFields, leaf)));
-  if (n.op === 'not') { const s = luceneSQL(ctx, n.a[0], defFields, leaf); return s === null ? 'false' : negate(s); }
+  if (n.op === 'not') { const s = luceneSQL(ctx, n.a[0], defFields, leaf); ctx.schemaGaps.add('must_not'); return s === null ? 'false' : negate(ctx, s); }
   const fields = n.field ? [n.field] : defFields;
   return orJoin(fields.map(f => leaf(ctx, f, n.tok)));
 }
@@ -528,15 +626,25 @@ function aggCall(fn, args, cond, mayBeEmpty) {
 /* Renvoie [{alias, render(cond, mayBeEmpty)}] */
 function metricDef(ctx, name, type, body) {
   const A = aliasOf(name);
-  const simple = (fn, x) => [{ alias: A, render: (c, e) => aggCall(fn, x, c, e) }];
+  const colType = typeof body.field === 'string' && !body.script && body.missing === undefined ? fieldType(ctx, body.field) : null;
+  // Sur un champ multivalué, avg, sum, min et max portent sur toutes les valeurs : combinateur -Array
+  const simple = (fn, x) => [{ alias: A, render: (c, e) => aggCall(colType && colType.array && /^(avg|sum|min|max)$/.test(fn) ? `${fn}Array` : fn, x, c, e) }];
   const fieldName = body.field || (body.script ? 'script' : '?');
   if (HM[type]) H(ctx, 'metrics', `${HM[type]} de ${fieldName}`);
   switch (type) {
     case 'avg': case 'sum': case 'min': case 'max': ctx.stats.ok++; return simple(type, valueExpr(ctx, body));
-    case 'value_count': ctx.stats.ok++; return simple('count', valueExpr(ctx, body));
+    case 'value_count': {
+      // Nombre de valeurs : chaque élément d’un tableau compte, un champ absent ne compte pas
+      ctx.stats.ok++; const x = valueExpr(ctx, body);
+      if (colType && colType.array) return [{ alias: A, render: c => aggCall('sum', `length(${x})`, c) }];
+      if (emptyIsMissing(ctx, colType)) return [{ alias: A, render: c => `countIf(${x} != ''${c ? ` AND ${c}` : ''})` }];
+      return simple('count', x);
+    }
     case 'cardinality':
       ctx.stats.ok++;
       ctx.notes.add('info', 'cardinality → uniq()', 'uniq() est approximatif comme HyperLogLog d’Elasticsearch (erreur < 2 %). Utilisez uniqExact() pour un compte exact, plus coûteux en mémoire.');
+      if (colType && colType.array) return simple('uniqArray', valueExpr(ctx, body));
+      if (emptyIsMissing(ctx, colType)) { const x = valueExpr(ctx, body); return [{ alias: A, render: c => `uniqIf(${x}, ${x} != ''${c ? ` AND ${c}` : ''})` }]; }
       return simple('uniq', valueExpr(ctx, body));
     case 'stats': case 'extended_stats': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
@@ -611,15 +719,26 @@ function buildLevel(ctx, name, def) {
     if (typeof inc === 'string') c = `match(${k}, ${chStr('^(?:' + inc + ')$')})`;
     else if (Array.isArray(inc)) c = `${k} IN (${inc.map(chVal).join(', ')})`;
     else if (isObj(inc) && inc.num_partitions) c = `cityHash64(${k}) % ${chInt(inc.num_partitions, 'num_partitions')} = ${chInt(inc.partition || 0, 'partition')}`;
-    if (c) L.where.push(neg ? `NOT (${c})` : c);
+    // Les documents sans le champ sont déjà écartés du regroupement : la négation simple suffit
+    if (c) L.where.push(neg ? negateWith(c, false) : c);
   };
   switch (type) {
     case 'terms': case 'significant_terms': case 'rare_terms': case 'significant_text': {
       let k = body.script ? painlessToSQL(ctx, body.script.source || body.script, { mode: 'expr', params: (body.script && body.script.params) || {} }).sql : mapField(ctx, body.field);
       if (body.field && !ctx.runtime[String(body.field).replace(/\.keyword$/, '')]) ctx.groupCols.add(mapField(ctx, body.field));
-      if (body.missing !== undefined) k = `ifNull(${k}, ${chVal(body.missing)})`;
+      const computed = !!body.script || !!ctx.runtime[String(body.field || '').replace(/\.keyword$/, '')];
+      const colType = computed ? null : fieldType(ctx, body.field);
+      const absent = emptyIsMissing(ctx, colType) ? `${k} = ''` : null;
+      if (colType && colType.array) {
+        // Champ multivalué : un document compte dans le groupe de chacune de ses valeurs ; un tableau vide ne compte nulle part
+        k = body.missing !== undefined ? `arrayJoin(if(empty(${k}), [${chVal(body.missing)}], ${k}))` : `arrayJoin(${k})`;
+      } else if (body.missing !== undefined) k = absent ? `if(${absent}, ${chVal(body.missing)}, ${k})` : `ifNull(${k}, ${chVal(body.missing)})`;
       L.keys.push({ sql: k, alias: A });
-      if (body.missing === undefined && (body.script || ctx.runtime[String(body.field || '').replace(/\.keyword$/, '')])) L.where.push(`isNotNull(${k})`);
+      // Elasticsearch ne crée pas de groupe pour les documents qui n’ont pas le champ
+      if (body.missing === undefined) {
+        if (computed || (colType && colType.nullable)) L.where.push(`isNotNull(${k})`);
+        else if (absent) L.where.push(`${k} != ''`);
+      }
       incl(k, body.include, false); incl(k, body.exclude, true);
       if (type === 'rare_terms') {
         L.having.push(`doc_count <= ${chInt(body.max_doc_count || 1, 'max_doc_count')}`); L.order = [{ by: '_count', dir: 'asc' }, { by: '_key', dir: 'asc' }];
@@ -707,7 +826,7 @@ function buildLevel(ctx, name, def) {
       ctx.humanOff++;
       const entries = Array.isArray(body.filters) ? body.filters.map((q, i) => [String(i), q]) : Object.entries(body.filters || {});
       const items = entries.map(([k, q]) => ({ key: k, cond: tq(ctx, q) || '1' }));
-      if (body.other_bucket || body.other_bucket_key) items.push({ key: body.other_bucket_key || '_other_', cond: `NOT (${orJoin(items.map(i => i.cond)) || '1'})` });
+      if (body.other_bucket || body.other_bucket_key) items.push({ key: body.other_bucket_key || '_other_', cond: (any => (any === null ? 'false' : negate(ctx, any)))(orJoin(items.map(i => i.cond))) });
       ctx.humanOff--;
       L.keys.push({ sql: `arrayJoin(arrayFilter(x -> x != '', [${items.map(i => `if(${i.cond}, ${chStr(i.key)}, '')`).join(', ')}]))`, alias: A });
       L.order = [{ by: `indexOf([${items.map(i => chStr(i.key)).join(', ')}], ${A})`, dir: 'asc', raw: true }];
@@ -715,7 +834,19 @@ function buildLevel(ctx, name, def) {
       break;
     }
     case 'filter': { ctx.humanOff++; const c = tq(ctx, body); ctx.humanOff--; if (c) L.where.push(c); H(ctx, 'groups', `sous-ensemble « ${name} »`); break; }
-    case 'missing': { L.where.push(`isNull(${mapField(ctx, body.field)})`); ctx.stats.ok++; H(ctx, 'groups', `${body.field} absent`); break; }
+    case 'missing': {
+      const f = mapField(ctx, body.field); const colType = fieldType(ctx, body.field);
+      // « Sans le champ » : tableau vide, chaîne vide selon la convention, ou NULL
+      if (colType && colType.array) L.where.push(`empty(${f})`);
+      else if (emptyIsMissing(ctx, colType)) L.where.push(`${f} = ''`);
+      else L.where.push(`isNull(${f})`);
+      if (colType && !colType.array && !colType.nullable && !emptyIsMissing(ctx, colType)) {
+        ctx.stats.approx++;
+        ctx.notes.add('warn', `missing sur ${body.field}`, 'La colonne n’est pas Nullable : un champ absent y prend la valeur par défaut, isNull() n’est donc jamais vrai. Si la chaîne vide représente l’absence, activez clickhouse.empty_as_missing.');
+      } else ctx.stats.ok++;
+      H(ctx, 'groups', `${body.field} absent`);
+      break;
+    }
     case 'global': { L.global = true; ctx.stats.ok++; ctx.notes.add('info', 'Agrégation global', 'Cette branche ignore le filtre de la requête principale, comme dans Elasticsearch.'); break; }
     case 'sampler': case 'diversified_sampler': ctx.stats.approx++; ctx.notes.add('info', `${type} ignoré`, 'Pour échantillonner, ajoutez SAMPLE 0.1 si la table déclare une clé d’échantillonnage (SAMPLE BY).'); break;
     case 'nested': case 'reverse_nested': ctx.stats.approx++; ctx.notes.add('warn', `Agrégation ${type}`, 'Les objets nested deviennent des tableaux : utilisez ARRAY JOIN sur la colonne concernée pour agréger par élément.'); break;
@@ -1108,6 +1239,7 @@ function translateRequest(input, cfg, opts, columns) {
   if (dsl.params && isObj(dsl.params.body)) { index = index || dsl.params.index || ''; dsl = dsl.params.body; }
   else if (isObj(dsl.body) && (dsl.index || Object.keys(dsl).length <= 3)) { index = index || dsl.index || ''; dsl = dsl.body; }
   const { table, matched } = resolveTable(ctx, index);
+  ctx.table = table;
   const env = { table, baseWhere: [] };
   // Champs runtime
   const rtm = dsl.runtime_mappings || {};
@@ -1120,6 +1252,8 @@ function translateRequest(input, cfg, opts, columns) {
     try {
       const out = painlessToSQL(ctx, src, { mode: 'emit', params: (isObj(sc) && sc.params) || {}, rtType: def.type });
       r.sql = out.sql;
+      // Le champ runtime vaut NULL s’il lit une colonne Nullable, ou quand le script n’émet rien
+      if (mayBeNull(ctx, r.sql) || /\bNULL\b/.test(r.sql.replace(/'(?:[^'\\]|\\.)*'/g, "''"))) ctx.nullableCols.add(r.alias);
       if (new RegExp('(^|[^A-Za-z0-9_])' + escRe(r.alias) + '($|[^A-Za-z0-9_])').test(out.sql)) r.alias = chIdent(rawAlias(name + '_rt'));
       ctx.stats.ok++; H(ctx, 'runtime', name);
       const chType = { keyword: 'String', long: 'Int64', double: 'Float64', date: 'DateTime64(3)', boolean: 'Bool', ip: 'String' }[def.type] || 'String';
@@ -1174,6 +1308,10 @@ function translateRequest(input, cfg, opts, columns) {
   if (statements.some(s => /IN \(\n/.test(s.sql))) ctx.notes.add('info', 'Top N imbriqués', 'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits par une sous-requête IN puis LIMIT n BY, avec des comptes exacts là où Elasticsearch les estime par shard.');
   const sql = statements.map(s => `-- ${s.title}\n${withClause(ctx, s.sql)};`).join('\n\n');
   const statementsOut = statements.map(s => ({ title: s.title, sql: withClause(ctx, s.sql) }));
+  if (!ctx.schema && ctx.schemaGaps.size) {
+    const labels = { must_not: 'une exclusion (must_not, NOT)', exists: 'exists' };
+    ctx.notes.add('warn', 'Schéma des colonnes non fourni', `La requête contient ${[...ctx.schemaGaps].map(g => labels[g]).join(' et ')}, dont le résultat dépend du type des colonnes. Sur une colonne Nullable, une exclusion écarte les lignes NULL qu’Elasticsearch garde ; sur une colonne non Nullable, exists est toujours vrai. Renseignez clickhouse.columns pour que la traduction en tienne compte.`);
+  }
   for (const [name, alias] of aliasGuard.renamed) ctx.notes.add('warn', `Agrégation « ${name} » renommée ${alias}`, `${rawAlias(name)} est aussi une colonne citée par la requête : un alias du même nom la masquerait partout, y compris dans WHERE. La colonne de résultat s’appelle donc ${alias}.`);
   const order = { err: 0, warn: 1, opt: 2, info: 3 };
   ctx.notes.list.sort((a, b) => order[a.level] - order[b.level]);

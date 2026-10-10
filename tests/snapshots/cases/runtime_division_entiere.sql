@@ -2,7 +2,7 @@
 
 -- Agrégation b
 WITH
-    latency_ms / 100 AS tranche
+    intDiv(latency_ms, 100) AS tranche
 SELECT
     tranche AS b,
     count() AS doc_count

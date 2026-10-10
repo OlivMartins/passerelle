@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE has(tags, 'a');
+WHERE NOT ifNull(startsWith(env, 'pr'), 0);

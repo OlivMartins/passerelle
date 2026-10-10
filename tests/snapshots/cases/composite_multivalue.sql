@@ -2,7 +2,7 @@
 
 -- Agrégation c
 SELECT
-    tags AS t,
+    arrayJoin(tags) AS t,
     service AS svc,
     count() AS doc_count
 FROM logs.events

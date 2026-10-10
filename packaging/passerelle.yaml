@@ -18,6 +18,11 @@ clickhouse:
     'metrics-*': metrics.samples
   field_mapping:
     '@timestamp': timestamp
+  # Types des colonnes de la table cible, pour traduire fidèlement les champs facultatifs (Nullable),
+  # multivalués (Array) et entiers. À produire avec :
+  #   SELECT concat('    ', name, ': ', type) FROM system.columns WHERE database = 'logs' AND table = 'events' FORMAT TSVRaw
+  columns: {}
+  empty_as_missing: false             # true : dans une colonne String non Nullable, la chaîne vide représente un champ absent
 kafka:
   bootstrap_servers: ''
   security_protocol: ''

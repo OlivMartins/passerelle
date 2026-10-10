@@ -4,4 +4,6 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE ifNull(env = 'prod', 0) + (level = 'ERROR') + (latency_ms >= 2000) >= 2;
+WHERE (env != 'staging' OR env IS NULL)
+  AND level != 'DEBUG'
+  AND status < 500;
