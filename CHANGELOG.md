@@ -35,6 +35,9 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Corrigé
 
+- Scripts Painless : `toLowerCase()`, `toUpperCase()` et `equalsIgnoreCase()` replient la casse de toutes les lettres, comme Java (`lowerUTF8`, `upperUTF8`). `lower()` et `upper()` ne traitaient que l’ASCII : `Échec` restait `Échec`.
+- `case_insensitive` sur `term`, `prefix` et `wildcard` : seules les lettres ASCII sont repliées, comme dans Elasticsearch. `ÉLAN-1` trouvait `élan-1`, qu’Elasticsearch ne renvoie pas.
+- `regexp` avec `case_insensitive` : l’option était ignorée. La casse des caractères cités un à un est repliée, pas celle des intervalles (`[a-z]`), comme dans Elasticsearch.
 - Recherche plein texte et lettres accentuées : `échec` ne trouvait pas `Échec`, parce que `hasTokenCaseInsensitive()` ne replie que les lettres ASCII. Même correction pour `fuzzy` sur un champ texte.
 - Agrégations `range` et `filters` : une plage ou un filtre sans document n’était pas renvoyé. Elasticsearch renvoie tous les groupes, avec un compte nul et des mesures `null`.
 - Clé par défaut d’une plage numérique : `*-100.0` comme dans Elasticsearch, et non `*-100`. Une `date_range` sans clé explicite est signalée « à vérifier ».

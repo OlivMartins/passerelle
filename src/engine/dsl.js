@@ -188,6 +188,32 @@ function msmCount(msm, n) {
   return null;
 }
 function likeEscape(v) { return String(v).replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_'); }
+// case_insensitive : Elasticsearch ne replie que les lettres ASCII, comme lower(). Les autres doivent correspondre telles quelles.
+function asciiLower(v) { return String(v).replace(/[A-Z]+/g, m => m.toLowerCase()); }
+/*
+ * regexp avec case_insensitive : Elasticsearch replie la casse des caractères cités un à un, y compris dans une
+ * classe, mais pas celle des intervalles : [a-z] ne trouve pas « A », [0-9a] le trouve. (?i) est donc activé pour
+ * l’expression et coupé dans chaque classe, où les lettres isolées sont écrites dans leurs deux casses.
+ */
+function regexFoldCase(re) {
+  const unit = (s, i) => (s[i] === '\\' ? s.slice(i, i + 2) : s[i]);
+  let out = '(?i)'; let i = 0;
+  while (i < re.length) {
+    if (re[i] !== '[') { const u = unit(re, i); out += u; i += u.length; continue; }
+    let j = i + 1; let cls = '';
+    if (re[j] === '^') { cls += '^'; j++; }
+    for (let first = true; j < re.length && (first || re[j] !== ']'); first = false) {
+      const a = unit(re, j); j += a.length;
+      if (re[j] === '-' && j + 1 < re.length && re[j + 1] !== ']') { const b = unit(re, j + 1); cls += `${a}-${b}`; j += 1 + b.length; continue; }
+      cls += /^[A-Za-z]$/.test(a) ? a.toLowerCase() + a.toUpperCase() : a;
+    }
+    // Classe non fermée : l’expression est invalide, elle est rendue telle quelle pour que ClickHouse la refuse aussi
+    if (j >= re.length) return `(?i)${re}`;
+    out += `(?-i:[${cls}])`;
+    i = j + 1;
+  }
+  return out;
+}
 function globToRe(g) { return '^' + String(g).split('*').map(escRe).join('.*') + '$'; }
 function textFieldsOr(ctx, fields) { const tf = ctx.cfg.clickhouse.text_fields || []; return fields && fields.length ? fields : (tf.length ? tf : ['message']); }
 
@@ -665,7 +691,7 @@ function clauseSQL(ctx, q) {
       const sources = ci ? undefined : runtimeFilter(ctx, field, [v]);
       if (sources !== undefined) { ctx.stats.ok++; return sources; }
       const f = mapField(ctx, field); ctx.stats.ok++;
-      if (ci) return onValues(ctx, field, x => `lower(${x}) = ${chStr(String(v).toLowerCase())}`);
+      if (ci) return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(v))}`);
       return isArrayField(ctx, field) ? `has(${f}, ${chVal(v)})` : `${f} = ${chVal(v)}`;
     }
     case 'terms': {
@@ -699,7 +725,7 @@ function clauseSQL(ctx, q) {
       const v = isObj(raw) ? raw.value : raw; const ci = isObj(raw) && raw.case_insensitive;
       ctx.stats.ok++;
       H(ctx, 'filters', `${field} commence par « ${v} »`);
-      return onValues(ctx, field, x => (ci ? `startsWith(lower(${x}), ${chStr(String(v).toLowerCase())})` : `startsWith(${x}, ${chStr(v)})`));
+      return onValues(ctx, field, x => (ci ? `startsWith(lower(${x}), ${chStr(asciiLower(v))})` : `startsWith(${x}, ${chStr(v)})`));
     }
     case 'wildcard': {
       const [field, raw] = fieldEntry(body);
@@ -708,6 +734,7 @@ function clauseSQL(ctx, q) {
       const f = mapField(ctx, field);
       if (v === '*') return tq(ctx, { exists: { field } });
       H(ctx, 'filters', `${field} ~ ${v}`);
+      if (!/[*?]/.test(v) && ci) { ctx.stats.ok++; return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(v))}`); }
       if (!/[*?]/.test(v)) { ctx.stats.ok++; return isArrayField(ctx, field) ? `has(${f}, ${chStr(v)})` : `${f} = ${chStr(v)}`; }
       if (/^[^*?]+\*$/.test(v) && !ci && !isTextField(ctx, field)) { ctx.stats.ok++; return onValues(ctx, field, x => `startsWith(${x}, ${chStr(v.slice(0, -1))})`); }
       let like = likeEscape(v).replace(/\*/g, '%').replace(/\?/g, '_');
@@ -721,15 +748,20 @@ function clauseSQL(ctx, q) {
         return `match(${f}, ${chStr(`(?i)(?:^|[^\\p{L}\\p{N}_])${pattern}(?:$|[^\\p{L}\\p{N}_])`)})`;
       }
       ctx.stats.ok++;
+      // ILIKE replie aussi les lettres accentuées, ce qu’Elasticsearch ne fait pas : un motif qui en contient passe par lower()
+      if (ci && /[^\x00-\x7f]/.test(v)) return onValues(ctx, field, x => `lower(${x}) LIKE ${chStr(asciiLower(like))}`);
       return onValues(ctx, field, x => `${x} ${ci ? 'ILIKE' : 'LIKE'} ${chStr(like)}`);
     }
     case 'regexp': {
       const [field, raw] = fieldEntry(body);
       const v = String(isObj(raw) ? raw.value : raw);
+      const ci = isObj(raw) && raw.case_insensitive;
       const f = mapField(ctx, field);
-      if (/[@#&~<>]/.test(v)) { ctx.stats.approx++; ctx.notes.add('warn', 'Syntaxe regexp Lucene', 'Les opérateurs Lucene @ # & ~ <n-m> n’existent pas en RE2 : vérifiez l’expression.'); } else ctx.stats.ok++;
+      if (/[@#&~<>]/.test(v)) { ctx.stats.approx++; ctx.notes.add('warn', 'Syntaxe regexp Lucene', 'Les opérateurs Lucene @ # & ~ <n-m> n’existent pas en RE2 : vérifiez l’expression.'); }
+      else if (ci && /[^\x00-\x7f]/.test(v)) { ctx.stats.approx++; ctx.notes.add('warn', 'regexp insensible à la casse', 'ClickHouse replie la casse des lettres accentuées du motif. Elasticsearch le fait selon sa version : oui en 9.5, non en 7.17 et 8.19, où « É » ne trouve pas « é ».'); }
+      else ctx.stats.ok++;
       H(ctx, 'filters', `${field} correspond à /${v}/`);
-      return onValues(ctx, field, x => `match(${x}, ${chStr('^(?:' + v + ')$')})`);
+      return onValues(ctx, field, x => `match(${x}, ${chStr('^(?:' + (ci ? regexFoldCase(v) : v) + ')$')})`);
     }
     case 'fuzzy': {
       const [field, raw] = fieldEntry(body);

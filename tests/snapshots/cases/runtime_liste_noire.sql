@@ -2,7 +2,7 @@
 
 -- Agrégation h
 WITH
-    lower(host) AS hote
+    lowerUTF8(host) AS hote
 SELECT
     hote AS h,
     count() AS doc_count

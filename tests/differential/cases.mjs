@@ -115,6 +115,20 @@ export const CASES = [
   { id: 'filtre_prefix', dsl: total({ prefix: { host: 'web' } }) },
   { id: 'filtre_regexp', dsl: total({ regexp: { host: 'web-[1-3]' } }) },
   { id: 'filtre_term_insensible', dsl: total({ term: { service: { value: 'search', case_insensitive: true } } }) },
+  // case_insensitive : Elasticsearch ne replie que les lettres ASCII. « ÉLAN-1 » ne trouve pas « élan-1 », « éLAN-1 » le trouve.
+  { id: 'filtre_term_insensible_accent', dsl: total({ term: { host: { value: 'ÉLAN-1', case_insensitive: true } } }) },
+  { id: 'filtre_term_insensible_ascii', dsl: total({ term: { host: { value: 'éLAN-1', case_insensitive: true } } }) },
+  { id: 'filtre_prefixe_insensible_accent', dsl: total({ prefix: { host: { value: 'ÉL', case_insensitive: true } } }) },
+  { id: 'filtre_prefixe_insensible_ascii', dsl: total({ prefix: { host: { value: 'éL', case_insensitive: true } } }) },
+  { id: 'filtre_joker_insensible', dsl: total({ wildcard: { host: { value: 'WEB-?', case_insensitive: true } } }) },
+  { id: 'filtre_joker_insensible_accent', dsl: total({ wildcard: { host: { value: 'ÉL*', case_insensitive: true } } }) },
+  { id: 'filtre_joker_insensible_ascii', dsl: total({ wildcard: { host: { value: 'éL?N*', case_insensitive: true } } }) },
+  // regexp : la casse des caractères cités un à un est repliée, y compris dans une classe, pas celle des intervalles
+  { id: 'filtre_regexp_insensible', dsl: total({ regexp: { host: { value: 'WEB-[0-9]', case_insensitive: true } } }) },
+  { id: 'filtre_regexp_insensible_groupe', dsl: total({ regexp: { host: { value: '(WEB|DB).[0-9a]+', case_insensitive: true } } }) },
+  { id: 'filtre_regexp_insensible_intervalle', dsl: total({ regexp: { host: { value: 'web-[A-Z]', case_insensitive: true } } }) },
+  { id: 'filtre_regexp_intervalle_sensible', dsl: total({ regexp: { host: { value: 'web-[a-z]', case_insensitive: true } } }) },
+  { id: 'filtre_regexp_insensible_negation', dsl: total({ regexp: { host: { value: 'web-[^a1-3]', case_insensitive: true } } }) },
   { id: 'filtre_query_string', dsl: total({ query_string: { query: 'status:[500 TO 599] AND NOT service:api AND message:timeout' } }) },
   // Requêtes qu’Elasticsearch refuse (HTTP 400) : la traduction doit les refuser ou les déclarer « à reprendre »
   { id: 'filtre_query_string_invalide', dsl: total({ query_string: { query: 'status:500) AND service:api' } }) },
@@ -246,6 +260,10 @@ export const CASES = [
   { id: 'runtime_division_decimale', dsl: { size: 0, runtime_mappings: { moitie: { type: 'double', script: "emit(doc['latency_ms'].value / 2.0)" } }, aggs: { m: { max: { field: 'moitie' } }, s: { sum: { field: 'moitie' } } } } },
   { id: 'runtime_division_accesseur', tz: PARIS, dsl: { size: 0, runtime_mappings: { quart: { type: 'long', script: "emit(doc['@timestamp'].value.getHour() / 6)" } }, aggs: { q: { terms: { field: 'quart', order: { _key: 'asc' } } } } } },
   { id: 'runtime_champ_absent', dsl: { size: 0, runtime_mappings: { milieu: { type: 'keyword', script: "if (doc['env'].size() != 0) { emit(doc['env'].value.toUpperCase()) }" } }, query: { bool: { must_not: [{ term: { milieu: 'PROD' } }] } }, aggs: { m: { terms: { field: 'milieu' } } } } },
+  // Java replie la casse de toutes les lettres, accentuées comprises : « Échec » devient « échec », « élan-1 » devient « ÉLAN-1 »
+  { id: 'runtime_minuscules_accent', dsl: { size: 0, track_total_hits: true, runtime_mappings: { m: { type: 'keyword', script: "emit(doc['message.keyword'].value.toLowerCase())" } }, query: { term: { m: 'échec réseau: délai dépassé' } } } },
+  { id: 'runtime_majuscules_accent', dsl: { size: 0, runtime_mappings: { hote: { type: 'keyword', script: "emit(doc['host'].value.toUpperCase())" } }, aggs: { h: { terms: { field: 'hote', size: 20, order: { _key: 'asc' } } } } } },
+  { id: 'runtime_egalite_insensible', dsl: { size: 0, runtime_mappings: { elan: { type: 'keyword', script: "if (doc['host'].value.equalsIgnoreCase('ÉLAN-1')) { emit('oui'); } else { emit('non'); }" } }, aggs: { e: { terms: { field: 'elan' } } } } },
   { id: 'runtime_alias_agregation', dsl: { size: 0, runtime_mappings: { b: { type: 'long', script: "emit(doc['status'].value)" } }, aggs: { b: { terms: { field: 'b', size: 40, order: { _key: 'asc' } } } } } },
   { id: 'runtime_heure_fuseau', tz: PARIS, dsl: { size: 0, runtime_mappings: { heure: { type: 'long', script: "emit(doc['@timestamp'].value.getHour())" } }, query: { range: { [TS]: { lt: '2026-03-08T03:00:00Z' } } }, aggs: { h: { terms: { field: 'heure', size: 24, order: { _key: 'asc' } } } } } },
   { id: 'runtime_jour_semaine', tz: PARIS, dsl: { size: 0, runtime_mappings: { jour: { type: 'long', script: "emit(doc['@timestamp'].value.getDayOfWeekEnum().getValue())" } }, aggs: { j: { terms: { field: 'jour', size: 7, order: { _key: 'asc' } } } } } },

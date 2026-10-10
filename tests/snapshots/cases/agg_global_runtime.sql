@@ -5,7 +5,7 @@ WITH
     base AS (
         SELECT
             *,
-            lower(host) AS hote
+            lowerUTF8(host) AS hote
         FROM logs.events
     ),
     top_svc AS (

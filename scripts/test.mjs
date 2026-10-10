@@ -119,6 +119,9 @@ check(E.translateDSL(JSON.stringify(shuffled), E.mergeConfig(benchConfig, { clic
 // Un nom de clause inconnu reste dans une chaîne SQL échappée
 const odd = tr({ query: { "x') OR 1=1 --": {} } });
 check(odd.stats.ko === 1 && odd.sql.includes("throwIf(1, 'Passerelle : x\\') OR 1=1 -- à traduire')"), 'clause inconnue : nom échappé, requête arrêtée par throwIf');
+// regexp insensible à la casse : les échappements sont respectés, et une classe non fermée n’est pas réparée en passant
+const folded = v => tr({ query: { regexp: { host: { value: v, case_insensitive: true } } } }).sql;
+check(folded('a\\[b[]x-zQ]+').includes("(?i)a\\\\[b(?-i:[]x-zqQ])+") && folded('web-[a').includes("'^(?:(?i)web-[a)$'"), 'regexp insensible à la casse : échappements respectés, classe non fermée laissée telle quelle');
 // query_string mal formée : à reprendre, comme Elasticsearch la refuse
 for (const q of ['status:500) AND service:api', 'status:(500', '(status:500', 'status:500 OR OR status:404', '"connection reset', 'status:[500 TO', 'timeout AND']) {
   check(tr({ query: { query_string: { query: q } } }).stats.ko === 1, `query_string mal formée déclarée à reprendre : ${q}`);

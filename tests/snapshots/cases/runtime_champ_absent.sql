@@ -2,7 +2,7 @@
 
 -- Agrégation m
 WITH
-    if(isNotNull(env), upper(env), NULL) AS milieu
+    if(isNotNull(env), upperUTF8(env), NULL) AS milieu
 SELECT
     milieu AS m,
     count() AS doc_count

@@ -693,8 +693,9 @@ function pmcall(ctx, n, env, o) {
       if (!f) throw new Error('unité de troncature non prise en charge');
       return { sql: `${f}(${s}${f === 'toStartOfSecond' ? '' : zone})`, ty: 'date', zoned: v.zoned };
     }
-    case 'toLowerCase': return pStr(`lower(${s})`);
-    case 'toUpperCase': return pStr(`upper(${s})`);
+    // Java replie la casse de toutes les lettres : lowerUTF8() et upperUTF8(), là où lower() et upper() ne connaissent que l’ASCII
+    case 'toLowerCase': return pStr(`lowerUTF8(${s})`);
+    case 'toUpperCase': return pStr(`upperUTF8(${s})`);
     case 'trim': case 'strip': return pStr(`trimBoth(${s})`);
     case 'length': return pInt(`lengthUTF8(${s})`);
     case 'size': return pInt(`length(${s})`);
@@ -711,7 +712,7 @@ function pmcall(ctx, n, env, o) {
     case 'startsWith': return pBool(`startsWith(${s}, ${a()[0].sql})`);
     case 'endsWith': return pBool(`endsWith(${s}, ${a()[0].sql})`);
     case 'equals': return pBool(`${pArg(s)} = ${pArg(a()[0].sql)}`);
-    case 'equalsIgnoreCase': return pBool(`lower(${s}) = lower(${a()[0].sql})`);
+    case 'equalsIgnoreCase': return pBool(`lowerUTF8(${s}) = lowerUTF8(${a()[0].sql})`);
     case 'replace': { const x = a(); return pStr(`replaceAll(${s}, ${x[0].sql}, ${x[1].sql})`); }
     case 'replaceAll': case 'replaceFirst': {
       const re = lit(0); const rep = lit(1).replace(/\$(\d)/g, '\\$1');

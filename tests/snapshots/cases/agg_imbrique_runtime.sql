@@ -5,7 +5,7 @@ WITH
     base AS (
         SELECT
             *,
-            lower(host) AS hote
+            lowerUTF8(host) AS hote
         FROM logs.events
         WHERE NOT startsWith(hote, 'db')
     ),
@@ -33,7 +33,7 @@ WITH
     base AS (
         SELECT
             *,
-            lower(host) AS hote
+            lowerUTF8(host) AS hote
         FROM logs.events
         WHERE NOT startsWith(hote, 'db')
     ),

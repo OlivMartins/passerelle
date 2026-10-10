@@ -5,7 +5,7 @@ WITH
     base AS (
         SELECT
             *,
-            lower(host) AS hote
+            lowerUTF8(host) AS hote
         FROM logs.events
         WHERE hote NOT IN (SELECT value FROM logs.passerelle_lists WHERE name = 'l_9d8e1e49ee4e')
     ),
