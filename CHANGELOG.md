@@ -15,10 +15,12 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 - Schéma des colonnes : la clé facultative `clickhouse.columns` donne le type ClickHouse de chaque colonne. La traduction s’en sert pour les champs facultatifs (`Nullable`), multivalués (`Array`), les entiers et les dates. `clickhouse.empty_as_missing` déclare qu’une chaîne vide représente un champ absent.
 
+- Listes nommées : au-delà de `clickhouse.lists.threshold` valeurs, une liste (`terms`, série de `should`, `OR` d’une `query_string`) quitte le SQL pour une table, désignée par l’empreinte de son contenu ou par un nom déclaré dans `clickhouse.lists.names`. Le `CREATE TABLE` et les `INSERT` sont fournis par l’API (champ `lists`) et par la CLI (fichier `.lists.sql`). Une requête de plus de 256 Kio, que ClickHouse refuse par défaut, est signalée.
 - Agrégation `composite` : option `clickhouse.composite_mode: stream`, qui produit une seule requête sans pagination, à lire en flux, quand le client parcourt tous les groupes.
 
 ### Modifié
 
+- Les égalités sur une même colonne reliées par `OR` (série de `should`, `dis_max`, `query_string`) sont réunies en un seul `IN`. Une série de motifs `*texte*` sur un même champ devient un `multiSearchAny`.
 - Agrégation `composite` : le curseur `after` est une condition `WHERE` écrite clé par clé (`k1 > v1 OR (k1 = v1 AND k2 > v2) …`) et non plus une comparaison de tuples en `HAVING`. ClickHouse peut ainsi la confronter à la clé de tri de la table : 112 granules lus sur 3 125 dans l’essai, contre 3 125.
 - Les calculs de date précisent désormais le fuseau `'UTC'` dans le SQL (`toStartOfDay(now('UTC') - INTERVAL 7 DAY)`, `toHour(timestamp, 'UTC')`), parce qu’Elasticsearch calcule en UTC alors que ClickHouse suit le fuseau du serveur. La nouvelle option `clickhouse.timezone: UTC` déclare un serveur et des colonnes en UTC : le SQL retrouve alors sa forme courte.
 

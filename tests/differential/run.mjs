@@ -262,6 +262,11 @@ async function runComposite(c, ctx) {
 async function runCase(c, ctx) {
   if (c.composite) return runComposite(c, ctx);
   const t = ctx.translate(c.dsl);
+  // Listes nommées : la table et ses lignes sont créées avant la requête, comme le fera l’utilisateur
+  for (const list of t.lists || []) {
+    try { clickhouse(ctx.dir, ['--multiquery', '--query', list.sql]); }
+    catch (e) { return { verdict: 'CH✗', detail: `liste ${list.name} : ${String(e.stderr || e.message).slice(0, 200)}`, t }; }
+  }
   const r = await es(`/${INDEX}/_search`, c.dsl);
   if (t.error) return { verdict: r.status === 200 ? 'TR✗' : '=', detail: `traducteur : ${t.error}${r.status === 200 ? '' : ` ; Elasticsearch refuse aussi (${esError(r)})`}` };
   if (r.status !== 200) {

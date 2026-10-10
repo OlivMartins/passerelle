@@ -24,6 +24,10 @@ clickhouse:
   columns: {}
   empty_as_missing: false             # true : dans une colonne String non Nullable, la chaîne vide représente un champ absent
   composite_mode: page                # stream : une agrégation composite devient une seule requête, sans pagination, lue en flux
+  lists:
+    threshold: 0                      # au-delà de ce nombre de valeurs, une liste (terms, should…) quitte le SQL pour une table ; 0 : jamais
+    table: ''                         # table des listes ; vide : passerelle_lists dans la base de données
+    names: {}                         # empreinte d'une liste → nom lisible
 kafka:
   bootstrap_servers: ''
   security_protocol: ''

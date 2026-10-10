@@ -17,7 +17,8 @@ const DEFAULT_CONFIG = {
     field_mapping: { '@timestamp': 'timestamp' },
     columns: {},
     empty_as_missing: false,
-    composite_mode: 'page'
+    composite_mode: 'page',
+    lists: { threshold: 0, table: '', names: {} }
   },
   kafka: {
     bootstrap_servers: '',
@@ -38,7 +39,7 @@ function mergeConfig(base, over) {
   (function walk(dst, src) {
     if (!isObj(src)) return;
     for (const [k, v] of Object.entries(src)) {
-      if (isObj(v) && isObj(dst[k]) && !['index_mapping', 'field_mapping', 'columns'].includes(k)) walk(dst[k], v);
+      if (isObj(v) && isObj(dst[k]) && !['index_mapping', 'field_mapping', 'columns', 'names'].includes(k)) walk(dst[k], v);
       else if (v !== undefined) dst[k] = clone(v);
     }
   })(out, over);

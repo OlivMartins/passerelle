@@ -263,6 +263,26 @@ Sans `columns`, Passerelle traduit comme si toutes les colonnes étaient simples
 
 Si vos colonnes de texte ne sont pas `Nullable` et qu’une chaîne vide y représente un champ absent, ajoutez `empty_as_missing: true` : `exists` devient `colonne != ''`, et les regroupements ignorent les chaînes vides.
 
+### Listes noires et listes blanches
+
+Un `terms`, une série de `should` sur le même champ (le filtre « est l’un de » de Kibana) ou des `OR` dans une `query_string` sont réunis en un seul `IN`.
+
+Au-delà de 256 Kio, ClickHouse refuse une requête : une liste de quelques dizaines de milliers de valeurs suffit. Fixez un seuil, et les listes plus longues quittent le SQL pour une table :
+
+```yaml
+clickhouse:
+  lists:
+    threshold: 200                    # au-delà de 200 valeurs, la liste devient une table nommée
+    names:
+      c70cbd66b3c3: robots_connus     # facultatif : un nom lisible pour une empreinte
+```
+
+```sql
+WHERE host NOT IN (SELECT value FROM logs.passerelle_lists WHERE name = 'robots_connus')
+```
+
+Le nom par défaut est l’empreinte du contenu de la liste : la même liste dans trois cents tableaux de bord ne donne qu’une entrée. Passerelle fournit le `CREATE TABLE` et les `INSERT`, dans le champ `lists` de l’API et dans un fichier `.lists.sql` à côté de chaque requête traduite par la CLI.
+
 ## Démarrer
 
 ### Dans le navigateur, sans rien installer

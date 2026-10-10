@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE host IN ('web-1', 'web-2', 'db_01', 'Web-A', 'web-6');
+WHERE host IN (SELECT value FROM logs.passerelle_lists WHERE name = 'l_7035e06f791d');

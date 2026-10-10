@@ -84,7 +84,9 @@ function makeDslCtx(cfg) {
     runtime: {}, human: { period: null, filters: [], excludes: [], text: [], groups: [], metrics: [], hits: null, runtime: [] },
     cap: [], humanOff: 0, dateFields: new Set(), textCols: new Set(), groupCols: new Set(), leadingWildcard: false,
     // Schéma des colonnes : table en cours, colonnes Nullable rencontrées, et constructions dont la justesse en dépend
-    table: null, schema: hasSchema(cfg), nullableCols: new Set(), schemaGaps: new Set()
+    table: null, schema: hasSchema(cfg), nullableCols: new Set(), schemaGaps: new Set(),
+    // Listes de valeurs sorties du SQL (clickhouse.lists.threshold), par nom
+    lists: new Map()
   };
   ctx.mapField = f => mapField(ctx, f);
   ctx.kindOf = f => { const t = fieldType(ctx, f); return t ? t.kind : null; };
@@ -241,6 +243,103 @@ function negateWith(s, nullable) {
 }
 // Condition comptée dans une somme (minimum_should_match) : NULL ferait de toute la somme un NULL
 const countable = (ctx, c) => (mayBeNull(ctx, c) ? `ifNull(${c}, 0)` : `(${c})`);
+/* ---------- Listes de valeurs ---------- */
+/*
+ * Une liste noire ou blanche arrive de trois façons : un terms, une suite de should sur le même champ
+ * (ce qu’écrit le filtre « est l’un de » de Kibana), ou des OR dans une query_string.
+ * Elles sont réunies en un seul IN. Au-delà de clickhouse.lists.threshold valeurs, la liste quitte le SQL
+ * pour une table : la requête la désigne par un nom tiré de l’empreinte de son contenu, si bien qu’une même
+ * liste présente dans cent requêtes n’existe qu’une fois, et que le SQL reste lisible.
+ */
+const SQL_LITERAL = /^(?:'(?:[^'\\]|\\.)*'|-?\d+(?:\.\d+)?|true|false)$/;
+// Découpe « 'a', 'b,c', 3 » en littéraux SQL ; null si un élément n’en est pas un
+function literalList(text) {
+  const out = []; let cur = ''; let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      cur += c;
+      if (c === '\\') cur += text[++i] || ''; else if (c === "'") quoted = false;
+    } else if (c === "'") { quoted = true; cur += c; }
+    else if (c === ',') { out.push(cur.trim()); cur = ''; }
+    else cur += c;
+  }
+  out.push(cur.trim());
+  return out.every(x => SQL_LITERAL.test(x)) ? out : null;
+}
+// « col = 'a' » ou « col IN ('a', 'b') » : renvoie { lhs, values } ; null pour toute autre forme
+function equalityOf(s) {
+  if (typeof s !== 'string' || topHas(s, /^ (AND|OR) /) || /^NOT /.test(s)) return null;
+  let eq = -1, eqs = 0, inn = -1;
+  scanTop(s, i => { if (s.startsWith(' = ', i)) { eq = i; eqs++; } if (s.startsWith(' IN (', i)) inn = i; });
+  if (eqs === 1 && inn < 0) {
+    const rhs = s.slice(eq + 3);
+    return SQL_LITERAL.test(rhs) ? { lhs: s.slice(0, eq), values: [rhs] } : null;
+  }
+  if (eqs === 0 && inn > 0 && s.endsWith(')')) {
+    const values = literalList(s.slice(inn + 5, -1));
+    return values ? { lhs: s.slice(0, inn), values } : null;
+  }
+  return null;
+}
+// Empreinte d’une liste, indépendante de l’ordre des valeurs (deux FNV-1a de 32 bits, 12 chiffres hexadécimaux)
+function listFingerprint(values) {
+  const text = [...values].sort().join('\n');
+  let a = 0x811c9dc5, b = 0x9747b28c;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x5bd1e995) ^ (b >>> 15);
+  }
+  return ((a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0')).slice(0, 12);
+}
+// « lhs IN (…) » : valeurs en clair, ou liste nommée au-delà du seuil. « values » sont des littéraux SQL.
+function inList(ctx, lhs, values) {
+  const unique = [...new Set(values)];
+  if (unique.length === 1) return `${lhs} = ${unique[0]}`;
+  const lists = ctx.cfg.clickhouse.lists || {};
+  const threshold = Number(lists.threshold) || 0;
+  const strings = unique.every(v => v[0] === "'"); const integers = unique.every(v => /^-?\d+$/.test(v));
+  if (!threshold || unique.length <= threshold || !(strings || integers)) return `${lhs} IN (${unique.join(', ')})`;
+  const fingerprint = listFingerprint(unique);
+  const name = (isObj(lists.names) && lists.names[fingerprint]) || `l_${fingerprint}`;
+  const table = lists.table || `${ctx.cfg.clickhouse.database || 'default'}.passerelle_lists`;
+  if (!ctx.lists.has(name)) ctx.lists.set(name, { name, fingerprint, table, integers, values: unique });
+  return `${lhs} IN (SELECT ${integers ? 'toInt64(value)' : 'value'} FROM ${table} WHERE name = ${chStr(name)})`;
+}
+// OU entre des conditions, en réunissant dans un même IN celles qui comparent une même colonne à des constantes
+function anyOf(ctx, list) {
+  if (!list.length || list.some(x => x === null || x === '1' || x === 'true')) return orJoin(list);
+  const out = []; const groups = new Map();
+  for (const s of list) {
+    const e = equalityOf(s);
+    if (!e) { out.push(s); continue; }
+    if (!groups.has(e.lhs)) { groups.set(e.lhs, { lhs: e.lhs, values: [] }); out.push(groups.get(e.lhs)); }
+    groups.get(e.lhs).values.push(...e.values);
+  }
+  return orJoin(out.map(x => (typeof x === 'string' ? x : inList(ctx, x.lhs, x.values))));
+}
+/*
+ * Liste de motifs « *texte* » sur un même champ non analysé : une seule recherche multiple
+ * (multiSearchAny) au lieu d’une suite de LIKE. Renvoie null si les clauses ne s’y prêtent pas.
+ */
+function containsAnyOf(ctx, clauses) {
+  if (clauses.length < 2) return null;
+  let field = null; let insensitive = null; const needles = [];
+  for (const c of clauses) {
+    if (!isObj(c) || Object.keys(c)[0] !== 'wildcard') return null;
+    const [f, raw] = fieldEntry(c.wildcard);
+    const pattern = String(isObj(raw) ? (raw.value !== undefined ? raw.value : raw.wildcard) : raw);
+    const ci = isObj(raw) && !!raw.case_insensitive;
+    const m = /^\*([^*?\\]+)\*$/.exec(pattern);
+    if (!m || (field !== null && (f !== field || ci !== insensitive)) || isTextField(ctx, f) || isArrayField(ctx, f)) return null;
+    field = f; insensitive = ci; needles.push(m[1]);
+  }
+  ctx.stats.ok += clauses.length;
+  H(ctx, 'filters', `${field} contient l’un de ${needles.length} motifs`);
+  ctx.notes.add('opt', 'Liste de motifs → multiSearchAny', 'Les motifs *texte* sur un même champ sont cherchés en une passe par multiSearchAny, plutôt que par une suite de LIKE.');
+  return `multiSearchAny${insensitive ? 'CaseInsensitive' : ''}(${mapField(ctx, field)}, [${[...new Set(needles)].map(chStr).join(', ')}])`;
+}
 function conjunctsOf(ctx, q) {
   if (isObj(q) && Object.keys(q)[0] === 'bool') return boolParts(ctx, q.bool).flatMap(splitTopAnd);
   const s = tq(ctx, q); return s === null ? [] : splitTopAnd(s);
@@ -265,11 +364,13 @@ function boolParts(ctx, b) {
     if (k === null) k = must.length || filter.length ? 0 : 1;
     if (k === 0) ctx.notes.add('info', 'Clauses should ignorées', 'À côté de must/filter, les clauses should ne font que moduler le score de pertinence, qui n’existe pas en SQL.');
     else {
+      const searches = k === 1 ? containsAnyOf(ctx, should) : null;
+      if (searches) { parts.push(searches); return parts; }
       ctx.cap.push([]);
       const cs = should.map(c => tq(ctx, c));
       const caught = ctx.cap.pop();
-      if (caught.length) H(ctx, 'filters', k === 1 ? caught.join(' ou ') : `au moins ${k} parmi : ${caught.join(', ')}`);
-      if (k === 1) { const o = orJoin(cs); if (o !== null) parts.push(o); }
+      if (caught.length) H(ctx, 'filters', k === 1 ? (caught.length > 6 ? `l’une de ${caught.length} conditions` : caught.join(' ou ')) : `au moins ${k} parmi : ${caught.join(', ')}`);
+      if (k === 1) { const o = anyOf(ctx, cs); if (o !== null) parts.push(o); }
       else if (k >= cs.length) parts.push(...cs.filter(x => x !== null));
       else parts.push(`${cs.map(c => (c === null ? '1' : countable(ctx, c))).join(' + ')} >= ${k}`);
     }
@@ -386,7 +487,7 @@ function tq(ctx, q) {
       const f = mapField(ctx, field); ctx.stats.ok++;
       H(ctx, 'filters', `${field} ∈ {${vals.slice(0, 4).join(', ')}${vals.length > 4 ? '…' : ''}}`);
       if (isArrayField(ctx, field)) return vals.length === 1 ? `has(${f}, ${chVal(vals[0])})` : `hasAny(${f}, [${vals.map(chVal).join(', ')}])`;
-      return vals.length === 1 ? `${f} = ${chVal(vals[0])}` : `${f} IN (${vals.map(chVal).join(', ')})`;
+      return inList(ctx, f, vals.map(chVal));
     }
     case 'range': { const [field, spec] = fieldEntry(body); return rangeClause(ctx, field, spec); }
     case 'exists': {
@@ -494,7 +595,7 @@ function tq(ctx, q) {
       return tq(ctx, body.query);
     }
     case 'constant_score': return tq(ctx, body.filter);
-    case 'dis_max': return orJoin((body.queries || []).map(x => tq(ctx, x)));
+    case 'dis_max': return anyOf(ctx, (body.queries || []).map(x => tq(ctx, x)));
     case 'function_score': case 'script_score':
       ctx.notes.add('info', `${type} : score ignoré`, 'Le calcul de score n’a pas d’équivalent : seule la requête filtrante est conservée.');
       return tq(ctx, body.query || { match_all: {} });
@@ -523,8 +624,10 @@ function tq(ctx, q) {
   }
 }
 function luceneSQL(ctx, n, defFields, leaf) {
-  if (n.op === 'and') return andJoin(n.a.map(x => luceneSQL(ctx, x, defFields, leaf)));
-  if (n.op === 'or') return orJoin(n.a.map(x => luceneSQL(ctx, x, defFields, leaf)));
+  // « a OR b OR c » est analysé en ((a OR b) OR c) : les opérandes sont remis à plat avant d’être réunis
+  const operands = op => (function flat(x) { return x.op === op ? x.a.flatMap(flat) : [x]; })(n).map(x => luceneSQL(ctx, x, defFields, leaf));
+  if (n.op === 'and') return andJoin(operands('and'));
+  if (n.op === 'or') return anyOf(ctx, operands('or'));
   if (n.op === 'not') { const s = luceneSQL(ctx, n.a[0], defFields, leaf); ctx.schemaGaps.add('must_not'); return s === null ? 'false' : negate(ctx, s); }
   const fields = n.field ? [n.field] : defFields;
   return orJoin(fields.map(f => leaf(ctx, f, n.tok)));
@@ -1352,6 +1455,18 @@ function translateRequest(input, cfg, opts, columns) {
   if (statements.some(s => /IN \(\n/.test(s.sql))) ctx.notes.add('info', 'Top N imbriqués', 'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits par une sous-requête IN puis LIMIT n BY, avec des comptes exacts là où Elasticsearch les estime par shard.');
   const sql = statements.map(s => `-- ${s.title}\n${withClause(ctx, s.sql)};`).join('\n\n');
   const statementsOut = statements.map(s => ({ title: s.title, sql: withClause(ctx, s.sql) }));
+  // Listes nommées : la table à créer et les lignes à y insérer accompagnent le SQL
+  const lists = [...ctx.lists.values()].map(l => {
+    const rows = l.values.map(v => `(${chStr(l.name)}, ${l.integers ? `'${v}'` : v})`);
+    const create = `CREATE TABLE IF NOT EXISTS ${l.table}\n(\n    name LowCardinality(String),\n    value String\n)\nENGINE = ReplacingMergeTree\nORDER BY (name, value);`;
+    const insert = shown => `INSERT INTO ${l.table} (name, value) VALUES\n    ${shown.join(',\n    ')};`;
+    const preview = rows.length > 20 ? `${insert(rows.slice(0, 20)).slice(0, -1)},\n    -- … ${rows.length - 20} autres valeurs : liste complète dans le champ « lists » de l’API, ou dans le fichier .lists.sql écrit par la CLI` : insert(rows);
+    ctx.notes.add('opt', `Liste nommée ${l.name} (${l.values.length} valeurs)`, `La liste est sortie du SQL et rangée dans ${l.table} sous le nom ${l.name}. Ce nom est l’empreinte de son contenu : la même liste dans une autre requête désigne la même ligne de table. Pour lui donner un nom lisible, déclarez clickhouse.lists.names: { ${l.fingerprint}: mon_nom }. Un IN sur sous-requête garde l’usage de la clé primaire d’un IN en clair.`, `${create}\n\n${preview}`);
+    return { name: l.name, fingerprint: l.fingerprint, table: l.table, count: l.values.length, sql: `${create}\n\n${insert(rows)}` };
+  });
+  // Au-delà de max_query_size (256 Kio par défaut), ClickHouse refuse la requête
+  const longest = statementsOut.reduce((n, s) => Math.max(n, s.sql.length), 0);
+  if (longest > 262144) ctx.notes.add('warn', 'Requête trop longue pour ClickHouse', `Une requête fait ${Math.round(longest / 1024)} Kio. Au-delà de 256 Kio, ClickHouse la refuse par défaut (max_query_size). Si une longue liste de valeurs en est la cause, clickhouse.lists.threshold la sort du SQL pour une table nommée.`);
   if (!ctx.schema && ctx.schemaGaps.size) {
     const labels = { must_not: 'une exclusion (must_not, NOT)', exists: 'exists' };
     ctx.notes.add('warn', 'Schéma des colonnes non fourni', `La requête contient ${[...ctx.schemaGaps].map(g => labels[g]).join(' et ')}, dont le résultat dépend du type des colonnes. Sur une colonne Nullable, une exclusion écarte les lignes NULL qu’Elasticsearch garde ; sur une colonne non Nullable, exists est toujours vrai. Renseignez clickhouse.columns pour que la traduction en tienne compte.`);
@@ -1359,6 +1474,6 @@ function translateRequest(input, cfg, opts, columns) {
   for (const [name, alias] of aliasGuard.renamed) ctx.notes.add('warn', `Agrégation « ${name} » renommée ${alias}`, `${rawAlias(name)} est aussi une colonne citée par la requête : un alias du même nom la masquerait partout, y compris dans WHERE. La colonne de résultat s’appelle donc ${alias}.`);
   const order = { err: 0, warn: 1, opt: 2, info: 3 };
   ctx.notes.list.sort((a, b) => order[a.level] - order[b.level]);
-  return { sql, statements: statementsOut, notes: ctx.notes.list, stats: ctx.stats, table, index, matched, human: ctx.human, sentence: sentence(ctx.human) };
+  return { sql, statements: statementsOut, lists, notes: ctx.notes.list, stats: ctx.stats, table, index, matched, human: ctx.human, sentence: sentence(ctx.human) };
 }
 

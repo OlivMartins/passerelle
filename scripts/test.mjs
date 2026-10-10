@@ -108,6 +108,14 @@ check(/env != 'staging'\n/.test(blind.sql) && blind.notes.some(n => n.level === 
 const blindDiv = E.translateDSL(JSON.stringify({ size: 0, runtime_mappings: { t: { type: 'long', script: "emit(doc['latency_ms'].value / 100)" } }, aggs: { b: { terms: { field: 't' } } } }), noSchema, { index: INDEX });
 check(/latency_ms \/ 100/.test(blindDiv.sql) && blindDiv.notes.some(n => n.level === 'warn' && n.title === 'Division dans un script'), 'sans schéma : division Painless signalée, type des opérandes inconnu');
 check(/intDiv\(latency_ms, 100\)/.test(tr({ size: 0, runtime_mappings: { t: { type: 'long', script: "emit(doc['latency_ms'].value / 100)" } }, aggs: { b: { terms: { field: 't' } } } }).sql), 'avec schéma : division de deux entiers traduite par intDiv');
+// Une liste de 60 000 valeurs : ClickHouse refuse le SQL en clair (plus de 256 Kio), la liste nommée le garde court
+const blacklist = { size: 0, query: { bool: { must_not: [{ terms: { host: Array.from({ length: 60000 }, (_, i) => `host-${i}`) } }] } }, aggs: { s: { terms: { field: 'service' }, aggs: { e: { terms: { field: 'level' } } } } } };
+const inline = tr(blacklist);
+check(inline.notes.some(n => n.level === 'warn' && n.title === 'Requête trop longue pour ClickHouse'), 'longue liste en clair : requête de plus de 256 Kio signalée');
+const named = E.translateDSL(JSON.stringify(blacklist), E.mergeConfig(benchConfig, { clickhouse: { lists: { threshold: 1000 } } }), { index: INDEX });
+check(named.sql.length < 2000 && named.lists.length === 1 && named.lists[0].count === 60000 && /host NOT IN \(SELECT value FROM logs\.passerelle_lists WHERE name = 'l_[0-9a-f]{12}'\)/.test(named.sql), 'longue liste nommée : SQL court, une seule liste malgré ses deux emplois');
+const shuffled = structuredClone(blacklist); shuffled.query.bool.must_not[0].terms.host.reverse();
+check(E.translateDSL(JSON.stringify(shuffled), E.mergeConfig(benchConfig, { clickhouse: { lists: { threshold: 1000 } } }), { index: INDEX }).lists[0].name === named.lists[0].name, 'liste nommée : même nom quel que soit l’ordre des valeurs');
 // Un nom de clause inconnu reste dans une chaîne SQL échappée
 const odd = tr({ query: { "x') OR 1=1 --": {} } });
 check(odd.stats.ko === 1 && odd.sql.includes("throwIf(1, 'Passerelle : x\\') OR 1=1 -- à traduire')"), 'clause inconnue : nom échappé, requête arrêtée par throwIf');
