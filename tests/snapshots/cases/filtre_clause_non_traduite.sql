@@ -5,4 +5,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE NOT (throwIf(1, 'Passerelle : more_like_this à traduire'));
+WHERE NOT throwIf(1, 'Passerelle : more_like_this à traduire');

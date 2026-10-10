@@ -1,13 +1,12 @@
 -- Couverture : 4 directs, 0 à vérifier, 0 à reprendre
 
--- Agrégation svc › h
+-- Agrégation svc › d › h
 WITH
     base AS (
         SELECT
-            *,
-            lower(host) AS hote
+            *
         FROM logs.events
-        WHERE hote NOT IN (SELECT value FROM logs.passerelle_lists WHERE name = 'l_9d8e1e49ee4e')
+        WHERE status >= 400
     ),
     top_svc AS (
         SELECT
@@ -19,11 +18,12 @@ WITH
     )
 SELECT
     service AS svc,
-    hote AS h,
+    toStartOfDay(timestamp, 'UTC') AS d,
+    host AS h,
     count() AS doc_count,
     sum(count()) OVER (PARTITION BY svc) AS svc_doc_count
 FROM base
 WHERE service IN (SELECT svc FROM top_svc)
-GROUP BY svc, h
-ORDER BY svc_doc_count DESC, svc, doc_count DESC, h ASC
-LIMIT 2 BY svc;
+GROUP BY svc, d, h
+ORDER BY svc_doc_count DESC, svc, d ASC, doc_count DESC, h ASC
+LIMIT 2 BY svc, d;

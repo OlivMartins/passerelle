@@ -244,7 +244,9 @@ function negateWith(s, nullable) {
     }
   }
   if (nullable) return `NOT ifNull(${isWrapped(s) ? s.slice(1, -1) : s}, 0)`;
-  return `NOT ${isWrapped(s) ? s : '(' + s + ')'}`;
+  // Un appel de fonction seul n’a pas besoin de parenthèses : NOT startsWith(host, 'db')
+  const call = /^[A-Za-z_]\w*\(/.test(s) && isWrapped(s.slice(s.indexOf('(')));
+  return `NOT ${isWrapped(s) || call ? s : '(' + s + ')'}`;
 }
 // Condition comptée dans une somme (minimum_should_match) : NULL ferait de toute la somme un NULL
 const countable = (ctx, c) => (mayBeNull(ctx, c) ? `ifNull(${c}, 0)` : `(${c})`);
@@ -1177,14 +1179,39 @@ function orderInSub(L) {
 function keyLevels(path) { return path.filter(l => l.keys.length); }
 // « x AS x » est inutile, et ClickHouse le refuse quand x est déjà un champ runtime défini par WITH (alias déclaré deux fois)
 function selectAs(k) { return k.sql === k.alias ? k.sql : `${k.sql} AS ${k.alias}`; }
-function pathWhere(env, path, upto) {
+/*
+ * Portée d’une requête d’agrégation imbriquée.
+ *
+ * Le top N d’un regroupement parent se calcule par une première requête, que la requête principale consulte.
+ * Plutôt que de recopier le filtre de la requête dans chacune, il est nommé une fois (CTE « base »), et chaque
+ * top N aussi (« top_<nom> ») : le SQL se lit de haut en bas, sans sous-requête à dérouler.
+ * ClickHouse recopie une CTE à chaque emploi : c’est une affaire de lisibilité, le nombre de lectures
+ * de la table reste le même que sans CTE.
+ *
+ * upto : niveau le plus profond dont le top N restreint la requête.
+ */
+function nestedScope(ctx, env, path, upto) {
+  const scope = { from: env.table, filtered: false, ctes: [], names: new Set(['base']) };
+  if (!path.slice(0, upto + 1).some(l => l.limitable && l.size !== null)) return scope;
+  // Une agrégation global ignore le filtre de la requête pour une partie du chemin : il reste alors dans chaque requête
+  scope.filtered = env.baseWhere.length > 0 && !path.some(l => l.global);
+  // Les champs runtime deviennent des colonnes de « base » : définis une fois, là où la table est lue, chaque CTE les lit comme des colonnes ordinaires
+  const runtime = Object.values(ctx.runtime).some(r => r.sql);
+  if (!scope.filtered && !runtime) return scope;
+  scope.from = 'base';
+  scope.ctes.push(`base AS (\n${sqlSelect({ select: [`*${RUNTIME_COLUMNS}`], from: env.table, where: scope.filtered ? env.baseWhere : [] }, '        ')}\n    )`);
+  return scope;
+}
+// Emplacement, dans la CTE « base », des champs runtime dont la requête se sert (rempli par withClause)
+const RUNTIME_COLUMNS = '/*@@*/';
+function pathWhere(env, path, upto, scope) {
   let start = 0;
   for (let i = 0; i <= upto; i++) if (path[i].global) start = i;
-  const base = path.slice(0, upto + 1).some(l => l.global) ? [] : env.baseWhere.slice();
+  const base = (scope && scope.filtered) || path.slice(0, upto + 1).some(l => l.global) ? [] : env.baseWhere.slice();
   for (let i = start; i <= upto; i++) base.push(...path[i].where);
   return base;
 }
-function restriction(ctx, env, path, upto) {
+function restriction(ctx, env, path, upto, scope) {
   // Cherche le parent « limitable » le plus profond (index < upto+1)
   let j = -1;
   for (let i = upto; i >= 0; i--) if (path[i].limitable && path[i].size !== null) { j = i; break; }
@@ -1192,26 +1219,32 @@ function restriction(ctx, env, path, upto) {
   const lv = path.slice(0, j + 1); const kl = keyLevels(lv);
   const keys = kl.flatMap(l => l.keys);
   const parentKeys = keyLevels(path.slice(0, j)).flatMap(l => l.keys);
-  const where = pathWhere(env, path, j);
-  const inner = restriction(ctx, env, path, j - 1);
+  const where = pathWhere(env, path, j, scope);
+  const inner = restriction(ctx, env, path, j - 1, scope);
   if (inner) where.push(inner);
   const sub = sqlSelect({
     select: keys.map(selectAs),
-    from: env.table, where,
+    from: scope.from, where,
     groupBy: keys.map(k => k.alias),
     having: path[j].having.map(h => h.replace(/\bdoc_count\b/g, 'count()')),
     orderBy: orderInSub(path[j]),
     limitBy: parentKeys.length ? { n: path[j].size, by: parentKeys.map(k => k.alias) } : null,
     limit: parentKeys.length ? null : path[j].size
-  });
+  }, '        ');
+  // Une CTE par top N, nommée d’après le regroupement qu’elle limite
+  let name = `top_${keys[keys.length - 1].alias.replace(/`/g, '')}`;
+  for (let n = 2; scope.names.has(name); n++) name = `top_${keys[keys.length - 1].alias.replace(/`/g, '')}_${n}`;
+  scope.names.add(name);
+  scope.ctes.push(`${name} AS (\n${sub}\n    )`);
   const lhs = keys.length === 1 ? keys[0].sql : `(${keys.map(k => k.sql).join(', ')})`;
-  return `${lhs} IN (\n${indent(sub, '    ')}\n)`;
+  return `${lhs} IN (SELECT ${keys.map(k => k.alias).join(', ')} FROM ${name})`;
 }
 function aggQuery(ctx, env, path) {
   const L = path[path.length - 1]; const k = path.length - 1;
   const kl = keyLevels(path); const keys = kl.flatMap(l => l.keys);
-  const where = pathWhere(env, path, k);
-  const r = restriction(ctx, env, path, k - 1);
+  const scope = nestedScope(ctx, env, path, k - 1);
+  const where = pathWhere(env, path, k, scope);
+  const r = restriction(ctx, env, path, k - 1, scope);
   if (r) where.push(r);
   // Les tranches vides d’un histogramme sont ajoutées par WITH FILL, sur sa clé triée en ordre croissant.
   // Pas avec un pipeline : une fonction de fenêtre est calculée avant l’ajout et ne verrait pas ces lignes.
@@ -1287,12 +1320,14 @@ function aggQuery(ctx, env, path) {
     if (partKeys.length && size !== null && size !== undefined) limitBy = { n: size, offset, by: partKeys };
     else if (size !== null && size !== undefined) limit = size;
   }
-  return sqlSelect({ select, from: env.table, where, groupBy: keys.map(x => x.alias), having, orderBy, limitBy, limit, offset: limitBy ? 0 : offset });
+  return sqlSelect({ with: scope.ctes, select, from: scope.from, where, groupBy: keys.map(x => x.alias), having, orderBy, limitBy, limit, offset: limitBy ? 0 : offset });
 }
 function walkAggs(ctx, env, aggs, parentPath, out) {
   for (const [name, def] of Object.entries(aggs || {})) {
     const t = aggType(def);
     if (!t) continue;
+    // Elasticsearch refuse une agrégation global ailleurs qu’au premier niveau
+    if (t === 'global' && parentPath.length) { todo(ctx, `agrégation ${name}`, 'Une agrégation global ne peut être définie qu’au premier niveau des agrégations.'); continue; }
     let L;
     try { L = buildLevel(ctx, name, def); }
     catch (e) { todo(ctx, `agrégation ${name}`, e.message); continue; }
@@ -1309,13 +1344,14 @@ function walkAggs(ctx, env, aggs, parentPath, out) {
 }
 function topHitsQuery(ctx, env, path, th) {
   const b = th.body; const keys = keyLevels(path).flatMap(l => l.keys);
-  const where = pathWhere(env, path, path.length - 1);
-  const r = restriction(ctx, env, path, path.length - 1); if (r) where.push(r);
+  const scope = nestedScope(ctx, env, path, path.length - 1);
+  const where = pathWhere(env, path, path.length - 1, scope);
+  const r = restriction(ctx, env, path, path.length - 1, scope); if (r) where.push(r);
   const cols = selectList(ctx, b); const order = sortList(ctx, b.sort);
   ctx.stats.ok++;
   ctx.notes.add('opt', `top_hits « ${th.name} » → LIMIT n BY`, 'LIMIT n BY renvoie les n meilleurs documents de chaque groupe en une seule passe triée.');
   const n = chInt(b.size || 3, 'top_hits.size');
-  return sqlSelect({ select: keys.map(selectAs).concat(cols), from: env.table, where, orderBy: keys.map(k => k.alias).concat(order), limitBy: keys.length ? { n, by: keys.map(k => k.alias) } : null, limit: keys.length ? null : n });
+  return sqlSelect({ with: scope.ctes, select: keys.map(selectAs).concat(cols), from: scope.from, where, orderBy: keys.map(k => k.alias).concat(order), limitBy: keys.length ? { n, by: keys.map(k => k.alias) } : null, limit: keys.length ? null : n });
 }
 function rootAggs(ctx, env, aggs) {
   const out = [];
@@ -1449,15 +1485,28 @@ function resolveTable(ctx, index) {
 function preprocessDSL(text) {
   return text.replace(/"""([\s\S]*?)"""/g, (m, inner) => JSON.stringify(inner.replace(/^\n+|\s+$/g, '')));
 }
+/*
+ * Place les champs runtime dont la requête se sert : en colonnes de la CTE « base » quand elle existe
+ * (chaque CTE les lit alors comme des colonnes ordinaires), sinon en expressions WITH.
+ */
 function withClause(ctx, sql) {
-  const rts = Object.entries(ctx.runtime).filter(([, r]) => r.sql);
-  if (!rts.length) return sql;
+  const rts = Object.values(ctx.runtime).filter(r => r.sql);
+  const bare = r => r.alias.replace(/`/g, '');
   const used = new Set();
-  const visit = (s) => { for (const [, r] of rts) { const a = r.alias.replace(/`/g, ''); if (!used.has(a) && new RegExp('(^|[^A-Za-z0-9_.])' + escRe(a) + '($|[^A-Za-z0-9_])').test(s)) { used.add(a); visit(r.sql); } } };
+  const visit = s => {
+    for (const r of rts) {
+      if (used.has(bare(r)) || !new RegExp('(^|[^A-Za-z0-9_.])' + escRe(bare(r)) + '($|[^A-Za-z0-9_])').test(s)) continue;
+      used.add(bare(r));
+      visit(r.sql);
+    }
+  };
   visit(sql);
-  if (!used.size) return sql;
-  const defs = rts.filter(([, r]) => used.has(r.alias.replace(/`/g, ''))).map(([, r]) => `    ${r.sql} AS ${r.alias}`);
-  return `WITH\n${defs.join(',\n')}\n${sql}`;
+  const defs = rts.filter(r => used.has(bare(r))).map(r => `${r.sql} AS ${r.alias}`);
+  if (sql.includes(RUNTIME_COLUMNS)) return sql.replace(RUNTIME_COLUMNS, () => defs.map(d => `,\n            ${d}`).join(''));
+  if (!defs.length) return sql;
+  // Une seule clause WITH : les champs runtime d’abord, puis les CTE de la requête
+  const list = defs.map(d => `    ${d}`).join(',\n');
+  return sql.startsWith('WITH\n') ? `WITH\n${list},\n${sql.slice(5)}` : `WITH\n${list}\n${sql}`;
 }
 function sentence(h) {
   const parts = [];
@@ -1572,7 +1621,7 @@ function translateRequest(input, cfg, opts, columns) {
   }
   if (ctx.leadingWildcard) ctx.notes.add('opt', 'Joker en tête de motif', `Un motif qui commence par * impose de lire toute la colonne ${ctx.leadingWildcard}. Un index ngrambf_v1 permet d’éviter une partie des lectures.`, `ALTER TABLE ${table}\n    ADD INDEX idx_ngram ${ctx.leadingWildcard} TYPE ngrambf_v1(3, 65536, 3, 0) GRANULARITY 1;`);
   if (ctx.groupCols.size) ctx.notes.add('opt', 'LowCardinality pour les regroupements', `${[...ctx.groupCols].join(', ')} : si le nombre de valeurs distinctes reste sous ~10 000, le type LowCardinality(String) accélère nettement GROUP BY et réduit le stockage.`);
-  if (statements.some(s => /IN \(\n/.test(s.sql))) ctx.notes.add('info', 'Top N imbriqués', 'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits par une sous-requête IN puis LIMIT n BY, avec des comptes exacts là où Elasticsearch les estime par shard.');
+  if (statements.some(s => /\btop_\w+ AS \(\n/.test(s.sql))) ctx.notes.add('info', 'Top N imbriqués', 'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits en deux temps : une CTE top_<nom> retient les N premiers groupes du parent, puis la requête principale s’y limite, avec des comptes exacts là où Elasticsearch les estime par shard. Le filtre commun est nommé une fois (CTE base). ClickHouse recopie une CTE à chaque emploi : la table est lue une fois par CTE top_ et une fois par la requête principale.');
   const sql = statements.map(s => `-- ${s.title}\n${withClause(ctx, s.sql)};`).join('\n\n');
   const statementsOut = statements.map(s => ({ title: s.title, sql: withClause(ctx, s.sql) }));
   // Champs runtime : conseil de matérialisation, avec un index quand le champ sert de filtre

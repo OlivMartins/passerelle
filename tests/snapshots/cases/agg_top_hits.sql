@@ -10,17 +10,19 @@ ORDER BY doc_count DESC, svc ASC
 LIMIT 3;
 
 -- Top hits svc › derniers
+WITH
+    top_svc AS (
+        SELECT
+            service AS svc
+        FROM logs.events
+        GROUP BY svc
+        ORDER BY count() DESC, svc ASC
+        LIMIT 3
+    )
 SELECT
     service AS svc,
     *
 FROM logs.events
-WHERE service IN (
-    SELECT
-        service AS svc
-    FROM logs.events
-    GROUP BY svc
-    ORDER BY count() DESC, svc ASC
-    LIMIT 3
-)
+WHERE service IN (SELECT svc FROM top_svc)
 ORDER BY svc, timestamp DESC
 LIMIT 2 BY svc;

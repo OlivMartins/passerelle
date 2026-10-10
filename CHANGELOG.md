@@ -20,6 +20,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Modifié
 
+- Agrégations imbriquées : le filtre commun et chaque top N sont nommés par des CTE (`base`, `top_<nom>`) au lieu d’être recopiés dans des sous-requêtes emboîtées. Le SQL se lit de haut en bas ; le plan d’exécution ne change pas.
 - Filtre sur un champ runtime de classification (un script qui émet une constante par branche) : il est réécrit sur les colonnes sources. `classe = 'lent'` devient `latency_ms >= 1000`, ce qui rend la clé de tri et les index utilisables. Quand le script ne s’y prête pas, la remarque de matérialisation propose aussi un index de saut.
 - Un champ runtime qui émet toujours une valeur n’ajoute plus de `isNotNull()` au regroupement, et son DDL de matérialisation n’est plus `Nullable`.
 - Les égalités sur une même colonne reliées par `OR` (série de `should`, `dis_max`, `query_string`) sont réunies en un seul `IN`. Une série de motifs `*texte*` sur un même champ devient un `multiSearchAny`.
@@ -30,6 +31,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Corrigé
 
+- Agrégation `global` imbriquée dans une autre : déclarée « à reprendre », comme Elasticsearch la refuse.
 - Agrégation `composite` : `order: desc` sur une source était ignoré, tout comme `missing_bucket` et `missing_order`. Chaque source garde son sens de tri, et une clé `null` se place et se pagine comme dans Elasticsearch.
 - Colonnes `Nullable` (avec `clickhouse.columns`) : `must_not`, `NOT`, `exclude` et `minimum_should_match` écartaient les lignes `NULL`, qu’Elasticsearch garde. Les négations deviennent `(col != x OR col IS NULL)`, les conditions comptées `ifNull(…, 0)`.
 - Regroupement sur un champ facultatif : les documents sans le champ formaient un groupe en trop. Ils sont écartés, sauf paramètre `missing`.

@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE NOT (has(tags, 'a'));
+WHERE NOT has(tags, 'a');

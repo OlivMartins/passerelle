@@ -5,7 +5,7 @@ SELECT
     host AS h,
     count() AS doc_count
 FROM logs.events
-WHERE NOT (match(host, '^(?:web-.*)$'))
+WHERE NOT match(host, '^(?:web-.*)$')
 GROUP BY h
 ORDER BY doc_count DESC, h ASC
 LIMIT 10;
