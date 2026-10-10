@@ -3,7 +3,7 @@
 -- Agrégation svc › d
 SELECT
     service AS svc,
-    toStartOfInterval(timestamp, INTERVAL 1 HOUR) AS d,
+    toStartOfInterval(timestamp, INTERVAL 1 HOUR, 'UTC') AS d,
     count() AS doc_count,
     sum(count()) OVER (PARTITION BY svc) AS svc_doc_count
 FROM logs.events

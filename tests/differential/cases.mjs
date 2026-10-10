@@ -50,9 +50,13 @@ export const CASES = [
   { id: 'agg_range_cles', known: 'clé de plage par défaut : Elasticsearch écrit « *-100.0 », la traduction « *-100 »', dsl: { size: 0, aggs: { r: { range: { field: 'latency_ms', ranges: [{ to: 100 }, { from: 100, to: 3000 }] } } } } },
 
   /* ---------- Histogrammes de dates ---------- */
-  { id: 'agg_date_jour', tz: PARIS, known: { '@Europe/Paris': 'sans time_zone, Elasticsearch découpe en UTC ; la traduction suit le fuseau du serveur' }, dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day' } } } } },
-  { id: 'agg_date_6h', tz: PARIS, known: { '@Europe/Paris': 'sans time_zone, Elasticsearch découpe en UTC ; la traduction suit le fuseau du serveur' }, dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, fixed_interval: '6h' } } } } },
+  { id: 'agg_date_jour', tz: PARIS, dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day' } } } } },
+  { id: 'agg_date_6h', tz: PARIS, dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, fixed_interval: '6h' } } } } },
   { id: 'agg_date_fuseau_explicite', tz: PARIS, dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day', time_zone: 'Europe/Paris' } } } } },
+  { id: 'agg_date_semaine', tz: PARIS, dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'week' } } } } },
+  { id: 'agg_date_mois', tz: PARIS, dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'month' } } } } },
+  { id: 'agg_date_semaine_fuseau', tz: PARIS, dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'week', time_zone: 'Europe/Paris' } } } } },
+  { id: 'agg_date_heure_fuseau', tz: PARIS, dsl: { size: 0, query: { range: { [TS]: { lt: '2026-03-08T06:00:00Z' } } }, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'hour', time_zone: 'Asia/Kolkata' } } } } },
   { id: 'agg_date_extended_bounds', known: 'extended_bounds est ignoré : les tranches vides aux bornes manquent', dsl: { size: 0, query: { range: { [TS]: { gte: '2026-03-09T00:00:00Z', lt: '2026-03-10T00:00:00Z' } } }, aggs: { d: { date_histogram: { field: TS, fixed_interval: '12h', extended_bounds: { min: '2026-03-08T00:00:00Z', max: '2026-03-10T23:59:59Z' } } } } } },
   { id: 'agg_date_imbrique_tranches_vides', known: 'les tranches vides d’un histogramme imbriqué ne sont pas comblées', dsl: { size: 0, aggs: { svc: { terms: { field: 'service', size: 10 }, aggs: { d: { date_histogram: { field: TS, fixed_interval: '1h' } } } } } } },
 
@@ -100,9 +104,16 @@ export const CASES = [
   /* ---------- Dates ---------- */
   { id: 'date_plage_kibana', tz: PARIS, dsl: total({ bool: { filter: [{ range: { [TS]: { gte: '2026-03-09T00:00:00.000Z', lte: '2026-03-10T23:59:59.999Z', format: 'strict_date_optional_time' } } }, { match_phrase: { service: 'api' } }] } }) },
   { id: 'date_arrondi_bornes', dsl: total({ range: { [TS]: { gt: '2026-03-09T10:00:00Z||/d', lte: '2026-03-10T10:00:00Z||/d' } } }) },
-  { id: 'date_epoch_millis', known: 'une borne en epoch millis est comparée telle quelle à une colonne DateTime64', dsl: total({ range: { [TS]: { gte: T10, lt: T10 + DAY } } }) },
-  { id: 'date_arrondi_fuseau', tz: PARIS, known: { '@Europe/Paris': 'l’arrondi /d se fait en UTC dans Elasticsearch ; la traduction suit le fuseau du serveur' }, dsl: { size: 3, sort: [{ [TS]: 'asc' }], query: { range: { [TS]: { gte: '2026-03-10T12:00:00Z||/d', lt: '2026-03-10T12:00:00Z||+1d/d' } } } } },
-  { id: 'date_sans_fuseau', tz: PARIS, known: { '@Europe/Paris': 'une date sans fuseau est en UTC pour Elasticsearch ; la traduction suit le fuseau du serveur' }, dsl: { size: 3, sort: [{ [TS]: 'asc' }], query: { range: { [TS]: { gte: '2026-03-10', lt: '2026-03-11' } } } } },
+  { id: 'date_epoch_millis', dsl: total({ range: { [TS]: { gte: T10, lt: T10 + DAY } } }) },
+  { id: 'date_arrondi_fuseau', tz: PARIS, dsl: { size: 3, sort: [{ [TS]: 'asc' }], query: { range: { [TS]: { gte: '2026-03-10T12:00:00Z||/d', lt: '2026-03-10T12:00:00Z||+1d/d' } } } } },
+  { id: 'date_sans_fuseau', tz: PARIS, dsl: { size: 3, sort: [{ [TS]: 'asc' }], query: { range: { [TS]: { gte: '2026-03-10', lt: '2026-03-11' } } } } },
+  // Borne écrite sans heure : « lte » et « gt » vont jusqu’à la fin du jour
+  { id: 'date_borne_jour', tz: PARIS, dsl: total({ range: { [TS]: { gte: '2026-03-09', lte: '2026-03-10' } } }) },
+  { id: 'date_borne_jour_exclusive', tz: PARIS, dsl: total({ range: { [TS]: { gt: '2026-03-09', lt: '2026-03-11' } } }) },
+  { id: 'date_borne_mois', tz: PARIS, dsl: total({ range: { [TS]: { gte: '2026-03', lte: '2026-03' } } }) },
+  { id: 'date_epoch_chaine', dsl: total({ range: { [TS]: { gte: String(T10), lt: String(T10 + DAY) } } }) },
+  { id: 'date_arrondi_semaine', tz: PARIS, dsl: { size: 3, sort: [{ [TS]: 'asc' }], query: { range: { [TS]: { gte: '2026-03-10T12:00:00Z||/w', lt: '2026-03-10T12:00:00Z||/M+1M' } } } } },
+  { id: 'date_fuseau_requete', tz: PARIS, dsl: { size: 3, sort: [{ [TS]: 'asc' }], query: { range: { [TS]: { gte: '2026-03-10||/d', lt: '2026-03-10||+1d/d', time_zone: 'Asia/Tokyo' } } } } },
 
   /* ---------- Recherche plein texte ---------- */
   { id: 'texte_multi_match', dsl: total({ multi_match: { query: 'timeout', fields: ['message', 'level'] } }) },
@@ -136,12 +147,17 @@ export const CASES = [
   { id: 'runtime_liste_noire', dsl: { size: 0, runtime_mappings: { classe: { type: 'keyword', script: CLASSE }, hote: { type: 'keyword', script: "emit(doc['host'].value.toLowerCase())" } }, query: { bool: { filter: [{ terms: { classe: ['normal', 'lent'] } }], must_not: [{ terms: { hote: ['web-1', 'web-a', 'db_01'] } }] } }, aggs: { h: { terms: { field: 'hote', size: 20 } } } } },
   { id: 'runtime_division_entiere', known: 'la division de deux entiers est entière en Painless, décimale dans ClickHouse', dsl: { size: 0, runtime_mappings: { tranche: { type: 'long', script: "emit(doc['latency_ms'].value / 100)" } }, aggs: { b: { terms: { field: 'tranche', size: 40, order: { _key: 'asc' } } } } } },
   { id: 'runtime_alias_agregation', dsl: { size: 0, runtime_mappings: { b: { type: 'long', script: "emit(doc['status'].value)" } }, aggs: { b: { terms: { field: 'b', size: 40, order: { _key: 'asc' } } } } } },
-  { id: 'runtime_heure_fuseau', tz: PARIS, known: { '@Europe/Paris': 'getHour() est en UTC dans Elasticsearch ; toHour() suit le fuseau du serveur' }, dsl: { size: 0, runtime_mappings: { heure: { type: 'long', script: "emit(doc['@timestamp'].value.getHour())" } }, query: { range: { [TS]: { lt: '2026-03-08T03:00:00Z' } } }, aggs: { h: { terms: { field: 'heure', size: 24, order: { _key: 'asc' } } } } } },
+  { id: 'runtime_heure_fuseau', tz: PARIS, dsl: { size: 0, runtime_mappings: { heure: { type: 'long', script: "emit(doc['@timestamp'].value.getHour())" } }, query: { range: { [TS]: { lt: '2026-03-08T03:00:00Z' } } }, aggs: { h: { terms: { field: 'heure', size: 24, order: { _key: 'asc' } } } } } },
+  { id: 'runtime_jour_semaine', tz: PARIS, dsl: { size: 0, runtime_mappings: { jour: { type: 'long', script: "emit(doc['@timestamp'].value.getDayOfWeekEnum().getValue())" } }, aggs: { j: { terms: { field: 'jour', size: 7, order: { _key: 'asc' } } } } } },
+  { id: 'runtime_heure_locale', tz: PARIS, dsl: { size: 0, runtime_mappings: { heure: { type: 'long', script: "emit(doc['@timestamp'].value.withZoneSameInstant(ZoneId.of('Asia/Tokyo')).getHour())" } }, query: { range: { [TS]: { lt: '2026-03-08T03:00:00Z' } } }, aggs: { h: { terms: { field: 'heure', size: 24, order: { _key: 'asc' } } } } } },
+  // ChronoUnit.between compte les jours entiers écoulés, pas les changements de date
+  { id: 'runtime_jours_ecoules', tz: PARIS, dsl: { size: 0, runtime_mappings: { reste: { type: 'long', script: "emit(ChronoUnit.DAYS.between(doc['@timestamp'].value.toInstant(), Instant.ofEpochMilli(1773273600000L)))" } }, aggs: { r: { terms: { field: 'reste', size: 10, order: { _key: 'asc' } } } } } },
 
   /* ---------- Agrégation composite, paginée jusqu’au bout ---------- */
   { id: 'composite_2_sources', composite: 'c', dsl: { size: 0, aggs: { c: { composite: { size: 7, sources: [{ svc: { terms: { field: 'service' } } }, { lvl: { terms: { field: 'level' } } }] }, aggs: { lat: { avg: { field: 'latency_ms' } } } } } } },
   { id: 'composite_5_sources', composite: 'c', dsl: { size: 0, aggs: { c: { composite: { size: 400, sources: [{ svc: { terms: { field: 'service' } } }, { h: { terms: { field: 'host' } } }, { lvl: { terms: { field: 'level' } } }, { st: { terms: { field: 'status' } } }, { m: { terms: { field: 'http.method' } } }] } } } } },
-  { id: 'composite_cle_date', composite: 'c', known: 'la clé de curseur d’un date_histogram (epoch millis) est comparée telle quelle : des pages sont perdues', dsl: { size: 0, aggs: { c: { composite: { size: 6, sources: [{ h: { terms: { field: 'host' } } }, { d: { date_histogram: { field: TS, calendar_interval: 'day' } } }] } } } } },
+  { id: 'composite_cle_date', composite: 'c', dsl: { size: 0, aggs: { c: { composite: { size: 6, sources: [{ h: { terms: { field: 'host' } } }, { d: { date_histogram: { field: TS, calendar_interval: 'day' } } }] } } } } },
+  { id: 'composite_cle_semaine', composite: 'c', tz: PARIS, dsl: { size: 0, aggs: { c: { composite: { size: 4, sources: [{ w: { date_histogram: { field: TS, calendar_interval: 'week' } } }, { svc: { terms: { field: 'service' } } }] } } } } },
   { id: 'composite_ordre_desc', composite: 'c', known: 'order: desc sur une source est ignoré ; les documents sans valeur ne sont pas écartés', dsl: { size: 0, aggs: { c: { composite: { size: 25, sources: [{ svc: { terms: { field: 'service' } } }, { env: { terms: { field: 'env' } } }, { lvl: { terms: { field: 'level', order: 'desc' } } }, { st: { terms: { field: 'status' } } }] } } } } },
   { id: 'composite_missing_bucket', composite: 'c', known: 'missing_bucket est ignoré', dsl: { size: 0, aggs: { c: { composite: { size: 10, sources: [{ env: { terms: { field: 'env', missing_bucket: true } } }, { svc: { terms: { field: 'service' } } }] } } } } },
   { id: 'composite_multivalue', composite: 'c', known: 'champ multivalué : la comparaison d’un tableau à une chaîne échoue', dsl: { size: 0, aggs: { c: { composite: { size: 10, sources: [{ t: { terms: { field: 'tags' } } }, { svc: { terms: { field: 'service' } } }] } } } } }

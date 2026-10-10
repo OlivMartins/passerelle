@@ -11,6 +11,7 @@ const DEFAULT_CONFIG = {
     cluster: '',
     default_table: 'logs.events',
     time_field: 'timestamp',
+    timezone: '',
     text_fields: ['message', 'error.message'],
     index_mapping: { 'logs-*': 'logs.events', 'nginx-*': 'logs.nginx_access', 'metrics-*': 'metrics.samples' },
     field_mapping: { '@timestamp': 'timestamp' }
@@ -39,6 +40,24 @@ function mergeConfig(base, over) {
     }
   })(out, over);
   return out;
+}
+
+/*
+ * Fuseau des calculs de date.
+ *
+ * Elasticsearch calcule en UTC, sauf fuseau donné par la requête. ClickHouse suit le fuseau du serveur
+ * ou de la colonne : sur un serveur en Europe/Paris, toStartOfDay(), toStartOfInterval(), toHour()
+ * ou une date écrite sans fuseau sont décalés d’une heure ou deux, donc les jours et les tranches aussi.
+ * Le fuseau est donc passé explicitement aux fonctions de date, sauf si la configuration déclare
+ * clickhouse.timezone: UTC (serveur et colonnes en UTC) : le SQL reste alors sans argument de fuseau.
+ */
+function zoneOf(cfg, tz) {
+  if (tz) return String(tz);
+  return String(cfg.clickhouse.timezone || '').toUpperCase() === 'UTC' ? null : 'UTC';
+}
+function tzArg(cfg, tz) {
+  const zone = zoneOf(cfg, tz);
+  return zone ? `, ${chStr(zone)}` : '';
 }
 
 function makeNotes() {
@@ -357,8 +376,8 @@ function guessType(ctx, field) {
 function pval(ctx, x) {
   if (!x) throw new Error('valeur vide');
   if (x.kind === 'field') return { sql: ctx.mapField(x.field), ty: guessType(ctx, x.field.replace(/\.keyword$/, '')) };
-  if (x.kind === 'dow') return pStr(`upper(dateName('weekday', ${x.sql}))`);
-  if (x.kind === 'mon') return pStr(`upper(dateName('month', ${x.sql}))`);
+  if (x.kind === 'dow') return pStr(`upper(dateName('weekday', ${x.sql}${x.zone}))`);
+  if (x.kind === 'mon') return pStr(`upper(dateName('month', ${x.sql}${x.zone}))`);
   if (x.kind === 'size') return pNum(`toUInt8(isNotNull(${ctx.mapField(x.field)}))`);
   if (x.kind) throw new Error(`expression « ${x.kind} » inutilisable comme valeur`);
   return x;
@@ -524,7 +543,8 @@ function pmcall(ctx, n, env, o) {
   if (obj.kind === 'unit' && name === 'between') {
     const [a, b] = A(); const u = JAVA_UNIT[obj.v];
     if (!u) throw new Error(`unité ChronoUnit.${obj.v} non prise en charge`);
-    return pNum(`dateDiff('${u}', ${a.sql}, ${b.sql})`);
+    // ChronoUnit.between compte les unités entières écoulées, comme age() ; dateDiff() compte les changements de jour, de mois…
+    return pNum(`age('${u}', ${a.sql}, ${b.sql}${a.zoned || b.zoned ? '' : tzArg(ctx.cfg)})`);
   }
   if (obj.kind === 'class') {
     const a = A(); const c = obj.name;
@@ -548,10 +568,10 @@ function pmcall(ctx, n, env, o) {
   }
   if (obj.kind === 'dow' || obj.kind === 'mon') {
     const unit = obj.kind === 'dow' ? 'weekday' : 'month';
-    if (name === 'getValue') return pNum(obj.kind === 'dow' ? `toDayOfWeek(${obj.sql})` : `toMonth(${obj.sql})`);
+    if (name === 'getValue') return pNum(obj.kind === 'dow' ? `toDayOfWeek(${obj.sql}${obj.zone ? `, 0${obj.zone}` : ''})` : `toMonth(${obj.sql}${obj.zone})`);
     if (name === 'getDisplayName') {
       const st = n.args[0] ? pconv(ctx, n.args[0], env, o) : null;
-      const full = `dateName('${unit}', ${obj.sql})`;
+      const full = `dateName('${unit}', ${obj.sql}${obj.zone})`;
       return pStr(st && st.v && /SHORT|NARROW/.test(st.v) ? `substring(${full}, 1, 3)` : full);
     }
     if (name === 'toString' || name === 'name') return pval(ctx, obj);
@@ -559,23 +579,25 @@ function pmcall(ctx, n, env, o) {
   }
   const v = pval(ctx, obj); const s = v.sql;
   const a = () => A();
-  const intervalOp = (sign, unit) => { const x = a()[0]; return { sql: `${s} ${sign} INTERVAL ${x.sql} ${unit}`, ty: 'date' }; };
+  const intervalOp = (sign, unit) => { const x = a()[0]; return { sql: `${s} ${sign} INTERVAL ${x.sql} ${unit}`, ty: 'date', zoned: v.zoned }; };
+  // Les composantes d’une date se lisent en UTC, comme dans Painless, sauf si le script a déjà choisi un fuseau (withZoneSameInstant)
+  const zone = v.zoned ? '' : tzArg(ctx.cfg);
   switch (name) {
-    case 'getHour': return pNum(`toHour(${s})`);
-    case 'getMinute': return pNum(`toMinute(${s})`);
+    case 'getHour': return pNum(`toHour(${s}${zone})`);
+    case 'getMinute': return pNum(`toMinute(${s}${zone})`);
     case 'getSecond': return pNum(`toSecond(${s})`);
-    case 'getDayOfMonth': return pNum(`toDayOfMonth(${s})`);
-    case 'getDayOfYear': return pNum(`toDayOfYear(${s})`);
-    case 'getMonthValue': return pNum(`toMonth(${s})`);
-    case 'getYear': return pNum(`toYear(${s})`);
-    case 'getDayOfWeek': case 'getDayOfWeekEnum': return { kind: 'dow', sql: s };
-    case 'getMonth': return { kind: 'mon', sql: s };
-    case 'toInstant': case 'toLocalDateTime': return { sql: s, ty: 'date' };
-    case 'toLocalDate': return { sql: `toDate(${s})`, ty: 'date' };
+    case 'getDayOfMonth': return pNum(`toDayOfMonth(${s}${zone})`);
+    case 'getDayOfYear': return pNum(`toDayOfYear(${s}${zone})`);
+    case 'getMonthValue': return pNum(`toMonth(${s}${zone})`);
+    case 'getYear': return pNum(`toYear(${s}${zone})`);
+    case 'getDayOfWeek': case 'getDayOfWeekEnum': return { kind: 'dow', sql: s, zone };
+    case 'getMonth': return { kind: 'mon', sql: s, zone };
+    case 'toInstant': case 'toLocalDateTime': return { sql: s, ty: 'date', zoned: v.zoned };
+    case 'toLocalDate': return { sql: `toDate(${s}${zone})`, ty: 'date', zoned: v.zoned };
     case 'toEpochMilli': case 'getMillis': return pNum(`toUnixTimestamp64Milli(toDateTime64(${s}, 3))`);
     case 'toEpochSecond': case 'getEpochSecond': return pNum(`toUnixTimestamp(${s})`);
-    case 'withZoneSameInstant': case 'atZone': { const z = pconv(ctx, n.args[0], env, o); if (z.kind !== 'zone') throw new Error('fuseau attendu (ZoneId.of)'); return { sql: `toTimeZone(${s}, ${chStr(z.v)})`, ty: 'date' }; }
-    case 'format': { const f = pconv(ctx, n.args[0], env, o); if (f.kind !== 'fmt') throw new Error('format attendu (DateTimeFormatter.ofPattern)'); return pStr(`formatDateTimeInJodaSyntax(${s}, ${chStr(f.v)})`); }
+    case 'withZoneSameInstant': case 'atZone': { const z = pconv(ctx, n.args[0], env, o); if (z.kind !== 'zone') throw new Error('fuseau attendu (ZoneId.of)'); return { sql: `toTimeZone(${s}, ${chStr(z.v)})`, ty: 'date', zoned: true }; }
+    case 'format': { const f = pconv(ctx, n.args[0], env, o); if (f.kind !== 'fmt') throw new Error('format attendu (DateTimeFormatter.ofPattern)'); return pStr(`formatDateTimeInJodaSyntax(${s}, ${chStr(f.v)}${zone})`); }
     case 'plusSeconds': return intervalOp('+', 'SECOND'); case 'plusMinutes': return intervalOp('+', 'MINUTE');
     case 'plusHours': return intervalOp('+', 'HOUR'); case 'plusDays': return intervalOp('+', 'DAY');
     case 'plusWeeks': return intervalOp('+', 'WEEK'); case 'plusMonths': return intervalOp('+', 'MONTH'); case 'plusYears': return intervalOp('+', 'YEAR');
@@ -589,7 +611,7 @@ function pmcall(ctx, n, env, o) {
       const u = pconv(ctx, n.args[0], env, o);
       const f = { SECONDS: 'toStartOfSecond', MINUTES: 'toStartOfMinute', HOURS: 'toStartOfHour', DAYS: 'toStartOfDay' }[u.v];
       if (!f) throw new Error('unité de troncature non prise en charge');
-      return { sql: `${f}(${s})`, ty: 'date' };
+      return { sql: `${f}(${s}${f === 'toStartOfSecond' ? '' : zone})`, ty: 'date', zoned: v.zoned };
     }
     case 'toLowerCase': return pStr(`lower(${s})`);
     case 'toUpperCase': return pStr(`upper(${s})`);

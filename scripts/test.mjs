@@ -91,6 +91,16 @@ const badInterval = tr({ size: 0, aggs: { h: { histogram: { field: 'latency_ms',
 check(badInterval.stats.ko === 1 && !/sleep/.test(badInterval.sql), 'intervalle invalide : agrégation à reprendre, rien n’est recopié');
 const badPoint = tr({ query: { geo_distance: { distance: '5km', loc: { lat: '0) OR 1=1 --', lon: 2 } } } });
 check(/latitude/.test(badPoint.error || ''), 'coordonnée invalide : traduction refusée');
+// Une expression de date illisible est refusée, pas comparée comme une chaîne
+check(/date non reconnue/.test(tr({ query: { range: { '@timestamp': { gte: 'now-1x' } } } }).error || ''), 'date math illisible : traduction refusée');
+// Avec timezone: UTC, les fonctions de date ne reçoivent pas de fuseau ; sans, il est explicite
+const dated = { size: 0, query: { range: { '@timestamp': { gte: 'now-7d/d' } } }, aggs: { d: { date_histogram: { field: '@timestamp', calendar_interval: 'day' } } } };
+const utcConfig = E.mergeConfig(benchConfig, { clickhouse: { timezone: 'UTC' } });
+check(!/'UTC'/.test(E.translateDSL(JSON.stringify(dated), utcConfig, { index: INDEX }).sql) && /toStartOfDay\(now\('UTC'\) - INTERVAL 7 DAY\)/.test(tr(dated).sql), 'fuseau : explicite par défaut, omis avec timezone: UTC');
+// Le README montre la sortie réelle du moteur pour son exemple « Avant, après »
+const readme = rd('README.md');
+const readmeOut = E.translateDSL(readme.match(/```json\n([\s\S]*?)```/)[1], E.DEFAULT_CONFIG, { index: 'logs-*' });
+check(readmeOut.sql.replace(/^-- .*\n/, '').trim() === readme.match(/```sql\n([\s\S]*?)```/)[1].trim(), 'README : le SQL de l’exemple est celui que produit le moteur');
 // Un nom de clause inconnu reste dans une chaîne SQL échappée
 const odd = tr({ query: { "x') OR 1=1 --": {} } });
 check(odd.stats.ko === 1 && odd.sql.includes("throwIf(1, 'Passerelle : x\\') OR 1=1 -- à traduire')"), 'clause inconnue : nom échappé, requête arrêtée par throwIf');

@@ -10,7 +10,7 @@ SELECT
     countIf(classe_latence = 'lent') AS lentes_doc_count,
     maxIf(latency_ms, classe_latence = 'lent') AS lentes_lat_max
 FROM logs.events
-WHERE timestamp >= toStartOfDay(now() - INTERVAL 7 DAY)
+WHERE timestamp >= toStartOfDay(now('UTC') - INTERVAL 7 DAY)
   AND isNotNull(heure_locale)
 GROUP BY par_heure
 ORDER BY par_heure ASC
@@ -25,14 +25,14 @@ SELECT
     classe_latence AS par_classe,
     count() AS doc_count
 FROM logs.events
-WHERE timestamp >= toStartOfDay(now() - INTERVAL 7 DAY)
+WHERE timestamp >= toStartOfDay(now('UTC') - INTERVAL 7 DAY)
   AND isNotNull(heure_locale)
   AND isNotNull(classe_latence)
   AND heure_locale IN (
     SELECT
         heure_locale AS par_heure
     FROM logs.events
-    WHERE timestamp >= toStartOfDay(now() - INTERVAL 7 DAY)
+    WHERE timestamp >= toStartOfDay(now('UTC') - INTERVAL 7 DAY)
       AND isNotNull(heure_locale)
     GROUP BY par_heure
     ORDER BY par_heure ASC

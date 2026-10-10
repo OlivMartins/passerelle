@@ -323,7 +323,8 @@ const CFG_FORM = [
     ['clickhouse.endpoint', 'Endpoint HTTP(S)', 'text', 'Port 8443 en TLS, 8123 en clair.'], ['clickhouse.database', 'Base de données', 'text'],
     ['clickhouse.user', 'Utilisateur', 'text', 'Une variable ${…} est résolue au déploiement.'], ['clickhouse.password', 'Mot de passe', 'text', 'Jamais en clair : gardez ${CLICKHOUSE_PASSWORD}.'],
     ['clickhouse.default_table', 'Table par défaut', 'text'], ['clickhouse.cluster', 'Cluster (optionnel)', 'text', 'Pour cibler des tables Distributed.'],
-    ['clickhouse.time_field', 'Colonne temporelle', 'text', 'Tri par défaut des documents.'], ['clickhouse.text_fields', 'Champs plein texte', 'list', 'Séparés par des virgules. Recherche par tokens (hasToken).']
+    ['clickhouse.time_field', 'Colonne temporelle', 'text', 'Tri par défaut des documents.'], ['clickhouse.timezone', 'Fuseau du serveur', 'text', 'UTC si le serveur et les colonnes de date sont en UTC. Vide : le SQL précise « UTC » dans chaque calcul de date, comme le fait Elasticsearch.'],
+    ['clickhouse.text_fields', 'Champs plein texte', 'list', 'Séparés par des virgules. Recherche par tokens (hasToken).']
   ], maps: [['clickhouse.index_mapping', 'Index ou motif Elasticsearch', 'Table ClickHouse', 'Correspondance index → table'], ['clickhouse.field_mapping', 'Champ Elasticsearch', 'Colonne ClickHouse', 'Renommage des champs']] },
   { title: 'Kafka', intro: 'Laissez un champ vide pour reprendre la valeur écrite dans le pipeline Logstash. Renseigné, il s’impose à tous les pipelines traduits.', fields: [
     ['kafka.bootstrap_servers', 'Bootstrap servers', 'text', 'hôte:port, séparés par des virgules.'], ['kafka.security_protocol', 'Protocole de sécurité', 'select', '', ['', 'PLAINTEXT', 'SSL', 'SASL_PLAINTEXT', 'SASL_SSL']],

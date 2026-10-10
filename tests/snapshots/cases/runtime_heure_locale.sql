@@ -2,7 +2,7 @@
 
 -- Agrégation h
 WITH
-    toHour(timestamp, 'UTC') AS heure
+    toHour(toTimeZone(timestamp, 'Asia/Tokyo')) AS heure
 SELECT
     heure AS h,
     count() AS doc_count

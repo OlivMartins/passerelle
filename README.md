@@ -100,13 +100,13 @@ Une requête typique de tableau de bord, avec un champ runtime Painless. Le SQL 
 
 ```sql
 WITH
-    toHour(timestamp) AS heure
+    toHour(timestamp, 'UTC') AS heure
 SELECT
     heure AS par_heure,
     count() AS doc_count,
     quantilesTDigest(0.95)(latency_ms) AS p95
 FROM logs.events
-WHERE timestamp >= toStartOfDay(now() - INTERVAL 7 DAY)
+WHERE timestamp >= toStartOfDay(now('UTC') - INTERVAL 7 DAY)
   AND hasTokenCaseInsensitive(message, 'timeout')
   AND env != 'staging'
   AND isNotNull(heure)
@@ -116,6 +116,8 @@ LIMIT 24;
 ```
 
 Le script Painless devient une expression `WITH`. Le `match` plein texte devient une recherche par tokens, qu’un index peut accélérer. Le percentile garde l’algorithme t-digest d’Elasticsearch, donc des résultats comparables.
+
+Les dates sont calculées en UTC, comme dans Elasticsearch, quel que soit le fuseau du serveur ClickHouse : c’est le rôle des `'UTC'` du SQL. Si votre serveur et vos colonnes sont déjà en UTC, déclarez `timezone: UTC` dans la configuration et le SQL s’en passe.
 
 Passerelle signale aussi que `heure` gagnerait à être une colonne matérialisée et que `message` mérite un index `tokenbf_v1`. Le `ALTER TABLE` correspondant est prêt à copier.
 

@@ -2,7 +2,7 @@
 
 -- Agrégation d
 SELECT
-    toStartOfInterval(timestamp, INTERVAL 6 HOUR) AS d,
+    toStartOfInterval(timestamp, INTERVAL 6 HOUR, 'UTC') AS d,
     count() AS doc_count
 FROM logs.events
 GROUP BY d

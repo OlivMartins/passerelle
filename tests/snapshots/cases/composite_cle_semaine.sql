@@ -2,10 +2,10 @@
 
 -- Agrégation c
 SELECT
-    host AS h,
-    toStartOfDay(timestamp, 'UTC') AS d,
+    toMonday(timestamp, 'UTC') AS w,
+    service AS svc,
     count() AS doc_count
 FROM logs.events
-GROUP BY h, d
-ORDER BY h ASC, d ASC
-LIMIT 6;
+GROUP BY w, svc
+ORDER BY w ASC, svc ASC
+LIMIT 4;

@@ -11,22 +11,58 @@ function parseDateMath(v) {
   if (s.startsWith('now')) { base = { now: true }; rest = s.slice(3); }
   else {
     const k = s.indexOf('||');
-    if (k < 0) return ISO_RE.test(s) ? { abs: s, ops: [], round: null } : null;
+    if (k < 0) return ISO_RE.test(s) ? { abs: s, steps: [], ops: [], round: null } : null;
     base = { abs: s.slice(0, k) }; rest = s.slice(k + 2);
   }
-  const m = /^((?:[+-]\d+[yMwdhHms])*)(?:\/([yMwdhHms]))?$/.exec(rest);
-  if (!m) return null;
-  const ops = [...m[1].matchAll(/([+-])(\d+)([yMwdhHms])/g)].map(x => ({ sign: x[1], n: +x[2], unit: x[3] }));
-  return Object.assign(base, { ops, round: m[2] || null });
+  // Suite d’opérations appliquées dans l’ordre : décalages (+1d, -2M) et arrondis (/d), l’arrondi pouvant être suivi d’un décalage
+  if (!/^(?:[+-]\d+[yMwdhHms]|\/[yMwdhHms])*$/.test(rest)) return null;
+  const steps = [...rest.matchAll(/([+-])(\d+)([yMwdhHms])|\/([yMwdhHms])/g)].map(x => (x[4] ? { round: x[4] } : { sign: x[1], n: +x[2], unit: x[3] }));
+  const rounds = steps.filter(x => x.round);
+  // ops : les décalages seuls ; round : unité du dernier arrondi (null s’il n’y en a pas)
+  return Object.assign(base, { steps, ops: steps.filter(x => !x.round), round: rounds.length ? rounds[rounds.length - 1].round : null });
 }
-function dateMathSQL(dm, tz, roundUp) {
-  let e = dm.now ? 'now()' : `parseDateTime64BestEffort(${chStr(dm.abs)}, 3${tz ? ', ' + chStr(tz) : ''})`;
-  for (const op of dm.ops) e = `${e} ${op.sign} INTERVAL ${op.n} ${DM_UNIT[op.unit]}`;
-  if (dm.round && DM_ROUND[dm.round]) {
-    e = `${DM_ROUND[dm.round]}(${e}${tz ? ', ' + chStr(tz) : ''})`;
-    if (roundUp) e += ` + INTERVAL 1 ${DM_UNIT[dm.round]}`;
+/*
+ * Expression SQL d’une date « date math » d’Elasticsearch (now-7d/d, 2026-03-10||+1M/M…).
+ * Décalages calendaires et arrondis se calculent dans le fuseau de la requête, UTC par défaut (voir zoneOf).
+ * Le fuseau est porté par la valeur de départ, now('UTC') ou date analysée en UTC : les fonctions d’arrondi le reprennent.
+ */
+function dateMathSQL(ctx, dm, tz, roundUp) {
+  const zone = zoneOf(ctx.cfg, tz);
+  const calendar = !!dm.round || dm.ops.some(op => 'yMwd'.includes(op.unit));
+  let e;
+  if (dm.now) e = zone && calendar ? `now(${chStr(zone)})` : 'now()';
+  else e = `parseDateTime64BestEffort(${chStr(dm.abs)}, 3${zone ? `, ${chStr(zone)}` : ''})`;
+  for (const step of dm.steps || dm.ops) {
+    if (!step.round) { e = `${e} ${step.sign} INTERVAL ${step.n} ${DM_UNIT[step.unit]}`; continue; }
+    if (!DM_ROUND[step.round]) continue;
+    e = `${DM_ROUND[step.round]}(${e})`;
+    // Semaine, mois et année s’arrondissent en Date, que ClickHouse relirait ensuite dans le fuseau du serveur
+    if (zone && 'yMw'.includes(step.round)) e = `toDateTime(${e}, ${chStr(zone)})`;
+    // Borne haute : Elasticsearch va jusqu’à la fin de l’unité ; ici son début plus une unité, comparé strictement
+    if (roundUp) e += ` + INTERVAL 1 ${DM_UNIT[step.round]}`;
   }
   return e;
+}
+// Le champ est-il une date ? Faute de schéma : colonne temporelle de la configuration, champ runtime de type date, ou nom évocateur
+function isDateField(ctx, field) {
+  const base = String(field).replace(/\.keyword$/, '');
+  if (ctx.runtime[base]) return ctx.runtime[base].type === 'date';
+  const fm = ctx.cfg.clickhouse.field_mapping || {};
+  const column = Object.prototype.hasOwnProperty.call(fm, base) && fm[base] ? fm[base] : base;
+  return column === ctx.cfg.clickhouse.time_field || guessType(ctx, base) === 'date';
+}
+// Instant donné en epoch millis (le format par défaut d’un champ date accepte un nombre)
+const isEpoch = v => typeof v === 'number' || /^\d{5,}$/.test(String(v));
+const epochMillisSQL = v => `fromUnixTimestamp64Milli(toInt64(${chNum(v, 'date en epoch millis')}))`;
+// Borne de date d’une agrégation (hard_bounds, date_range…) : epoch millis, date math ou date écrite en clair
+function dateBoundSQL(ctx, v, tz) {
+  if (isEpoch(v)) return epochMillisSQL(v);
+  return dateMathSQL(ctx, parseDateMath(String(v)) || { abs: String(v), steps: [], ops: [], round: null }, tz);
+}
+// Valeur de curseur d’une clé de regroupement : la clé d’un date_histogram arrive d’Elasticsearch en epoch millis
+function cursorValueSQL(key, v) {
+  if (!key.date || !isEpoch(v)) return chVal(v);
+  return key.date.asDate ? `toDate(${epochMillisSQL(v)}${key.date.zone ? `, ${chStr(key.date.zone)}` : ''})` : epochMillisSQL(v);
 }
 function humanSince(dm) {
   if (!dm || !dm.now || dm.ops.length !== 1 || dm.ops[0].sign !== '-') return null;
@@ -165,20 +201,31 @@ function rangeClause(ctx, field, spec0) {
   const f = mapField(ctx, field);
   const tz = spec.time_zone; const fmt = spec.format || '';
   const parts = []; let isDate = false; let lower = null, upper = null; const hum = [];
-  for (const [op, sym, hs] of [['gte', '>=', '≥'], ['gt', '>', '>'], ['lte', '<=', '≤'], ['lt', '<', '<']]) {
+  const OPS = [['gte', '>=', '≥'], ['gt', '>', '>'], ['lte', '<=', '≤'], ['lt', '<', '<']];
+  // Champ date : connu comme tel, ou comparé à une date. Un nombre y est alors un instant en epoch millis.
+  const dateField = isDateField(ctx, field) || !!fmt || OPS.some(([op]) => typeof spec[op] === 'string' && parseDateMath(spec[op]) !== null);
+  for (const [op, sym, hs] of OPS) {
     const v = spec[op];
     if (v === undefined || v === null) continue;
     let sql, s = sym, date = false;
-    if ((typeof v === 'number' || /^\d{9,13}$/.test(String(v))) && /epoch_(millis|second)/.test(fmt)) {
-      sql = /epoch_millis/.test(fmt) ? `fromUnixTimestamp64Milli(toInt64(${v}))` : `toDateTime(${v})`; date = true;
-    } else {
-      const dm = parseDateMath(v);
-      if (dm) {
-        const up = !!dm.round && (op === 'gt' || op === 'lte');
-        sql = dateMathSQL(dm, tz, up); if (up) s = op === 'gt' ? '>=' : '<'; date = true;
-        if (op[0] === 'g') lower = { dm, v }; else upper = { dm, v };
-      } else sql = chVal(v);
-    }
+    const dm = parseDateMath(v);
+    if (dm) {
+      // Bornes « gt » et « lte » : Elasticsearch arrondit vers le haut, jusqu’à la fin de l’unité arrondie (now/d)
+      // ou jusqu’à la fin du jour quand la date est écrite sans heure (2026-03-10).
+      const upper2 = op === 'gt' || op === 'lte';
+      const dayOnly = !dm.round && !!dm.abs && /^\d{4}-\d{2}(-\d{2})?$/.test(dm.abs);
+      sql = dateMathSQL(ctx, dm, tz, upper2 && !!dm.round);
+      if (upper2 && dayOnly) sql += ' + INTERVAL 1 DAY';
+      if (upper2 && (dm.round || dayOnly)) s = op === 'gt' ? '>=' : '<';
+      date = true;
+      if (op[0] === 'g') lower = { dm, v }; else upper = { dm, v };
+    } else if (dateField && isEpoch(v)) {
+      sql = /epoch_second/.test(fmt) && !/epoch_millis/.test(fmt) ? `toDateTime(${chNum(v, 'date en epoch secondes')})` : epochMillisSQL(v);
+      date = true;
+    } else if (typeof v === 'string' && /^now|\|\|/.test(v.trim())) {
+      // Elasticsearch refuse aussi une expression de date qu’il ne sait pas lire
+      throw new Error(`expression de date non reconnue pour ${field} : ${v}`);
+    } else sql = chVal(v);
     if (date) isDate = true;
     parts.push(`${f} ${s} ${sql}`);
     hum.push(`${hs} ${date ? humanDate(v) : v}`);
@@ -583,7 +630,7 @@ function buildLevel(ctx, name, def) {
       break;
     }
     case 'date_histogram': case 'auto_date_histogram': {
-      const f = mapField(ctx, body.field); const tz = body.time_zone; const tzA = tz ? ', ' + chStr(tz) : '';
+      const f = mapField(ctx, body.field); const tz = body.time_zone; const tzA = tzArg(ctx.cfg, tz);
       let ci = body.calendar_interval || (body.interval && CAL[body.interval] ? body.interval : null);
       let fi = body.fixed_interval || (!ci && body.interval) || null;
       if (type === 'auto_date_histogram') { ci = 'hour'; ctx.stats.approx++; ctx.notes.add('warn', 'auto_date_histogram', `L’intervalle automatique (${body.buckets || 10} tranches) est fixé à l’heure : ajustez selon la période.`); } else ctx.stats.ok++;
@@ -595,8 +642,12 @@ function buildLevel(ctx, name, def) {
         key = `toStartOfInterval(${f}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`; step = `INTERVAL ${n} ${FIXED_UNIT[u]}`; hum = `par tranche de ${n} ${FIXED_FR[u]}`;
       }
       if (body.offset) ctx.notes.add('warn', 'offset de date_histogram', `Le décalage « ${body.offset} » n’est pas appliqué : utilisez toStartOfInterval(…, origin) si besoin.`);
-      if (body.hard_bounds) { if (body.hard_bounds.min !== undefined) L.where.push(`${f} >= ${dateMathSQL(parseDateMath(String(body.hard_bounds.min)) || { abs: String(body.hard_bounds.min), ops: [] }, tz)}`); if (body.hard_bounds.max !== undefined) L.where.push(`${f} <= ${dateMathSQL(parseDateMath(String(body.hard_bounds.max)) || { abs: String(body.hard_bounds.max), ops: [] }, tz)}`); }
-      L.keys.push({ sql: key, alias: A });
+      if (body.hard_bounds) {
+        if (body.hard_bounds.min !== undefined) L.where.push(`${f} >= ${dateBoundSQL(ctx, body.hard_bounds.min, tz)}`);
+        if (body.hard_bounds.max !== undefined) L.where.push(`${f} <= ${dateBoundSQL(ctx, body.hard_bounds.max, tz)}`);
+      }
+      // Semaine, mois, trimestre et année donnent une clé de type Date ; les autres intervalles, un DateTime
+      L.keys.push({ sql: key, alias: A, date: { asDate: !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
       L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) L.fill = step;
       else if (body.min_doc_count > 1) L.having.push(`doc_count >= ${chInt(body.min_doc_count, 'min_doc_count')}`);
@@ -613,7 +664,7 @@ function buildLevel(ctx, name, def) {
     }
     case 'range': case 'date_range': case 'ip_range': {
       const f = mapField(ctx, body.field); const tz = body.time_zone;
-      const bound = v => { if (type !== 'date_range') return type === 'ip_range' ? `toIPv4(${chStr(v)})` : chVal(v); const dm = parseDateMath(String(v)); return dm ? dateMathSQL(dm, tz) : chVal(v); };
+      const bound = v => { if (type !== 'date_range') return type === 'ip_range' ? `toIPv4(${chStr(v)})` : chVal(v); return dateBoundSQL(ctx, v, tz); };
       const lhs = type === 'ip_range' ? `toIPv4(${f})` : f;
       const items = (body.ranges || []).map(r => {
         const key = r.key || (r.mask ? r.mask : `${r.from !== undefined ? r.from : '*'}-${r.to !== undefined ? r.to : '*'}`);
@@ -651,7 +702,7 @@ function buildLevel(ctx, name, def) {
         sub.keys.forEach(k => L.keys.push(Object.assign({ source: sn }, k))); L.where.push(...sub.where);
       });
       L.size = chInt(body.size || 10, 'composite.size'); L.order = L.keys.map(k => ({ by: k.alias, dir: 'asc', raw: true }));
-      if (body.after) { const vals = L.keys.map(k => chVal(body.after[k.source])); L.having.push(`(${L.keys.map(k => k.alias).join(', ')}) > (${vals.join(', ')})`); }
+      if (body.after) { const vals = L.keys.map(k => cursorValueSQL(k, body.after[k.source])); L.having.push(`(${L.keys.map(k => k.alias).join(', ')}) > (${vals.join(', ')})`); }
       L.composite = true; ctx.stats.ok++;
       ctx.notes.add('info', 'composite → pagination par tuple', 'La page suivante se lit en passant les dernières clés dans after : la clause HAVING (clés) > (…) reproduit ce curseur.');
       break;
@@ -922,7 +973,9 @@ function hitsQuery(ctx, env, dsl, where) {
     const dirs = order.map(o => /DESC/.test(o));
     if (dirs.every(d => d === dirs[0])) {
       const cols2 = order.map(o => o.replace(/\s+(ASC|DESC).*$/, ''));
-      const vals = dsl.search_after.map((v, i) => (typeof v === 'number' && /time|date|timestamp/i.test(cols2[i] || '') ? `fromUnixTimestamp64Milli(toInt64(${v}))` : chVal(v)));
+      // Elasticsearch renvoie la valeur de tri d’une date en epoch millis
+      const timeColumn = ctx.cfg.clickhouse.time_field ? chIdent(ctx.cfg.clickhouse.time_field) : null;
+      const vals = dsl.search_after.map((v, i) => (typeof v === 'number' && (cols2[i] === timeColumn || /time|date|timestamp/i.test(cols2[i] || '')) ? epochMillisSQL(v) : chVal(v)));
       w.push(`(${cols2.join(', ')}) ${dirs[0] ? '<' : '>'} (${vals.join(', ')})`); ctx.stats.ok++;
     } else todo(ctx, 'search_after à sens mixtes', 'Réécrivez la condition de curseur à la main pour des tris de sens différents.');
   }

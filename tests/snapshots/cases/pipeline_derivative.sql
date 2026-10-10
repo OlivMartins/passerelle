@@ -2,7 +2,7 @@
 
 -- Agrégation d
 SELECT
-    toStartOfDay(timestamp) AS d,
+    toStartOfDay(timestamp, 'UTC') AS d,
     count() AS doc_count,
     sum(bytes) AS s,
     s - lagInFrame(s, 1) OVER (ORDER BY d ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS dv

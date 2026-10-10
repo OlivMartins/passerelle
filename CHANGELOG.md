@@ -13,8 +13,17 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 - Instantanés du SQL et du YAML générés (`tests/snapshots`), comparés par `npm test`.
 - Banc différentiel (`npm run test:diff`) : chaque requête est exécutée sur Elasticsearch, sa traduction sur ClickHouse, et les résultats sont comparés. Les écarts connus sont inventoriés dans `tests/differential/cases.mjs`. Il demande ClickHouse 26.9 ou une version suivante, celle que vise le SQL généré ; la CI épingle la 26.9.
 
+### Modifié
+
+- Les calculs de date précisent désormais le fuseau `'UTC'` dans le SQL (`toStartOfDay(now('UTC') - INTERVAL 7 DAY)`, `toHour(timestamp, 'UTC')`), parce qu’Elasticsearch calcule en UTC alors que ClickHouse suit le fuseau du serveur. La nouvelle option `clickhouse.timezone: UTC` déclare un serveur et des colonnes en UTC : le SQL retrouve alors sa forme courte.
+
 ### Corrigé
 
+- Dates et fuseau : sur un serveur ClickHouse hors UTC, les arrondis (`now/d`), les dates écrites sans fuseau, les tranches de `date_histogram` et les accesseurs Painless (`getHour()`, `getDayOfWeekEnum()`…) étaient décalés. Les arrondis à la semaine, au mois et à l’année sont reconvertis en instant avant comparaison.
+- Borne de date en epoch millis (nombre ou chaîne de chiffres) : elle était comparée telle quelle à la colonne, et ne trouvait rien. Même correction pour le curseur `after` d’un `composite` sur `date_histogram`, y compris à la semaine et au mois.
+- Borne de date écrite sans heure : `lte: "2026-03-10"` s’arrête à la fin du jour, comme dans Elasticsearch, et non à minuit.
+- Date math avec un arrondi suivi d’un décalage (`now/d+1h`, `…||/M+1M`) ; une expression de date illisible fait échouer la traduction au lieu d’être comparée comme une chaîne.
+- `ChronoUnit.X.between()` : unités entières écoulées (`age`), et non changements de jour ou de mois (`dateDiff`).
 - `query_string` mal formée (parenthèse ou guillemet non fermé, opérateur doublé) : déclarée « à reprendre », comme Elasticsearch la refuse, au lieu d’être traduite en partie sans avertissement.
 - `simple_query_string` : analyseur dédié. Les opérateurs `+`, `|` et `-` s’appliquent de gauche à droite et une négation se combine par l’opérateur par défaut, comme dans Elasticsearch. `a | b` n’était pas filtré du tout.
 - Clause non traduite : le SQL s’arrête sur un message explicite (`throwIf`) au lieu de s’exécuter en ignorant la clause. Dans un `must_not`, l’ancien `1` écartait toutes les lignes.

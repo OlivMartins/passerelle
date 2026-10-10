@@ -4,7 +4,7 @@
 SELECT
     *
 FROM logs.events
-WHERE timestamp >= toStartOfDay(parseDateTime64BestEffort('2026-03-10T12:00:00Z', 3))
-  AND timestamp < toStartOfDay(parseDateTime64BestEffort('2026-03-10T12:00:00Z', 3) + INTERVAL 1 DAY)
+WHERE timestamp >= toStartOfDay(parseDateTime64BestEffort('2026-03-10T12:00:00Z', 3, 'UTC'))
+  AND timestamp < toStartOfDay(parseDateTime64BestEffort('2026-03-10T12:00:00Z', 3, 'UTC') + INTERVAL 1 DAY)
 ORDER BY timestamp ASC
 LIMIT 3;

@@ -151,7 +151,7 @@ function leafMetrics(bucket, defs) {
 const subAggs = def => (def && (def.aggs || def.aggregations)) || {};
 // Parcourt l’arbre d’agrégations d’Elasticsearch le long d’un chemin et appelle onLeaf(bucket, clés, définitions enfants)
 function walkBuckets(aggs, defs, path, onLeaf) {
-  (function walk(cur, curDefs, i, keys) {
+  (function walk(cur, curDefs, i, keys, labels) {
     const name = path[i];
     const a = cur && cur[name];
     if (!a) return;
@@ -162,18 +162,19 @@ function walkBuckets(aggs, defs, path, onLeaf) {
     else buckets = [[undefined, a]];
     for (const [k, b] of buckets) {
       const next = Object.assign({}, keys);
+      const nextLabels = Object.assign({}, labels);
       if (k !== undefined) {
         if (k !== null && typeof k === 'object' && !Array.isArray(k)) Object.assign(next, k);
-        else next[name] = k;
+        else { next[name] = k; if (typeof b.key_as_string === 'string') nextLabels[name] = b.key_as_string; }
       }
-      if (i < path.length - 1) walk(b, children, i + 1, next);
-      else onLeaf(b, next, children);
+      if (i < path.length - 1) walk(b, children, i + 1, next, nextLabels);
+      else onLeaf(b, next, children, nextLabels);
     }
-  })(aggs, defs, 0, {});
+  })(aggs, defs, 0, {}, {});
 }
 function esBucketRows(aggs, defs, path) {
   const rows = [];
-  walkBuckets(aggs, defs, path, (b, keys, children) => rows.push({ keys, doc_count: b.doc_count, m: leafMetrics(b, children) }));
+  walkBuckets(aggs, defs, path, (b, keys, children, labels) => rows.push({ keys, labels, doc_count: b.doc_count, m: leafMetrics(b, children) }));
   return rows;
 }
 const short = v => { const s = JSON.stringify(v === undefined ? null : v); return s.length > 120 ? s.slice(0, 120) + '…' : s; };
@@ -185,8 +186,11 @@ function compareRows(esRows, chRows, tol) {
   const keyOf = get => JSON.stringify(keyNames.map(k => normKey(get(k))));
   // Une agrégation qui porte le nom d’une colonne citée par la requête est suffixée _agg par la traduction
   const col = (row, name) => (name in row || !(`${name}_agg` in row) ? row[name] : row[`${name}_agg`]);
-  const esKeys = esRows.map(r => keyOf(k => r.keys[k]));
-  const chKeys = chRows.map(r => keyOf(k => col(r, k)));
+  // Semaine, mois, année : ClickHouse renvoie une date sans heure. Elle se compare au jour écrit par
+  // Elasticsearch dans key_as_string, qui est déjà exprimé dans le fuseau de l’agrégation.
+  const byDay = new Set(keyNames.filter(k => chRows.some(r => /^\d{4}-\d{2}-\d{2}$/.test(String(col(r, k)))) && esRows.some(r => r.labels && r.labels[k])));
+  const esKeys = esRows.map(r => JSON.stringify(keyNames.map(k => (byDay.has(k) ? String(r.labels[k]).slice(0, 10) : normKey(r.keys[k])))));
+  const chKeys = chRows.map(r => JSON.stringify(keyNames.map(k => (byDay.has(k) ? col(r, k) : normKey(col(r, k))))));
   const chByKey = new Map(chKeys.map((k, i) => [k, chRows[i]]));
   const esSet = new Set(esKeys);
   const missing = esKeys.filter(k => !chByKey.has(k));

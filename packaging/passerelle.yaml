@@ -10,6 +10,7 @@ clickhouse:
   cluster: ''
   default_table: logs.events
   time_field: timestamp
+  timezone: ''                        # UTC si le serveur et les colonnes de date sont en UTC : le SQL n'a alors plus besoin de préciser le fuseau
   text_fields: [message, error.message]
   index_mapping:
     'logs-*': logs.events
