@@ -1,0 +1,144 @@
+# Couverture : 10 directs, 0 à vérifier, 0 à reprendre
+
+# Configuration Vector générée par Passerelle depuis un pipeline Logstash
+# Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+# Variables d’environnement attendues : KAFKA_USERNAME, KAFKA_PASSWORD
+
+data_dir: /var/lib/vector
+api:
+  enabled: true
+  address: '0.0.0.0:8686'
+sources:
+  kafka_in:
+    type: kafka
+    bootstrap_servers: kafka:9092
+    group_id: logstash-router
+    topics: [^app-.*-logs]
+    sasl:
+      enabled: true
+      mechanism: SCRAM-SHA-512
+      username: '${KAFKA_USERNAME}'
+      password: '${KAFKA_PASSWORD}'
+    tls:
+      enabled: true
+      ca_file: /etc/vector/certs/ca.pem
+    decoding:
+      codec: json
+    log_namespace: true
+transforms:
+  kafka_in_init:
+    type: remap
+    inputs: [kafka_in]
+    source: |
+      # Garantit un objet à la racine (un JSON scalaire est rangé dans message)
+      . = object(.) ?? { "message": . }
+      # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
+      if !exists(."@timestamp") {
+        ."@timestamp" = now()
+      }
+      if !exists(."@version") {
+        ."@version" = "1"
+      }
+      .pipeline.name = "router"
+  json:
+    type: remap
+    inputs: [kafka_in_init]
+    source: |
+      # json
+      parsed, err = parse_json(.payload)
+      if err == null {
+        .data = parsed
+      }
+  kv:
+    type: remap
+    inputs: [json]
+    source: |
+      # kv
+      kv, err = parse_key_value(.data.extra, key_value_delimiter: "=", field_delimiter: "&")
+      if err == null {
+        .extra = kv
+      }
+  translate:
+    type: remap
+    inputs: [kv]
+    source: |
+      # translate
+      key = (to_string(.data.country) ?? "")
+      if key == "FR" {
+        .data.region = "EMEA"
+      } else if key == "DE" {
+        .data.region = "EMEA"
+      } else if key == "US" {
+        .data.region = "AMER"
+      } else if key == "JP" {
+        .data.region = "APAC"
+      } else {
+        .data.region = "AUTRE"
+      }
+  fingerprint:
+    type: remap
+    inputs: [translate]
+    source: |
+      # fingerprint
+      .data.user_hash = sha2((to_string(.data.user_id) ?? ""), variant: "SHA-256")
+  condition_5:
+    type: remap
+    inputs: [fingerprint]
+    source: |
+      if .level == "DEBUG" && .env != "prod" {
+        # drop
+        abort
+      }
+    drop_on_abort: true
+  condition_6:
+    type: remap
+    inputs: [condition_5]
+    source: |
+      if includes(["ERROR", "FATAL"], .level) {
+        # mutate
+        .tags = compact(flatten([.tags, "alerte"]))
+      }
+  logstash_finalize:
+    type: remap
+    inputs: [condition_6]
+    source: |
+      # Format de date identique à Logstash (millisecondes, UTC)
+      if is_timestamp(."@timestamp") {
+        ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")
+      }
+  routage:
+    type: route
+    inputs: [logstash_finalize]
+    reroute_unmatched: false
+    route:
+      alerts: '(includes(array(.tags) ?? [], "alerte") || contains(string(.tags) ?? "", "alerte"))'
+      logs_emea_env: '!((includes(array(.tags) ?? [], "alerte") || contains(string(.tags) ?? "", "alerte"))) && .data.region == "EMEA"'
+      logs_others: '!((includes(array(.tags) ?? [], "alerte") || contains(string(.tags) ?? "", "alerte"))) && !(.data.region == "EMEA")'
+sinks:
+  kafka_out:
+    type: kafka
+    inputs: [routage.alerts]
+    bootstrap_servers: kafka:9092
+    topic: alerts
+    encoding:
+      codec: json
+    acknowledgements:
+      enabled: true
+  kafka_out_2:
+    type: kafka
+    inputs: [routage.logs_emea_env]
+    bootstrap_servers: kafka:9092
+    topic: 'logs-emea-{{ env }}'
+    encoding:
+      codec: json
+    acknowledgements:
+      enabled: true
+  kafka_out_3:
+    type: kafka
+    inputs: [routage.logs_others]
+    bootstrap_servers: kafka:9092
+    topic: logs-others
+    encoding:
+      codec: json
+    acknowledgements:
+      enabled: true

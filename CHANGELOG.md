@@ -10,6 +10,8 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 - Fichiers `LICENSE`, `NOTICE` et licence de Node.js inclus dans l’archive de release.
 - Politique de sécurité (`SECURITY.md`).
 - Intégration continue : tests à chaque push ; archive, somme de contrôle et page autonome construites et jointes automatiquement aux releases.
+- Instantanés du SQL et du YAML générés (`tests/snapshots`), comparés par `npm test`.
+- Banc différentiel (`npm run test:diff`) : chaque requête est exécutée sur Elasticsearch, sa traduction sur ClickHouse, et les résultats sont comparés. Les écarts connus sont inventoriés dans `tests/differential/cases.mjs`. Il demande ClickHouse 26.9 ou une version suivante, celle que vise le SQL généré ; la CI épingle la 26.9.
 
 ## [1.0.0] - 2026-10-08
 

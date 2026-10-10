@@ -1,0 +1,138 @@
+# Couverture : 8 directs, 1 à vérifier, 0 à reprendre
+# À vérifier : useragent → parse_user_agent
+
+# Configuration Vector générée par Passerelle depuis un pipeline Logstash
+# Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+
+data_dir: /var/lib/vector
+api:
+  enabled: true
+  address: '0.0.0.0:8686'
+enrichment_tables:
+  geoip:
+    type: geoip
+    path: /etc/vector/GeoLite2-City.mmdb
+sources:
+  kafka_in:
+    type: kafka
+    bootstrap_servers: 'kafka-1:9092,kafka-2:9092'
+    group_id: logstash-nginx
+    topics: [nginx-raw]
+    auto_offset_reset: earliest
+    decoding:
+      codec: json
+    log_namespace: true
+transforms:
+  kafka_in_init:
+    type: remap
+    inputs: [kafka_in]
+    source: |
+      # Garantit un objet à la racine (un JSON scalaire est rangé dans message)
+      . = object(.) ?? { "message": . }
+      # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
+      if !exists(."@timestamp") {
+        ."@timestamp" = now()
+      }
+      if !exists(."@version") {
+        ."@version" = "1"
+      }
+  parse_access:
+    type: remap
+    inputs: [kafka_in_init]
+    source: |
+      # grok · parse_access
+      parsed, err = parse_grok(.message, s'%{IPORHOST:ls__client__ip} - %{DATA:ls__user__name} \[%{HTTPDATE:ts}\] "%{WORD:ls__http__method} %{DATA:ls__url__path} HTTP/%{NUMBER:ls__http__version}" %{NUMBER:ls__http__status} %{NUMBER:ls__http__bytes} "%{DATA:referrer}" "%{DATA:agent}"')
+      if err == null {
+        . = merge(object!(.), parsed)
+        .client.ip = del(.ls__client__ip)
+        .user.name = del(.ls__user__name)
+        .http.method = del(.ls__http__method)
+        .url.path = del(.ls__url__path)
+        .http.version = del(.ls__http__version)
+        .http.status = del(.ls__http__status)
+        .http.bytes = del(.ls__http__bytes)
+        .http.status = to_int(.http.status) ?? .http.status
+        .http.bytes = to_int(.http.bytes) ?? .http.bytes
+      } else {
+        .tags = compact(flatten([.tags, "_grokparsefailure"]))
+      }
+  date:
+    type: remap
+    inputs: [parse_access]
+    source: |
+      # date
+      ts = null
+      if ts == null {
+        ts = parse_timestamp(.ts, "%d/%b/%Y:%H:%M:%S %z") ?? null
+      }
+      if ts != null {
+        ."@timestamp" = ts
+        del(.ts)
+      } else {
+        .tags = compact(flatten([.tags, "_dateparsefailure"]))
+      }
+  useragent:
+    type: remap
+    inputs: [date]
+    source: |
+      # useragent
+      ua, err = parse_user_agent(.agent)
+      if err == null {
+        .user_agent = ua
+      }
+  geoip:
+    type: remap
+    inputs: [useragent]
+    source: |
+      # geoip
+      geo, err = get_enrichment_table_record("geoip", { "ip": .client.ip })
+      if err == null {
+        .client.geo = geo
+      } else {
+        .tags = compact(flatten([.tags, "_geoip_lookup_failure"]))
+      }
+  mutate:
+    type: remap
+    inputs: [geoip]
+    source: |
+      # mutate
+      if exists(.referrer) {
+        .http.referrer = del(.referrer)
+      }
+      .http.method = downcase(.http.method) ?? .http.method
+      .event.dataset = "nginx.access"
+      .kafka.source_topic = (to_string(%kafka.topic) ?? "")
+      del(.message)
+      del(.agent)
+  condition_6:
+    type: remap
+    inputs: [mutate]
+    source: |
+      if (to_float(.http.status) ?? 0.0) >= 500 {
+        # mutate
+        .tags = compact(flatten([.tags, "erreur_serveur"]))
+      } else if (match(.url.path, r'^/health') ?? false) {
+        # drop
+        abort
+      }
+    drop_on_abort: true
+  logstash_finalize:
+    type: remap
+    inputs: [condition_6]
+    source: |
+      # Format de date identique à Logstash (millisecondes, UTC)
+      if is_timestamp(."@timestamp") {
+        ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")
+      }
+sinks:
+  kafka_out:
+    type: kafka
+    inputs: [logstash_finalize]
+    bootstrap_servers: 'kafka-1:9092,kafka-2:9092'
+    topic: nginx-parsed
+    key_field: client.ip
+    encoding:
+      codec: json
+    compression: lz4
+    acknowledgements:
+      enabled: true

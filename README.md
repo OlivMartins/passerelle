@@ -281,6 +281,8 @@ Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
 
 **28** types de requêtes, **51** agrégations, **18** filtres Logstash, avec les langages qui vont avec : Painless, syntaxe Lucene et grok. Les cas approchés sont signalés « à vérifier », les cas non traduits « à reprendre », sans jamais passer inaperçus.
 
+Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc différentiel](tests/README.md) exécute les mêmes requêtes sur Elasticsearch 7.17, 8.19 et 9.5 et sur ClickHouse, puis compare les résultats.
+
 <details>
 <summary><b>Couverture détaillée</b></summary>
 
@@ -307,6 +309,7 @@ Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
 ```bash
 npm ci
 npm test            # traduit chaque exemple et vérifie le résultat
+npm run test:diff   # compare les résultats de ClickHouse à ceux d’Elasticsearch (voir tests/README.md)
 npm run build:ui    # dist/passerelle.html : l’interface autonome
 npm run build       # interface, binaire Linux x86_64 et archive de release
 ```

@@ -1,0 +1,129 @@
+# Couverture : 8 directs, 0 à vérifier, 1 à reprendre
+# À reprendre : Filtre ruby non traduit (ligne 17)
+
+# Configuration Vector générée par Passerelle depuis un pipeline Logstash
+# Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+
+data_dir: /var/lib/vector
+api:
+  enabled: true
+  address: '0.0.0.0:8686'
+sources:
+  kafka_in:
+    type: kafka
+    bootstrap_servers: kafka:9092
+    group_id: logstash-batch
+    topics: [batch-events]
+    decoding:
+      codec: bytes
+    log_namespace: true
+transforms:
+  kafka_in_init:
+    type: remap
+    inputs: [kafka_in]
+    source: |
+      # Codec plain : le message brut devient le champ message, comme dans Logstash
+      . = { "message": . }
+      # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
+      if !exists(."@timestamp") {
+        ."@timestamp" = now()
+      }
+      if !exists(."@version") {
+        ."@version" = "1"
+      }
+  dissect:
+    type: remap
+    inputs: [kafka_in_init]
+    source: |
+      # dissect
+      parsed, err = parse_regex(.message, r'^(?P<date>.*?) (?P<time>.*?) \[(?P<level>.*?)\] (?P<service>.*?): (?P<payload>.*)$$')
+      if err == null {
+        .date = parsed.date
+        .time = parsed.time
+        .level = parsed.level
+        .service = parsed.service
+        .payload = parsed.payload
+      } else {
+        .tags = compact(flatten([.tags, "_dissectfailure"]))
+      }
+  mutate:
+    type: remap
+    inputs: [dissect]
+    source: |
+      # mutate
+      .date_time = (to_string(.date) ?? "") + " " + (to_string(.time) ?? "")
+  date:
+    type: remap
+    inputs: [mutate]
+    source: |
+      # date
+      ts = null
+      if ts == null {
+        ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S,%3f", timezone: "Europe/Paris") ?? null
+      }
+      if ts == null {
+        ts = parse_timestamp(.date_time, "%+", timezone: "Europe/Paris") ?? null
+      }
+      if ts == null {
+        ts = parse_timestamp(.date_time, "%Y-%m-%dT%H:%M:%S%.f", timezone: "Europe/Paris") ?? null
+      }
+      if ts == null {
+        ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S%.f", timezone: "Europe/Paris") ?? null
+      }
+      if ts != null {
+        ."@timestamp" = ts
+        del(.date)
+        del(.time)
+        del(.date_time)
+      } else {
+        .tags = compact(flatten([.tags, "_dateparsefailure"]))
+      }
+  json:
+    type: remap
+    inputs: [date]
+    source: |
+      # json
+      parsed, err = parse_json(.payload)
+      if err == null {
+        .body = parsed
+        del(.payload)
+      } else {
+        .tags = compact(flatten([.tags, "_jsonparsefailure"]))
+      }
+  split:
+    type: remap
+    inputs: [json]
+    source: |
+      # split
+      if is_string(.body.items) {
+        .body.items = split(string!(.body.items), "\n")
+      }
+      . = unnest(.body.items) ?? [.]
+  mutate_2:
+    type: remap
+    inputs: [split]
+    source: |
+      # mutate
+      .body.items.qty = to_int(.body.items.qty) ?? .body.items.qty
+      .service = replace(.service, r'[^a-z0-9]+', "_") ?? .service
+  logstash_finalize:
+    type: remap
+    inputs: [mutate_2]
+    source: |
+      # ruby
+      # À TRADUIRE : filtre ruby, ligne 17 du pipeline Logstash
+      #   event.set('computed', event.get('[body][items][qty]').to_i * 2)
+      # Format de date identique à Logstash (millisecondes, UTC)
+      if is_timestamp(."@timestamp") {
+        ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")
+      }
+sinks:
+  kafka_out:
+    type: kafka
+    inputs: [logstash_finalize]
+    bootstrap_servers: kafka:9092
+    topic: batch-items
+    encoding:
+      codec: json
+    acknowledgements:
+      enabled: true

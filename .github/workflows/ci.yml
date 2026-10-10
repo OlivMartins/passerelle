@@ -25,3 +25,32 @@ jobs:
         with:
           name: passerelle-html
           path: dist/passerelle.html
+
+  differentiel:
+    name: Banc différentiel Elasticsearch / ClickHouse
+    runs-on: ubuntu-latest
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.19.22
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: 'false'
+          ES_JAVA_OPTS: -Xms1g -Xmx1g
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -s http://localhost:9200/_cluster/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Extraire le binaire ClickHouse 26.9 de son image officielle
+        run: sh tests/differential/clickhouse.sh 26.9 ./clickhouse
+      - name: Comparer les résultats
+        env:
+          CLICKHOUSE_LOCAL: ${{ github.workspace }}/clickhouse local
+        run: npm run test:diff
