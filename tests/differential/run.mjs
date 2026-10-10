@@ -180,7 +180,7 @@ function esBucketRows(aggs, defs, path) {
 const short = v => { const s = JSON.stringify(v === undefined ? null : v); return s.length > 120 ? s.slice(0, 120) + '…' : s; };
 
 // Compare des lignes Elasticsearch { keys, doc_count, m } aux lignes ClickHouse ; renvoie la liste des écarts
-function compareRows(esRows, chRows, tol) {
+function compareRows(esRows, chRows, tol, unordered) {
   const keyNames = [...new Set(esRows.flatMap(r => Object.keys(r.keys)))];
   const metricNames = [...new Set(esRows.flatMap(r => Object.keys(r.m)))];
   const keyOf = get => JSON.stringify(keyNames.map(k => normKey(get(k))));
@@ -209,7 +209,7 @@ function compareRows(esRows, chRows, tol) {
   if (missing.length) out.push(`${missing.length} absentes côté CH, ex. ${missing.slice(0, 3).join(' ')}`);
   if (extra.length) out.push(`${extra.length} en trop côté CH, ex. ${extra.slice(0, 3).join(' ')}`);
   if (diffs.length) out.push(`${diffs.length} valeurs ≠, ex. ${diffs.slice(0, 2).join(' ; ')}`);
-  if (!sameOrder) out.push('ordre différent');
+  if (!sameOrder && !unordered) out.push('ordre différent');
   return out;
 }
 function compareIds(label, esIds, chIds) {
@@ -224,6 +224,8 @@ async function runComposite(c, ctx) {
   const sources = c.dsl.aggs[name].composite.sources.map(s => Object.keys(s)[0]);
   const size = c.dsl.aggs[name].composite.size;
   const page = after => { const d = structuredClone(c.dsl); if (after) d.aggs[name].composite.after = after; return d; };
+  // Mode « export complet » : une seule requête côté ClickHouse, comparée à l’ensemble des pages d’Elasticsearch, sans ordre
+  const stream = !!(c.config && c.config.clickhouse && c.config.clickhouse.composite_mode === 'stream');
 
   const esRows = [];
   for (let p = 0, after; p < 500; p++) {
@@ -251,9 +253,9 @@ async function runComposite(c, ctx) {
     // Le client reprend les clés de la dernière ligne, au format d’Elasticsearch (dates en epoch millis)
     const last = r.rows[r.rows.length - 1];
     after = Object.fromEntries(sources.map(s => [s, normKey(last[s])]));
-    if (r.rows.length < size) break;
+    if (stream || r.rows.length < size) break;
   }
-  const diffs = compareRows(esRows, chRows, c.tol);
+  const diffs = compareRows(esRows, chRows, c.tol, stream);
   return { verdict: diffs.length ? '≠' : '=', detail: `${diffs.join(' | ')} (${esRows.length} groupes ES, ${pages} pages CH)`, t };
 }
 
@@ -348,7 +350,8 @@ for (const variant of variants) {
   for (const c of CASES) {
     if (ONLY && !ONLY.test(c.id)) continue;
     for (const tz of c.tz || ['UTC']) {
-      const ctx = { dir, tz, variant, translate: dsl => E.translateDSL(JSON.stringify(dsl), cfg, { index: INDEX }) };
+      const caseCfg = c.config ? E.mergeConfig(cfg, c.config) : cfg;
+      const ctx = { dir, tz, variant, translate: dsl => E.translateDSL(JSON.stringify(dsl), caseCfg, { index: INDEX }) };
       const res = await runCase(c, ctx);
       const known = knownFor(c, variant, tz);
       const label = `${c.id}${c.tz ? ` @${tz}` : ''}`;

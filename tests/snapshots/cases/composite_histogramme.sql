@@ -2,10 +2,10 @@
 
 -- Agrégation c
 SELECT
-    env,
+    floor(latency_ms / 500) * 500 AS tranche,
     service AS svc,
     count() AS doc_count
 FROM logs.events
-GROUP BY env, svc
-ORDER BY env ASC NULLS FIRST, svc ASC
-LIMIT 10;
+GROUP BY tranche, svc
+ORDER BY tranche ASC, svc DESC
+LIMIT 9;

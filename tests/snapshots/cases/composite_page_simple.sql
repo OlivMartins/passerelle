@@ -2,10 +2,14 @@
 
 -- Agrégation c
 SELECT
-    env,
     service AS svc,
+    host AS h,
     count() AS doc_count
 FROM logs.events
-GROUP BY env, svc
-ORDER BY env ASC NULLS FIRST, svc ASC
+WHERE (
+         svc > 'cart'
+      OR (svc = 'cart' AND h > 'web-3')
+  )
+GROUP BY svc, h
+ORDER BY svc ASC, h ASC
 LIMIT 10;

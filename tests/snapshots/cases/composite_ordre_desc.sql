@@ -10,5 +10,5 @@ SELECT
 FROM logs.events
 WHERE isNotNull(env)
 GROUP BY svc, env, lvl, st
-ORDER BY svc ASC, env ASC, lvl ASC, st ASC
+ORDER BY svc ASC, env ASC, lvl DESC, st ASC
 LIMIT 25;

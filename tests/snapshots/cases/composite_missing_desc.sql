@@ -7,5 +7,5 @@ SELECT
     count() AS doc_count
 FROM logs.events
 GROUP BY env, svc
-ORDER BY env ASC NULLS FIRST, svc ASC
-LIMIT 10;
+ORDER BY env DESC, svc ASC
+LIMIT 4;

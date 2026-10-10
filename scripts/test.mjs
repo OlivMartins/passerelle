@@ -66,7 +66,7 @@ for (const [kind, list] of Object.entries(index)) {
 // Cas du banc différentiel : le SQL est figé ici, son résultat est comparé à Elasticsearch par « npm run test:diff »
 const benchConfig = E.mergeConfig(E.DEFAULT_CONFIG, configOverride());
 for (const c of CASES) {
-  const r = E.translateDSL(JSON.stringify(c.dsl), benchConfig, { index: INDEX });
+  const r = E.translateDSL(JSON.stringify(c.dsl), c.config ? E.mergeConfig(benchConfig, c.config) : benchConfig, { index: INDEX });
   snapshot(`cases/${c.id}.sql`, r.error ? `-- Erreur : ${r.error}\n` : withHeader(r, '--') + r.sql + '\n');
 }
 // Un instantané sans cas ni exemple correspondant est un reste : supprimé par --update, signalé sinon

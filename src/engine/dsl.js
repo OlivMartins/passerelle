@@ -733,9 +733,11 @@ function buildLevel(ctx, name, def) {
         // Champ multivalué : un document compte dans le groupe de chacune de ses valeurs ; un tableau vide ne compte nulle part
         k = body.missing !== undefined ? `arrayJoin(if(empty(${k}), [${chVal(body.missing)}], ${k}))` : `arrayJoin(${k})`;
       } else if (body.missing !== undefined) k = absent ? `if(${absent}, ${chVal(body.missing)}, ${k})` : `ifNull(${k}, ${chVal(body.missing)})`;
+      else if (body.missing_bucket && absent) k = `nullIf(${k}, '')`;
       L.keys.push({ sql: k, alias: A });
-      // Elasticsearch ne crée pas de groupe pour les documents qui n’ont pas le champ
-      if (body.missing === undefined) {
+      // Elasticsearch ne crée pas de groupe pour les documents qui n’ont pas le champ,
+      // sauf missing_bucket (source d’un composite), qui les réunit sous une clé null
+      if (body.missing === undefined && !body.missing_bucket) {
         if (computed || (colType && colType.nullable)) L.where.push(`isNotNull(${k})`);
         else if (absent) L.where.push(`${k} != ''`);
       }
@@ -854,12 +856,26 @@ function buildLevel(ctx, name, def) {
       (body.sources || []).forEach(src => {
         const sn = Object.keys(src)[0]; const st = Object.keys(src[sn])[0]; const sb = src[sn][st];
         const sub = buildLevel(ctx, sn, { [st]: sb });
-        sub.keys.forEach(k => L.keys.push(Object.assign({ source: sn }, k))); L.where.push(...sub.where);
+        const desc = String(sb.order || 'asc').toLowerCase() === 'desc';
+        // Clé null (missing_bucket) : en tête en ordre croissant, en queue en ordre décroissant, sauf missing_order
+        const nullable = !!sb.missing_bucket;
+        const nullsFirst = sb.missing_order === 'first' || (sb.missing_order !== 'last' && !desc);
+        sub.keys.forEach(k => L.keys.push(Object.assign({ source: sn, desc, nullable, nullsFirst }, k)));
+        L.where.push(...sub.where);
       });
-      L.size = chInt(body.size || 10, 'composite.size'); L.order = L.keys.map(k => ({ by: k.alias, dir: 'asc', raw: true }));
-      if (body.after) { const vals = L.keys.map(k => cursorValueSQL(k, body.after[k.source])); L.having.push(`(${L.keys.map(k => k.alias).join(', ')}) > (${vals.join(', ')})`); }
       L.composite = true; ctx.stats.ok++;
-      ctx.notes.add('info', 'composite → pagination par tuple', 'La page suivante se lit en passant les dernières clés dans after : la clause HAVING (clés) > (…) reproduit ce curseur.');
+      if (ctx.cfg.clickhouse.composite_mode === 'stream') {
+        // Export complet : une seule requête, sans page ni tri, que le client lit en flux
+        L.size = null; L.order = [];
+        if (body.after) ctx.notes.add('warn', 'composite : after ignoré', 'En mode stream (clickhouse.composite_mode), la requête renvoie tous les groupes d’un coup : le client ne doit plus boucler sur after_key.');
+        ctx.notes.add('opt', 'composite → export en une requête', 'La pagination composite existe parce qu’Elasticsearch ne renvoie pas un nombre illimité de groupes. ClickHouse les diffuse en flux : une seule lecture de la table au lieu d’une par page. Pour un très grand nombre de groupes, fixez max_bytes_before_external_group_by afin que l’agrégation déborde sur disque.');
+        break;
+      }
+      L.size = chInt(body.size || 10, 'composite.size');
+      L.order = L.keys.map(k => ({ by: `${k.alias} ${k.desc ? 'DESC' : 'ASC'}${k.nullable && k.nullsFirst ? ' NULLS FIRST' : ''}`, raw: true }));
+      if (body.after) L.where.push(compositeCursor(L.keys, body.after));
+      ctx.notes.add('info', 'composite → pagination par curseur', 'La page suivante se lit en passant les dernières clés dans after. Le curseur est une condition WHERE écrite clé par clé, que ClickHouse peut confronter à la clé de tri de la table (une comparaison de tuples ne le permet pas).');
+      ctx.notes.add('opt', 'composite : une lecture par page', 'Chaque page relit et regroupe les lignes situées après le curseur. Pour parcourir tous les groupes, clickhouse.composite_mode: stream produit une seule requête sans pagination. Si les sources suivent l’ordre de la clé de tri de la table, le curseur écarte d’emblée les blocs déjà parcourus, et optimize_aggregation_in_order = 1 laisse ClickHouse regrouper au fil de la lecture.');
       break;
     }
     case 'geohash_grid': case 'geotile_grid': {
@@ -889,9 +905,37 @@ function buildLevel(ctx, name, def) {
   }
   return L;
 }
+/*
+ * Curseur d’une agrégation composite : les groupes situés après la clé « after », dans l’ordre des sources.
+ * C’est une comparaison lexicographique, écrite branche par branche plutôt qu’en tuples :
+ *     k1 > v1  OR  (k1 = v1 AND k2 > v2)  OR  (k1 = v1 AND k2 = v2 AND k3 > v3)  …
+ * Cette forme accepte un sens par source (< pour une source décroissante), les clés null de missing_bucket,
+ * et laisse ClickHouse utiliser la clé primaire, ce qu’il ne fait pas d’une comparaison de tuples.
+ */
+function compositeCursor(keys, after) {
+  const value = k => after[k.source];
+  const isNull = k => value(k) === null || value(k) === undefined;
+  const equals = k => (isNull(k) ? `${k.alias} IS NULL` : `${k.alias} = ${cursorValueSQL(k, value(k))}`);
+  // Groupes strictement après la valeur du curseur pour cette source, null compris ; null si aucun ne peut l’être
+  const beyond = k => {
+    if (isNull(k)) return k.nullable && k.nullsFirst ? `${k.alias} IS NOT NULL` : null;
+    const cmp = `${k.alias} ${k.desc ? '<' : '>'} ${cursorValueSQL(k, value(k))}`;
+    return k.nullable && !k.nullsFirst ? `(${cmp} OR ${k.alias} IS NULL)` : cmp;
+  };
+  const branches = [];
+  keys.forEach((k, i) => {
+    const next = beyond(k);
+    if (next === null) return;
+    const prefix = keys.slice(0, i).map(equals);
+    branches.push(prefix.length ? `(${prefix.concat([next]).join(' AND ')})` : next);
+  });
+  if (!branches.length) return 'false';
+  if (branches.length === 1) return branches[0];
+  return `(\n         ${branches.join('\n      OR ')}\n  )`;
+}
 function levelOrder(L, alias) {
   return L.order.map(o => {
-    if (o.raw) return `${o.by} ${o.dir.toUpperCase()}`;
+    if (o.raw) return o.dir ? `${o.by} ${o.dir.toUpperCase()}` : o.by;
     if (o.by === '_count') return `doc_count ${o.dir.toUpperCase()}`;
     if (o.by === '_key') return L.keys.map(k => `${k.alias} ${o.dir.toUpperCase()}`).join(', ');
     return `${alias ? resolveBucketsPath(L, o.by) : resolveBucketsPath(L, o.by)} ${o.dir.toUpperCase()}`;
@@ -900,7 +944,7 @@ function levelOrder(L, alias) {
 function orderInSub(L) {
   // Ordre exprimé avec des agrégats, pour les sous-requêtes de restriction
   return L.order.map(o => {
-    if (o.raw) return `${o.by} ${o.dir.toUpperCase()}`;
+    if (o.raw) return o.dir ? `${o.by} ${o.dir.toUpperCase()}` : o.by;
     if (o.by === '_count') return `count() ${o.dir.toUpperCase()}`;
     if (o.by === '_key') return L.keys.map(k => `${k.alias} ${o.dir.toUpperCase()}`).join(', ');
     const alias = resolveBucketsPath(L, o.by); const m = L.metrics.find(x => x.alias === alias);

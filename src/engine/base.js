@@ -16,7 +16,8 @@ const DEFAULT_CONFIG = {
     index_mapping: { 'logs-*': 'logs.events', 'nginx-*': 'logs.nginx_access', 'metrics-*': 'metrics.samples' },
     field_mapping: { '@timestamp': 'timestamp' },
     columns: {},
-    empty_as_missing: false
+    empty_as_missing: false,
+    composite_mode: 'page'
   },
   kafka: {
     bootstrap_servers: '',

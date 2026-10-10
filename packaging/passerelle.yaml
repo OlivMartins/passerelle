@@ -23,6 +23,7 @@ clickhouse:
   #   SELECT concat('    ', name, ': ', type) FROM system.columns WHERE database = 'logs' AND table = 'events' FORMAT TSVRaw
   columns: {}
   empty_as_missing: false             # true : dans une colonne String non Nullable, la chaîne vide représente un champ absent
+  composite_mode: page                # stream : une agrégation composite devient une seule requête, sans pagination, lue en flux
 kafka:
   bootstrap_servers: ''
   security_protocol: ''
