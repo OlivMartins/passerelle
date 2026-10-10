@@ -149,8 +149,10 @@ function leafMetrics(bucket, defs) {
   return m;
 }
 const subAggs = def => (def && (def.aggs || def.aggregations)) || {};
-// Parcourt l’arbre d’agrégations d’Elasticsearch le long d’un chemin et appelle onLeaf(bucket, clés, définitions enfants)
+// Parcourt l’arbre d’agrégations d’Elasticsearch le long d’un chemin et appelle onLeaf(bucket, clés, définitions enfants).
+// Renvoie true si un niveau a des groupes nommés (filters) : ils forment un objet JSON, dont l’ordre ne porte pas de sens.
 function walkBuckets(aggs, defs, path, onLeaf) {
+  let keyed = false;
   (function walk(cur, curDefs, i, keys, labels) {
     const name = path[i];
     const a = cur && cur[name];
@@ -158,7 +160,7 @@ function walkBuckets(aggs, defs, path, onLeaf) {
     const children = subAggs(curDefs && curDefs[name]);
     let buckets;
     if (Array.isArray(a.buckets)) buckets = a.buckets.map(b => [b.key, b]);
-    else if (a.buckets && typeof a.buckets === 'object') buckets = Object.entries(a.buckets);
+    else if (a.buckets && typeof a.buckets === 'object') { buckets = Object.entries(a.buckets); keyed = true; }
     else buckets = [[undefined, a]];
     for (const [k, b] of buckets) {
       const next = Object.assign({}, keys);
@@ -171,10 +173,11 @@ function walkBuckets(aggs, defs, path, onLeaf) {
       else onLeaf(b, next, children, nextLabels);
     }
   })(aggs, defs, 0, {}, {});
+  return keyed;
 }
 function esBucketRows(aggs, defs, path) {
   const rows = [];
-  walkBuckets(aggs, defs, path, (b, keys, children, labels) => rows.push({ keys, labels, doc_count: b.doc_count, m: leafMetrics(b, children) }));
+  rows.keyed = walkBuckets(aggs, defs, path, (b, keys, children, labels) => rows.push({ keys, labels, doc_count: b.doc_count, m: leafMetrics(b, children) }));
   return rows;
 }
 const short = v => { const s = JSON.stringify(v === undefined ? null : v); return s.length > 120 ? s.slice(0, 120) + '…' : s; };
@@ -288,7 +291,8 @@ async function runCase(c, ctx) {
     if (q.error) { failed = true; diffs.push(`[${s.title}] ClickHouse : ${q.error}`); continue; }
     let m;
     if ((m = /^Agrégation (.+)$/.exec(s.title))) {
-      const d = compareRows(esBucketRows(r.body.aggregations, defs, m[1].split(' › ')), q.rows, c.tol);
+      const esRows = esBucketRows(r.body.aggregations, defs, m[1].split(' › '));
+      const d = compareRows(esRows, q.rows, c.tol, esRows.keyed);
       if (d.length) diffs.push(`[${m[1]}] ${d.join(' | ')}`);
     } else if ((m = /^Top hits (.+)$/.exec(s.title))) {
       // Les documents sont comparés groupe par groupe, dans l’ordre ; l’ordre des groupes entre eux

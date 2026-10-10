@@ -2,8 +2,16 @@
 
 -- Agrégation r
 SELECT
-    arrayJoin(arrayFilter(x -> x != '', [if(latency_ms < 100, '*-100', ''), if(latency_ms >= 100 AND latency_ms < 3000, '100-3000', '')])) AS r,
-    count() AS doc_count
-FROM logs.events
-GROUP BY r
-ORDER BY indexOf(['*-100', '100-3000'], r) ASC;
+    r,
+    doc_count
+FROM (
+    SELECT
+        [
+            countIf(latency_ms < 100),
+            countIf(latency_ms >= 100 AND latency_ms < 3000)
+        ] AS doc_count_values
+    FROM logs.events
+)
+ARRAY JOIN
+    ['*-100.0', '100.0-3000.0'] AS r,
+    doc_count_values AS doc_count;

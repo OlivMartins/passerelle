@@ -2,8 +2,16 @@
 
 -- Agrégation f
 SELECT
-    arrayJoin(arrayFilter(x -> x != '', [if(env = 'prod', 'prod', ''), if((env != 'prod' OR env IS NULL), '_other_', '')])) AS f,
-    count() AS doc_count
-FROM logs.events
-GROUP BY f
-ORDER BY indexOf(['prod', '_other_'], f) ASC;
+    f,
+    doc_count
+FROM (
+    SELECT
+        [
+            countIf(env = 'prod'),
+            countIf((env != 'prod' OR env IS NULL))
+        ] AS doc_count_values
+    FROM logs.events
+)
+ARRAY JOIN
+    ['prod', '_other_'] AS f,
+    doc_count_values AS doc_count;

@@ -7,12 +7,12 @@ SELECT
 FROM (
     SELECT
         [
-            countIf(latency_ms < 100),
-            countIf(latency_ms >= 100 AND latency_ms < 3000),
-            countIf(latency_ms >= 5000)
+            countIf(latency_ms >= 0),
+            countIf(latency_ms >= 1000),
+            countIf(latency_ms >= 2500)
         ] AS doc_count_values
     FROM logs.events
 )
 ARRAY JOIN
-    ['bas', 'milieu', 'haut'] AS r,
+    ['tout', 'lent', 'tres_lent'] AS r,
     doc_count_values AS doc_count;

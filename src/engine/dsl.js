@@ -999,6 +999,30 @@ function parseOrder(order, def) {
     return { by: k === '_term' ? '_key' : k, dir };
   });
 }
+// Elasticsearch écrit les bornes d’une plage comme des doubles Java : 100 devient « 100.0 »
+function javaDouble(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  return Number.isInteger(n) && Math.abs(n) < 1e7 ? `${n}.0` : String(n);
+}
+/*
+ * Groupes définis par des conditions (range, date_range, ip_range, filters).
+ *
+ * Elasticsearch renvoie un groupe par condition, même vide. La requête du niveau lui-même les calcule donc
+ * par agrégation conditionnelle (bucketsQuery) : un countIf par condition, en une passe, sans rien construire
+ * pour chaque ligne. La clé ci-dessous ne sert que lorsque le niveau est le parent d’un autre regroupement
+ * ou porte un pipeline : un multiIf si une ligne n’appartient qu’à un groupe, sinon un arrayJoin qui la
+ * recopie dans chacun de ses groupes.
+ */
+function setBuckets(L, alias, items, disjoint) {
+  L.buckets = items;
+  const names = `[${items.map(i => chStr(i.key)).join(', ')}]`;
+  if (disjoint) {
+    L.keys.push({ sql: `multiIf(${items.map(i => `${i.cond}, ${chStr(i.key)}`).join(', ')}, '')`, alias });
+    L.keyWhere = `${alias} != ''`;
+  } else L.keys.push({ sql: `arrayJoin(arrayFilter(x -> x != '', [${items.map(i => `if(${i.cond}, ${chStr(i.key)}, '')`).join(', ')}]))`, alias });
+  L.order = [{ by: `indexOf(${names}, ${alias})`, dir: 'asc', raw: true }];
+}
 function buildLevel(ctx, name, def) {
   const type = aggType(def); const body = def[type] || {};
   const L = { name, type, keys: [], where: [], having: [], order: [{ by: '_count', dir: 'desc' }, { by: '_key', dir: 'asc' }], size: null, limitable: false, fill: null, global: false, metrics: [], pipes: [], windows: [], sorted: false };
@@ -1105,17 +1129,22 @@ function buildLevel(ctx, name, def) {
       const f = mapField(ctx, body.field); const tz = body.time_zone;
       const bound = v => { if (type !== 'date_range') return type === 'ip_range' ? `toIPv4(${chStr(v)})` : chVal(v); return dateBoundSQL(ctx, v, tz); };
       const lhs = type === 'ip_range' ? `toIPv4(${f})` : f;
+      // Clé par défaut d’une plage numérique : Elasticsearch écrit ses bornes comme des doubles (« *-100.0 »)
+      const edge = v => (v === undefined || v === null ? '*' : type === 'range' ? javaDouble(v) : v);
       const items = (body.ranges || []).map(r => {
-        const key = r.key || (r.mask ? r.mask : `${r.from !== undefined ? r.from : '*'}-${r.to !== undefined ? r.to : '*'}`);
+        const key = r.key || (r.mask ? r.mask : `${edge(r.from)}-${edge(r.to)}`);
         let cond;
         if (r.mask) cond = `isIPAddressInRange(toString(${f}), ${chStr(r.mask)})`;
-        else cond = andJoin([r.from !== undefined ? `${lhs} >= ${bound(r.from)}` : null, r.to !== undefined ? `${lhs} < ${bound(r.to)}` : null]) || '1';
+        else cond = andJoin([r.from !== undefined && r.from !== null ? `${lhs} >= ${bound(r.from)}` : null, r.to !== undefined && r.to !== null ? `${lhs} < ${bound(r.to)}` : null]) || '1';
         return { key, cond };
       });
-      L.keys.push({ sql: `arrayJoin(arrayFilter(x -> x != '', [${items.map(i => `if(${i.cond}, ${chStr(i.key)}, '')`).join(', ')}]))`, alias: A });
-      L.order = [{ by: `indexOf([${items.map(i => chStr(i.key)).join(', ')}], ${A})`, dir: 'asc', raw: true }];
+      if (type === 'date_range' && (body.ranges || []).some(r => !r.key)) ctx.notes.add('warn', 'Clé de plage de dates', 'Sans « key », Elasticsearch nomme une plage d’après ses bornes mises au format du champ. La traduction reprend les bornes telles qu’écrites : donnez une clé explicite à chaque plage pour garder le même nom.');
+      // Plages numériques qui ne se chevauchent pas : une ligne appartient à une seule plage
+      const numeric = type === 'range' && (body.ranges || []).every(r => [r.from, r.to].every(v => v === undefined || v === null || typeof v === 'number'));
+      const sorted = numeric ? (body.ranges || []).slice().sort((a, b) => (a.from === undefined || a.from === null ? -Infinity : a.from) - (b.from === undefined || b.from === null ? -Infinity : b.from)) : [];
+      const disjoint = numeric && sorted.every((r, i) => i === 0 || (sorted[i - 1].to !== undefined && sorted[i - 1].to !== null && r.from !== undefined && r.from !== null && r.from >= sorted[i - 1].to));
+      setBuckets(L, A, items, disjoint);
       ctx.stats.ok++; H(ctx, 'groups', `par plages de ${body.field}`);
-      ctx.notes.add('info', 'Plages via arrayJoin', 'Une ligne peut appartenir à plusieurs plages, comme dans Elasticsearch : arrayJoin duplique la ligne dans chaque plage correspondante. Les plages vides ne sont pas renvoyées.');
       break;
     }
     case 'filters': {
@@ -1124,8 +1153,7 @@ function buildLevel(ctx, name, def) {
       const items = entries.map(([k, q]) => ({ key: k, cond: tq(ctx, q) || '1' }));
       if (body.other_bucket || body.other_bucket_key) items.push({ key: body.other_bucket_key || '_other_', cond: (any => (any === null ? 'false' : negate(ctx, any)))(orJoin(items.map(i => i.cond))) });
       ctx.humanOff--;
-      L.keys.push({ sql: `arrayJoin(arrayFilter(x -> x != '', [${items.map(i => `if(${i.cond}, ${chStr(i.key)}, '')`).join(', ')}]))`, alias: A });
-      L.order = [{ by: `indexOf([${items.map(i => chStr(i.key)).join(', ')}], ${A})`, dir: 'asc', raw: true }];
+      setBuckets(L, A, items, false);
       H(ctx, 'groups', `par filtres (${items.map(i => i.key).join(', ')})`);
       break;
     }
@@ -1191,8 +1219,10 @@ function buildLevel(ctx, name, def) {
     else if (ct === 'top_hits') L.topHits = L.topHits || [], L.topHits.push({ name: cn, body: cb });
     else if (ct === 'filter' && Object.values(aggChildren(cdef)).every(d => METRIC_TYPES.has(aggType(d)))) {
       ctx.humanOff++; const c = tq(ctx, cb) || '1'; ctx.humanOff--;
-      L.metrics.push({ alias: aliasOf(`${cn}_doc_count`), render: () => `countIf(${c})` });
-      for (const [mn, md] of Object.entries(aggChildren(cdef))) { const mt = aggType(md); metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}).forEach(m => L.metrics.push({ alias: m.alias, render: () => m.render(c, true) })); }
+      // « outer » : condition du groupe quand le niveau est calculé par agrégation conditionnelle (bucketsQuery)
+      const within = outer => (outer ? andJoin([c, outer]) : c);
+      L.metrics.push({ alias: aliasOf(`${cn}_doc_count`), render: outer => `countIf(${within(outer)})` });
+      for (const [mn, md] of Object.entries(aggChildren(cdef))) { const mt = aggType(md); metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}).forEach(m => L.metrics.push({ alias: m.alias, render: outer => m.render(within(outer), true) })); }
       ctx.stats.ok++;
       ctx.notes.add('opt', `Filtre « ${cn} » fusionné`, 'Plutôt qu’une requête de plus, le sous-filtre est calculé dans la même passe grâce aux combinateurs -If (countIf, avgIf…).');
     } else L.children.push({ name: cn, def: cdef });
@@ -1277,7 +1307,11 @@ function pathWhere(env, path, upto, scope) {
   let start = 0;
   for (let i = 0; i <= upto; i++) if (path[i].global) start = i;
   const base = (scope && scope.filtered) || path.slice(0, upto + 1).some(l => l.global) ? [] : env.baseWhere.slice();
-  for (let i = start; i <= upto; i++) base.push(...path[i].where);
+  for (let i = start; i <= upto; i++) {
+    base.push(...path[i].where);
+    // Clé multiIf d’un niveau à conditions : les lignes qui n’entrent dans aucun groupe sont écartées
+    if (path[i].keyWhere) base.push(path[i].keyWhere);
+  }
   return base;
 }
 function restriction(ctx, env, path, upto, scope) {
@@ -1308,8 +1342,65 @@ function restriction(ctx, env, path, upto, scope) {
   const lhs = keys.length === 1 ? keys[0].sql : `(${keys.map(k => k.sql).join(', ')})`;
   return `${lhs} IN (SELECT ${keys.map(k => k.alias).join(', ')} FROM ${name})`;
 }
+// Ordre des regroupements parents d’une requête imbriquée : par effectif (colonne de fenêtre à ajouter au SELECT) ou par clé
+function parentOrdering(parentKL) {
+  const columns = []; const order = [];
+  parentKL.forEach((pl, i) => {
+    const pkeys = parentKL.slice(0, i + 1).flatMap(l => l.keys).map(x => x.alias);
+    if (pl.limitable && pl.order[0] && pl.order[0].by === '_count') {
+      const a = aliasOf(`${pl.name}_doc_count`);
+      columns.push(`sum(count()) OVER (PARTITION BY ${pkeys.join(', ')}) AS ${a}`);
+      order.push(`${a} ${pl.order[0].dir.toUpperCase()}`, ...pl.keys.map(x => x.alias));
+    } else if (pl.order[0] && pl.order[0].raw) order.push(pl.order[0].by); // plages et filtres : dans l’ordre de leur déclaration
+    else order.push(...pl.keys.map(x => `${x.alias} ${pl.order[0] && pl.order[0].by === '_key' ? pl.order[0].dir.toUpperCase() : 'ASC'}`));
+  });
+  return { columns, order };
+}
+/*
+ * Requête d’un niveau à conditions (range, filters) par agrégation conditionnelle :
+ *
+ *     SELECT r, doc_count, lat
+ *     FROM (
+ *         SELECT
+ *             [countIf(c1), countIf(c2)] AS doc_count_values,
+ *             [avgIfOrNull(x, c1), avgIfOrNull(x, c2)] AS lat_values
+ *         FROM t
+ *     )
+ *     ARRAY JOIN ['bas', 'haut'] AS r, doc_count_values AS doc_count, lat_values AS lat
+ *
+ * La table est lue une fois, chaque condition est comptée au passage, puis ARRAY JOIN déplie le résultat en
+ * une ligne par groupe, groupes vides compris, comme le fait Elasticsearch.
+ */
+function bucketsQuery(ctx, env, path) {
+  const L = path[path.length - 1]; const k = path.length - 1;
+  const parentKL = keyLevels(path.slice(0, k)); const parentKeys = parentKL.flatMap(l => l.keys);
+  const scope = nestedScope(ctx, env, path, k - 1);
+  const where = pathWhere(env, path, k - 1, scope).concat(L.where);
+  const r = restriction(ctx, env, path, k - 1, scope);
+  if (r) where.push(r);
+  const key = L.keys[0].alias; const bare = a => a.replace(/`/g, '');
+  const columns = [{ alias: 'doc_count', values: L.buckets.map(b => `countIf(${b.cond})`) }]
+    .concat(L.metrics.map(m => ({ alias: m.alias, values: L.buckets.map(b => m.render(b.cond, true)) })));
+  const parents = parentOrdering(parentKL);
+  const inner = sqlSelect({
+    select: parentKeys.map(selectAs)
+      .concat(columns.map(c => `[\n            ${c.values.join(',\n            ')}\n        ] AS ${bare(c.alias)}_values`))
+      .concat(parents.columns),
+    from: scope.from, where, groupBy: parentKeys.map(x => x.alias)
+  }, '    ');
+  const lines = [];
+  if (scope.ctes.length) lines.push('WITH', scope.ctes.map(c => `    ${c}`).join(',\n'));
+  lines.push('SELECT', parentKeys.map(x => x.alias).concat([key], columns.map(c => c.alias)).map(s => `    ${s}`).join(',\n'));
+  lines.push('FROM (', inner, ')', 'ARRAY JOIN');
+  lines.push([`[${L.buckets.map(b => chStr(b.key)).join(', ')}] AS ${key}`].concat(columns.map(c => `${bare(c.alias)}_values AS ${c.alias}`)).map(s => `    ${s}`).join(',\n'));
+  // Sans regroupement parent, les groupes sortent dans l’ordre du tableau
+  if (parentKeys.length) lines.push(`ORDER BY ${parents.order.concat(levelOrder(L)).join(', ')}`);
+  ctx.notes.add('opt', `Groupes « ${L.name} » par agrégation conditionnelle`, 'Chaque plage ou filtre est compté par un countIf dans une seule lecture de la table, sans rien construire pour chaque ligne. ARRAY JOIN déplie ensuite le résultat en une ligne par groupe, groupes vides compris, comme le fait Elasticsearch.');
+  return lines.join('\n');
+}
 function aggQuery(ctx, env, path) {
   const L = path[path.length - 1]; const k = path.length - 1;
+  if (L.buckets && !L.pipes.length) return bucketsQuery(ctx, env, path);
   const kl = keyLevels(path); const keys = kl.flatMap(l => l.keys);
   const scope = nestedScope(ctx, env, path, k - 1);
   const where = pathWhere(env, path, k, scope);
@@ -1320,15 +1411,10 @@ function aggQuery(ctx, env, path) {
   const fills = !!L.fill && !L.pipes.length && L.keys.length > 0 && L.order.length > 0 && L.order[0].by === '_key' && L.order[0].dir === 'asc';
   const mayBeEmpty = keys.length === 0 || fills;
   const select = keys.map(selectAs).concat(['count() AS doc_count']).concat(L.metrics.map(m => `${m.render(null, mayBeEmpty)} AS ${m.alias}`));
-  const order = []; const parentKL = keyLevels(path.slice(0, k));
-  parentKL.forEach((pl, i) => {
-    const pkeys = parentKL.slice(0, i + 1).flatMap(l => l.keys).map(x => x.alias);
-    if (pl.limitable && pl.order[0] && pl.order[0].by === '_count') {
-      const a = aliasOf(`${pl.name}_doc_count`);
-      select.push(`sum(count()) OVER (PARTITION BY ${pkeys.join(', ')}) AS ${a}`);
-      order.push(`${a} ${pl.order[0].dir.toUpperCase()}`, ...pl.keys.map(x => x.alias));
-    } else order.push(...pl.keys.map(x => `${x.alias} ${pl.order[0] && pl.order[0].by === '_key' ? pl.order[0].dir.toUpperCase() : 'ASC'}`));
-  });
+  const parentKL = keyLevels(path.slice(0, k));
+  const parents = parentOrdering(parentKL);
+  select.push(...parents.columns);
+  const order = parents.order.slice();
   // Pipelines
   const having = L.having.slice(); let limitOverride = null;
   const partKeys = parentKL.flatMap(l => l.keys).map(x => x.alias);

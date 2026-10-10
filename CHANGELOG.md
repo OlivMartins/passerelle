@@ -21,6 +21,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Modifié
 
+- Agrégations `range`, `date_range`, `ip_range` et `filters` : calculées par agrégation conditionnelle (un `countIf` par plage, puis `ARRAY JOIN`) au lieu d’un `arrayJoin` qui construisait un tableau pour chaque ligne. Quand elles servent de parent à un autre regroupement, des plages numériques disjointes deviennent un `multiIf`.
 - Agrégations imbriquées : le filtre commun et chaque top N sont nommés par des CTE (`base`, `top_<nom>`) au lieu d’être recopiés dans des sous-requêtes emboîtées. Le SQL se lit de haut en bas ; le plan d’exécution ne change pas.
 - Filtre sur un champ runtime de classification (un script qui émet une constante par branche) : il est réécrit sur les colonnes sources. `classe = 'lent'` devient `latency_ms >= 1000`, ce qui rend la clé de tri et les index utilisables. Quand le script ne s’y prête pas, la remarque de matérialisation propose aussi un index de saut.
 - Un champ runtime qui émet toujours une valeur n’ajoute plus de `isNotNull()` au regroupement, et son DDL de matérialisation n’est plus `Nullable`.
@@ -32,6 +33,9 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Corrigé
 
+- Agrégations `range` et `filters` : une plage ou un filtre sans document n’était pas renvoyé. Elasticsearch renvoie tous les groupes, avec un compte nul et des mesures `null`.
+- Clé par défaut d’une plage numérique : `*-100.0` comme dans Elasticsearch, et non `*-100`. Une `date_range` sans clé explicite est signalée « à vérifier ».
+- Un regroupement placé sous un `range` ou un `filters` sortait ses groupes parents par ordre alphabétique de clé, et non dans l’ordre de leur déclaration.
 - Recherche plein texte : le texte cherché est découpé comme le fait l’analyseur standard. `match` sur `10.0.0.1` cherchait 10 OU 0 OU 1 (337 documents au lieu de 42) ; `user_id`, `index.html` ou `3.14` étaient de même éclatés. Les fragments d’un mot composé doivent maintenant être tous présents et se suivre.
 - `match_phrase` et `match_phrase_prefix` cherchaient la phrase comme sous-chaîne exacte : `connection reset` manquait `connection-reset` et les espaces multiples (300 documents au lieu de 900). Les mots sont cherchés à la suite, quels que soient les séparateurs. `match_bool_prefix` et les jokers sur un champ texte s’appliquent mot par mot.
 - Agrégation `global` imbriquée dans une autre : déclarée « à reprendre », comme Elasticsearch la refuse.
