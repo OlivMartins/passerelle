@@ -217,7 +217,11 @@ class VrlGen {
     // Sans champ tags, Logstash ne fait rien ; une étiquette seule, écrite en chaîne, devient un tableau
     this.assignIf('.tags != null', '.tags', `filter(flatten([.tags])) ${keep}`);
   }
-  delField(f) { const p = this.path(f); this.emit(`del(${p})`); this.tset(p, 'null'); }
+  delField(f) {
+    // Nom de champ calculé : la référence obtenue, « a » ou « [a][b] », est découpée en chemin
+    if (/%\{/.test(String(f))) { this.emit(`. = remove!(., split(replace(${this.sprintf(f)}, r'^\\[|\\]$', ""), "]["))`); this.treset(); this.types.delete('.'); return; }
+    const p = this.path(f); this.emit(`del(${p})`); this.tset(p, 'null');
+  }
   common(s) {
     for (const [k, v] of lsPairs(s.add_field)) {
       if (/%\{/.test(k)) { this.v.note('warn', 'Nom de champ dynamique', `add_field « ${k} » : un nom calculé n’est pas pris en charge, champ ignoré.`); continue; }

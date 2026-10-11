@@ -94,7 +94,7 @@ export const CASES = [
   { id: 'commun_add_field_champ_existant', filter: 'mutate { add_field => { "k" => "v" "[x][y]" => "z" } }', events: [{ k: 'déjà' }, { x: { y: 'déjà' } }], known: 'sur un champ qui existe, Logstash ajoute la valeur et en fait un tableau ; la traduction écrase' },
   { id: 'commun_add_field_sous_champ_de_scalaire', filter: 'mutate { add_field => { "[x][y]" => "z" } }', events: [{ x: 'scalaire' }], known: 'Logstash refuse d’écrire sous un champ scalaire et pose _mutate_error ; la traduction remplace le scalaire' },
   { id: 'commun_remove_field', filter: 'mutate { remove_field => ["a", "[x][y]"] }', events: [{ a: 1, b: 2 }, { x: { y: 1, z: 2 } }, { x: { y: 1 } }, { b: 2 }] },
-  { id: 'commun_remove_field_dynamique', filter: 'mutate { remove_field => ["%{nom}"] }', events: [{ nom: 'a', a: 1 }], known: 'un nom de champ écrit avec %{…} n’est pas résolu : le champ désigné reste' },
+  { id: 'commun_remove_field_dynamique', filter: 'mutate { remove_field => ["%{nom}"] }', events: [{ nom: 'a', a: 1 }, { nom: '[x][y]', x: { y: 1, z: 2 } }, { a: 1 }] },
   { id: 'commun_add_tag', filter: 'mutate { add_tag => ["t1", "t-%{n}"] }', events: [{ n: 1 }, { n: 2, tags: ['t0'] }, { n: 3, tags: ['t1'] }, { n: 4, tags: 'chaine' }] },
   { id: 'commun_remove_tag', filter: 'mutate { remove_tag => ["t1"] }', events: [{ tags: ['t0', 't1'] }, { tags: ['t1'] }, { tags: 't1' }, { tags: 't0' }] },
   { id: 'commun_remove_tag_sans_tags', filter: 'mutate { remove_tag => ["t1"] }', events: [{ n: 1 }] },

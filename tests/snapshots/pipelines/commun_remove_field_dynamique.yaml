@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      del(."%{nom}")
+      . = remove!(., split(replace((to_string(.nom) ?? ""), r'^\[|\]$$', ""), "]["))
