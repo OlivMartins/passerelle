@@ -172,6 +172,8 @@ function joda2strf(f) {
   return out;
 }
 function compName(s) { return String(s).toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'etape'; }
+// Valeurs qu’une condition « if [champ] » de Logstash tient pour fausses
+const FALSY = '[null, false, "", "false"]';
 
 class VrlGen {
   constructor(v) { this.v = v; this.lines = []; this.ind = 0; this.types = new Map(v.ns ? [] : [['.', 'obj']]); this.usedAbort = false; this.plugins = []; this.todo = false; this.depth = 0; }
@@ -274,8 +276,9 @@ class VrlGen {
       case 'or': return `${this.cond(c.l)} || ${this.cond(c.r)}`;
       case 'xor': return `(${this.cond(c.l)}) != (${this.cond(c.r)})`;
       case 'nand': return `!(${this.cond(c.l)} && ${this.cond(c.r)})`;
-      case 'not': return `!(${this.cond(c.e)})`;
-      case 'truthy': { if (c.v.t !== 'field') return this.rv(c.v); const p = this.rv(c.v); return `(${p} != null && ${p} != false)`; }
+      case 'not': return c.e.op === 'truthy' && c.e.v.t === 'field' ? `includes(${FALSY}, ${this.rv(c.e.v)})` : `!(${this.cond(c.e)})`;
+      // Pour Logstash, un champ est faux s’il est absent, nul, false, ou s’il s’écrit « false » ou vide
+      case 'truthy': return c.v.t !== 'field' ? this.rv(c.v) : `!includes(${FALSY}, ${this.rv(c.v)})`;
       case 'cmp': {
         if (c.cmp === '==' || c.cmp === '!=') return `${this.rv(c.l)} ${c.cmp} ${this.rv(c.r)}`;
         const numeric = c.l.t === 'num' || c.r.t === 'num';
@@ -401,11 +404,30 @@ class VrlGen {
         case 'uppercase': unary(v, 'upcase'); break;
         case 'lowercase': unary(v, 'downcase'); break;
         case 'strip': unary(v, 'strip_whitespace'); break;
-        case 'capitalize': lsList(v).forEach(f => { const x = this.path(f); onString(x, bang => (bang ? `(upcase(slice(${x}, 0, 1) ?? "") ?? "") + (downcase(slice(${x}, 1) ?? "") ?? "")` : `upcase(slice(${x}, 0, 1) ?? "") + downcase(slice(${x}, 1) ?? "")`), 'str'); }); break;
+        // La première lettre est prise par caractère : slice compte des octets et couperait une lettre accentuée
+        case 'capitalize': lsList(v).forEach(f => { const x = this.path(f); onString(x, bang => `upcase(truncate${bang}(${x}, 1)) + downcase(replace${bang}(${x}, r'(?s)^.', ""))`, 'str'); }); break;
         case 'remove': lsList(v).forEach(f => this.delField(f)); break;
-        case 'split': lsPairs(v).forEach(([f, sep]) => { const x = this.path(f); onString(x, bang => `split${bang}(${x}, ${vq(sep)})`, 'arr'); }); break;
+        // Découpage à la manière de Ruby : les éléments vides de fin sont écartés, et un séparateur « espace » découpe sur les blancs
+        case 'split': lsPairs(v).forEach(([f, sep0]) => {
+          const x = this.path(f); const t = this.tget(x); const sep = String(sep0);
+          if (sep === '' || sep === ' ') return onString(x, bang => `filter(split${bang}(${x}, ${sep ? "r'[ \\t\\n\\v\\f\\r]+'" : '""'})) -> |_index, part| { part != "" }`, 'arr');
+          if (t === 'null') return;
+          const one = sep.replace(/[\\^$.*+?()[\]{}|]/g, ch => (ch === '$' ? '\\x24' : '\\' + ch));
+          const ending = vraw(`${sep.length > 1 ? `(?:${one})` : one}+$`, 'r');
+          if (t !== 'str') this.open(`if is_string(${x})`);
+          this.emit(`${x} = split(replace${t === 'str' ? '' : '!'}(${x}, ${ending}, ""), ${vq(sep)})`);
+          this.emit(`if ${x} == [""] { ${x} = [] }`);
+          if (t !== 'str') this.close();
+          this.tset(x, t === 'str' ? 'arr' : 'any');
+        }); break;
         case 'join': lsPairs(v).forEach(([f, sep]) => { const x = this.path(f); if (this.tget(x) !== 'null') this.assignIf(`is_array(${x})`, x, `join(${x}, ${vq(sep)}) ?? ${x}`); }); break;
-        case 'merge': lsPairs(v).forEach(([dst, src]) => { const d = this.path(dst), sp = this.path(src); this.assign(d, `compact(flatten([${d}, ${sp}]))`, 'arr'); }); break;
+        // Deux objets réunissent leurs clés, un objet et autre chose ne donnent rien, le reste devient un tableau
+        case 'merge': lsPairs(v).forEach(([dst, src]) => {
+          const d = this.path(dst), sp = this.path(src);
+          this.open(`if is_object(${d})`); this.emit(`${d} = merge(${d}, ${sp}) ?? ${d}`);
+          this.close(`} else if !is_object(${sp}) {`); this.ind++; this.emit(`${d} = compact(flatten([${d}, ${sp}]))`); this.close();
+          this.tset(d, 'any');
+        }); break;
         // Un champ absent ou nul n’est pas copié
         case 'copy': lsPairs(v).forEach(([src, dst]) => { const a = this.path(src), b = this.path(dst); if (this.tget(a) === 'null') return; if (this.present(a)) this.assign(b, a, this.tget(a)); else this.assignIf(`${a} != null`, b, a); }); break;
       }
@@ -554,9 +576,17 @@ class VrlGen {
   }
   f_truncate(s) {
     const n = s.length_bytes || 1000;
-    // Seule une chaîne est tronquée : un champ absent n’est pas créé
-    lsList(s.fields).forEach(f => { const x = this.path(f); const t = this.tget(x); if (t === 'str') this.assign(x, `truncate(${x}, ${n})`); else if (t !== 'null') this.assignIf(`is_string(${x})`, x, `truncate!(${x}, ${n})`); });
-    this.v.note('info', 'truncate', 'Vector tronque en caractères, Logstash en octets : léger écart possible sur les textes non ASCII.');
+    // Seule une chaîne est tronquée : un champ absent n’est pas créé.
+    // length_bytes compte des octets et truncate des caractères : la coupe se fait sur le dernier caractère entier
+    // qui tient dans la limite. slice, lui, coupe à l’octet : son résultat ne sert qu’à compter.
+    lsList(s.fields).forEach(f => {
+      const x = this.path(f); const t = this.tget(x); if (t === 'null') return;
+      this.open(t === 'str' ? `if length(${x}) > ${n}` : `if is_string(${x}) && length!(${x}) > ${n}`);
+      this.emit(`chars = strlen!(slice!(${x}, 0, ${n}))`);
+      this.emit(`${x} = truncate${t === 'str' ? '' : '!'}(${x}, chars)`);
+      this.emit(`if length(${x}) > ${n} { ${x} = truncate(${x}, chars - 1) }`);
+      this.close(); if (t !== 'str') this.tset(x, 'any');
+    });
     this.common(s); this.ok();
   }
   f_csv(s) {

@@ -6,4 +6,8 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # truncate
-      if is_string(.a) { .a = truncate!(.a, 5) }
+      if is_string(.a) && length!(.a) > 5 {
+        chars = strlen!(slice!(.a, 0, 5))
+        .a = truncate!(.a, chars)
+        if length(.a) > 5 { .a = truncate(.a, chars - 1) }
+      }

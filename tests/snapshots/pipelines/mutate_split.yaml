@@ -6,4 +6,7 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      if is_string(.a) { .a = split!(.a, ",") }
+      if is_string(.a) {
+        .a = split(replace!(.a, r',+$$', ""), ",")
+        if .a == [""] { .a = [] }
+      }

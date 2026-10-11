@@ -6,4 +6,8 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .a = compact(flatten([.a, .b]))
+      if is_object(.a) {
+        .a = merge(.a, .b) ?? .a
+      } else if !is_object(.b) {
+        .a = compact(flatten([.a, .b]))
+      }

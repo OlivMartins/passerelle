@@ -5,7 +5,7 @@ transforms:
     type: remap
     inputs: [stdin_in_init]
     source: |
-      if (.a != null && .a != false) {
+      if !includes([null, false, "", "false"], .a) {
         # mutate
         .tags = compact(flatten([.tags, "oui"]))
       } else {

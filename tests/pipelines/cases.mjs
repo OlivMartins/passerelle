@@ -60,11 +60,11 @@ export const CASES = [
 
   // mutate : chaînes
   { id: 'mutate_gsub', filter: 'mutate { gsub => ["a", "[0-9]+", "#"] }', events: [{ a: 'abc123def45' }, { a: 42 }] },
-  { id: 'mutate_gsub_groupes', filter: 'mutate { gsub => ["a", "(\\w+)@(\\w+)", "\\2 at \\1"] }', events: [{ a: 'alice@example' }], known: 'les groupes \\1 et \\2 du remplacement ne sont pas repris : le texte « ${2} at ${1} » est écrit tel quel' },
+  { id: 'mutate_gsub_groupes', filter: 'mutate { gsub => ["a", "(\\w+)@(\\w+)", "\\2 at \\1"] }', events: [{ a: 'alice@example' }], known: 'les groupes \\1 et \\2 sont bien traduits en ${1} et ${2}, mais le moteur double chaque « $ » du VRL pour l’interpolation des variables d’environnement, que Vector ne fait plus par défaut depuis la 0.58 au moins : le texte « ${2} at ${1} » est écrit tel quel' },
   { id: 'mutate_majuscules', filter: 'mutate { uppercase => ["a"] }', events: [{ a: 'été Abc ß' }, { a: 42 }] },
   { id: 'mutate_minuscules', filter: 'mutate { lowercase => ["a"] }', events: [{ a: 'ÉTÉ Abc' }, { a: 42 }] },
   { id: 'mutate_capitalize', filter: 'mutate { capitalize => ["a"] }', events: [{ a: 'abc DEF' }, { a: 'x' }, { a: 42 }] },
-  { id: 'mutate_capitalize_accent', filter: 'mutate { capitalize => ["a"] }', events: [{ a: 'élan VITAL' }], known: 'une première lettre accentuée est coupée en deux octets : la valeur produite n’est plus de l’UTF-8 valide' },
+  { id: 'mutate_capitalize_accent', filter: 'mutate { capitalize => ["a"] }', events: [{ a: 'élan VITAL' }, { a: '' }] },
   { id: 'mutate_strip', filter: 'mutate { strip => ["a"] }', events: [{ a: '  x  ' }, { a: '\tx\n' }, { a: 5 }] },
   { id: 'mutate_chaines_tableau', filter: 'mutate { gsub => ["a", "[0-9]+", "#"] uppercase => ["b"] lowercase => ["c"] strip => ["d"] }', events: [{ a: ['x1', 'y22'], b: ['x', 'y'], c: ['X', 'Y'], d: ['  x ', ' y'] }], known: 'gsub, uppercase, lowercase et strip ne traitent pas un tableau élément par élément' },
   { id: 'mutate_champ_absent', filter: SUR_CHAQUE_CHAMP, events: [{ n: 1 }] },
@@ -72,11 +72,18 @@ export const CASES = [
 
   // mutate : tableaux
   { id: 'mutate_split', filter: 'mutate { split => { "a" => "," } }', events: [{ a: 'x,y,,z' }, { a: 'seul' }, { a: ['déjà', 'tableau'] }, { a: 42 }] },
-  { id: 'mutate_split_vides_de_fin', filter: 'mutate { split => { "a" => "," } }', events: [{ a: 'x,y,,' }, { a: '' }], known: 'Logstash écarte les éléments vides de fin (« x,y,, » donne deux éléments, une chaîne vide aucun) ; la traduction les garde' },
+  // Logstash découpe comme Ruby : les éléments vides de fin sont écartés, ceux du début et du milieu gardés
+  { id: 'mutate_split_vides_de_fin', filter: 'mutate { split => { "a" => "," } }', events: [{ a: 'x,y,,' }, { a: '' }, { a: ',,' }, { a: ',x' }] },
+  { id: 'mutate_split_separateur_special', filter: 'mutate { split => { "a" => "|" } }', events: [{ a: 'x|y||' }, { a: '|x' }, { a: '||' }] },
+  { id: 'mutate_split_separateur_long', filter: 'mutate { split => { "a" => "::" } }', events: [{ a: 'x::y::::' }, { a: 'x:y' }] },
+  // Un séparateur réduit à une espace découpe sur les blancs, sans élément vide
+  { id: 'mutate_split_espace', filter: 'mutate { split => { "a" => " " } }', events: [{ a: ' x  y ' }, { a: 'x\ty' }, { a: '' }, { a: '  ' }] },
   { id: 'mutate_join', filter: 'mutate { join => { "a" => "-" } }', events: [{ a: ['x', 'y'] }, { a: 'chaîne' }, { a: [] }] },
   { id: 'mutate_join_nombres', filter: 'mutate { join => { "a" => "-" } }', events: [{ a: [1, 2] }], known: 'un tableau de nombres n’est pas joint : Logstash donne « 1-2 »' },
   { id: 'mutate_merge', filter: 'mutate { merge => { "a" => "b" } }', events: [{ a: ['x'], b: ['y'] }, { a: 'x', b: 'y' }, { a: ['x'], b: 'y' }, { a: 'x' }, { b: 'y' }] },
-  { id: 'mutate_merge_objets', filter: 'mutate { merge => { "a" => "b" } }', events: [{ a: { k: 1 }, b: { l: 2 } }], known: 'deux objets sont réunis en un tableau ; Logstash fusionne leurs clés' },
+  { id: 'mutate_merge_objets', filter: 'mutate { merge => { "a" => "b" } }', events: [{ a: { k: 1 }, b: { l: 2 } }, { a: { k: 1, m: { p: 1 } }, b: { k: 2, m: { q: 2 } } }] },
+  { id: 'mutate_merge_objet_et_scalaire', filter: 'mutate { merge => { "a" => "b" } }', events: [{ a: { k: 1 }, b: 'x' }, { a: 'x', b: { l: 2 } }, { b: { l: 2 } }] },
+  { id: 'mutate_merge_elements_vides', filter: 'mutate { merge => { "a" => "b" } }', events: [{ a: ['x', ''], b: [['y'], null] }], known: 'Logstash met les deux tableaux bout à bout ; la traduction en retire les chaînes vides et les nuls, et aplatit les tableaux imbriqués' },
 
   // mutate applique ses opérations dans un ordre fixe, pas dans celui du pipeline : rename avant uppercase, update avant replace
   { id: 'mutate_ordre_rename_uppercase', filter: 'mutate { uppercase => ["b"] rename => { "a" => "b" } }', events: [{ a: 'x' }] },
@@ -109,8 +116,8 @@ export const CASES = [
   { id: 'condition_comparaison_champ_absent', filter: si('[n] > 10'), events: [{ n: 11 }, { m: 1 }, { n: 12 }], known: 'Logstash jette l’événement quand le champ comparé à un nombre est absent ; la traduction le garde et tient la condition pour fausse' },
   { id: 'condition_comparaison_chaine', filter: si('[n] > 10'), events: [{ n: 11 }, { n: '11' }, { n: 12 }], known: 'Logstash jette l’événement quand le champ comparé à un nombre est une chaîne ; la traduction le garde et lit la chaîne comme un nombre' },
   { id: 'condition_verite', filter: si('[a]'), events: [{ a: 'x' }, { a: '0' }, { a: 0 }, { a: false }, { a: null }, { b: 1 }, { a: [] }, { a: {} }] },
-  { id: 'condition_verite_chaine', filter: si('[a]'), events: [{ a: '' }, { a: 'false' }], known: 'une chaîne vide et la chaîne « false » sont fausses pour Logstash, vraies pour la traduction' },
-  { id: 'condition_negation', filter: si('![a]'), events: [{ a: 'x' }, { a: false }, { b: 1 }] },
+  { id: 'condition_verite_chaine', filter: si('[a]'), events: [{ a: '' }, { a: 'false' }] },
+  { id: 'condition_negation', filter: si('![a]'), events: [{ a: 'x' }, { a: false }, { b: 1 }, { a: '' }, { a: 'false' }] },
   { id: 'condition_in_liste', filter: si('[a] in ["x", "y"]'), events: [{ a: 'x' }, { a: 'z' }, { b: 1 }, { a: ['x'] }] },
   { id: 'condition_in_champ', filter: si('"x" in [a]'), events: [{ a: ['x', 'y'] }, { a: 'axb' }, { a: 'z' }, { b: 1 }] },
   { id: 'condition_not_in', filter: si('[a] not in ["x", "y"]'), events: [{ a: 'x' }, { a: 'z' }, { b: 1 }] },
@@ -265,7 +272,8 @@ export const CASES = [
   // truncate
   { id: 'truncate_octets', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: 'abcdefgh' }, { a: 'abc' }, { a: 12345678 }] },
   { id: 'truncate_champ_absent', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ n: 1 }, { a: null }] },
-  { id: 'truncate_accents', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: 'éééé' }], known: 'length_bytes compte des octets : Logstash coupe « éééé » en « éé », la traduction laisse la valeur entière' },
+  // length_bytes compte des octets, et la coupe ne tombe jamais au milieu d’un caractère
+  { id: 'truncate_accents', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: 'éééé' }, { a: 'aéééé' }, { a: 'abcdé' }, { a: '😀😀' }, { a: '😀' }] },
   { id: 'truncate_tableau', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: ['abcdefgh', 'x'] }], known: 'un tableau n’est pas tronqué élément par élément' },
 
   // cidr

@@ -13,6 +13,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 - Pipelines dont l’entrée n’est pas Kafka (`stdin`, `file`, `tcp`, `udp`, `http`, `beats`, `generator`) : la source Vector déclare désormais `log_namespace: true`, que suppose le VRL généré. Sans ce réglage, Vector refusait la configuration d’une entrée `stdin` en JSON, et rangeait sinon l’événement entier dans `message`.
 - Champ absent ou nul : la traduction ne crée plus le champ et ne signale plus d’échec là où Logstash ne fait rien. Sont concernés `mutate` (`gsub`, `uppercase`, `lowercase`, `capitalize`, `strip`, `split`, `join`, `copy`, `convert`, `coerce`), `remove_tag`, `truncate`, `dissect`, `date`, `json`, `xml`, `fingerprint` et `translate`. Au passage : une date `UNIX` sur un champ absent ne pose plus `@timestamp` au 1er janvier 1970, `capitalize` ne vide plus un champ qui n’est pas une chaîne, `convert` ne change plus un champ nul en 0, et `remove_tag` garde une étiquette écrite en chaîne plutôt qu’en tableau.
+- Valeurs qui différaient de celles de Logstash : `capitalize` ne coupe plus en deux une première lettre accentuée ; `split` écarte les éléments vides de fin et découpe sur les blancs quand son séparateur est une espace ; `merge` réunit les clés de deux objets au lieu d’en faire un tableau, et ne fait rien d’un objet et d’une autre valeur ; `truncate` compte des octets, sans couper un caractère ; une condition `if [champ]` est fausse pour une chaîne vide et pour la chaîne « false ».
 
 ## [1.1.1] - 2026-10-22
 
