@@ -68,10 +68,11 @@ function launch(script, dir) {
   const fd = openSync(log, 'w');
   const started = Date.now();
   let status = 0;
-  try { execFileSync('sh', [join(HERE, script), dir], { stdio: ['ignore', fd, fd] }); } catch (e) { status = e.status || 1; }
+  // Dix minutes au plus : un pipeline bloqué empêcherait Logstash de s’arrêter
+  try { execFileSync('sh', [join(HERE, script), dir], { stdio: ['ignore', fd, fd], timeout: 600000 }); } catch (e) { status = e.status || 125; }
   closeSync(fd);
   const text = readFileSync(log, 'utf8');
-  // À partir de 125, c’est Docker qui a échoué, pas le moteur
+  // À partir de 125, c’est Docker qui a échoué ou le délai qui est passé, pas le moteur qui a rendu un code d’erreur
   return { fatal: status >= 125, text, version: text.split('\n')[0], seconds: Math.round((Date.now() - started) / 1000) };
 }
 
@@ -176,7 +177,7 @@ const logstash = launch('logstash.sh', LS);
 const vector = launch('vector.sh', VEC);
 for (const [name, run, dir] of [['Logstash', logstash, LS], ['Vector', vector, VEC]]) {
   if (!run.fatal) continue;
-  console.error(`${name} n’a pas pu être lancé par Docker : voir ${dir}.log`);
+  console.error(`${name} n’a pas abouti (Docker indisponible, ou moteur bloqué plus de dix minutes) : voir ${dir}.log`);
   process.exit(1);
 }
 // Une minute de marge de part et d’autre : les horloges des conteneurs sont celles de la machine
