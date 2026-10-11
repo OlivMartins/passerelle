@@ -117,6 +117,7 @@ Les deux premières sont portées par un cas qui les désactive (champ `exact`) 
 - `geoip`, et avec lui l’exemple `nginx.conf` : il faudrait la même base de données des deux côtés.
 - `fingerprint` avec une clé et `drop` avec `percentage`.
 - Les entrées et les sorties autres que celles du transport.
+- L’interpolation des variables d’environnement. Vector est lancé avec ses réglages par défaut, et depuis sa version 0.57 il ne remplace plus `${VAR}` dans un fichier de configuration sans l’option `--dangerously-allow-env-var-interpolation`. Le banc joue donc le VRL tel qu’il est écrit : un `$` que le moteur double y reste doublé (cas `mutate_gsub_groupes`). Les identifiants `${KAFKA_USERNAME}` et `${KAFKA_PASSWORD}` d’une configuration générée ne sont pas joués.
 
 ### Écarts connus
 
