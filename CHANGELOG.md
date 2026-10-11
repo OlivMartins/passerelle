@@ -4,6 +4,17 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Non publié]
 
+## [1.1.0] - 2026-10-11
+
+Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contribués par @gnocent ([#1](https://github.com/OlivMartins/passerelle/pull/1)) : 494 cas sur 504 donnent désormais le même résultat qu’Elasticsearch.
+
+### À savoir avant de mettre à jour
+
+- **Index plein texte.** La recherche utilise `hasToken(lowerUTF8(colonne), …)`. Un index `tokenbf_v1` créé sur `lower(colonne)` d’après la remarque de la 1.0 ne sert plus : remplacez-le par l’index `text` que propose Passerelle. Cet index demande ClickHouse 26.x ; les requêtes, elles, fonctionnent aussi sur 25.8 LTS.
+- **SQL généré.** Sa forme change : fuseau `'UTC'` explicite dans les calculs de date, CTE `base` et `top_<nom>`, suffixe `_agg` sur un alias qui masquerait une colonne. Les scripts qui exploitent la sortie de l’API ou de la CLI sont à vérifier.
+- **Clauses non traduites.** Le SQL s’arrête sur un message explicite (`throwIf`) au lieu de s’exécuter en ignorant la clause.
+- **Schéma des colonnes.** Déclarez `clickhouse.columns` pour une traduction fidèle des champs facultatifs, multivalués et entiers.
+
 ### Ajouté
 
 - Présentation du projet : README, bannière, démonstration animée et captures en thème clair et sombre.
@@ -12,9 +23,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 - Intégration continue : tests à chaque push ; archive, somme de contrôle et page autonome construites et jointes automatiquement aux releases.
 - Instantanés du SQL et du YAML générés (`tests/snapshots`), comparés par `npm test`.
 - Banc différentiel (`npm run test:diff`) : chaque requête est exécutée sur Elasticsearch, sa traduction sur ClickHouse, et les résultats sont comparés. Les écarts connus sont inventoriés dans `tests/differential/cases.mjs`. Il demande ClickHouse 26.9 ou une version suivante, celle que vise le SQL généré ; la CI épingle la 26.9.
-
 - Schéma des colonnes : la clé facultative `clickhouse.columns` donne le type ClickHouse de chaque colonne. La traduction s’en sert pour les champs facultatifs (`Nullable`), multivalués (`Array`), les entiers et les dates. `clickhouse.empty_as_missing` déclare qu’une chaîne vide représente un champ absent.
-
 - Recherche plein texte : option `clickhouse.text_match: strict`, qui vérifie chaque mot par une expression régulière suivant le découpage de l’analyseur standard d’Elasticsearch. Le mode par défaut, `tokens`, garde `hasToken` seul pour un mot simple.
 - Listes nommées : au-delà de `clickhouse.lists.threshold` valeurs, une liste (`terms`, série de `should`, `OR` d’une `query_string`) quitte le SQL pour une table, désignée par l’empreinte de son contenu ou par un nom déclaré dans `clickhouse.lists.names`. Le `CREATE TABLE` et les `INSERT` sont fournis par l’API (champ `lists`) et par la CLI (fichier `.lists.sql`). Une requête de plus de 256 Kio, que ClickHouse refuse par défaut, est signalée.
 - Agrégation `composite` : option `clickhouse.composite_mode: stream`, qui produit une seule requête sans pagination, à lire en flux, quand le client parcourt tous les groupes.
@@ -30,7 +39,6 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 - Les égalités sur une même colonne reliées par `OR` (série de `should`, `dis_max`, `query_string`) sont réunies en un seul `IN`. Une série de motifs `*texte*` sur un même champ devient un `multiSearchAny`.
 - Agrégation `composite` : le curseur `after` est une condition `WHERE` écrite clé par clé (`k1 > v1 OR (k1 = v1 AND k2 > v2) …`) et non plus une comparaison de tuples en `HAVING`. ClickHouse peut ainsi la confronter à la clé de tri de la table : 112 granules lus sur 3 125 dans l’essai, contre 3 125.
 - Les calculs de date précisent désormais le fuseau `'UTC'` dans le SQL (`toStartOfDay(now('UTC') - INTERVAL 7 DAY)`, `toHour(timestamp, 'UTC')`), parce qu’Elasticsearch calcule en UTC alors que ClickHouse suit le fuseau du serveur. La nouvelle option `clickhouse.timezone: UTC` déclare un serveur et des colonnes en UTC : le SQL retrouve alors sa forme courte.
-
 - Plusieurs clauses `must_not` sont niées une à une (`a != x AND b != y`) plutôt qu’en bloc (`NOT (a = x OR b = y)`).
 
 ### Corrigé
@@ -80,5 +88,6 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
-[Non publié]: https://github.com/OlivMartins/passerelle/compare/v1.0.0...HEAD
+[Non publié]: https://github.com/OlivMartins/passerelle/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/OlivMartins/passerelle/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/OlivMartins/passerelle/releases/tag/v1.0.0
