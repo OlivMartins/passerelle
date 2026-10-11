@@ -7,7 +7,9 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:ui": "node scripts/build.mjs --ui-only",
-    "test": "node scripts/test.mjs"
+    "test": "node scripts/test.mjs",
+    "test:update": "node scripts/test.mjs --update",
+    "test:diff": "node tests/differential/run.mjs"
   },
   "engines": {
     "node": ">=24"

@@ -1,0 +1,1 @@
+-- Erreur : Traduction impossible : size : nombre attendu, reçu "10; DROP TABLE x"

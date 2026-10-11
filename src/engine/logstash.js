@@ -804,7 +804,9 @@ function translateLogstash(src, cfg) {
     if (t.route) for (const k of Object.keys(t.route)) t.route[k] = esc(t.route[k]);
   }
   if (dollar) v.note('info', 'Symbole $ doublé', 'Vector remplace $VAR et ${VAR} par des variables d’environnement dans tout le fichier : les $ du code VRL sont écrits $$ pour rester littéraux.');
-  const config = { data_dir: '/var/lib/vector', api: { enabled: true, address: '0.0.0.0:8686' } };
+  // L’API de Vector n’a pas d’authentification : elle n’écoute que sur la boucle locale, ce qui suffit à « vector top »
+  const config = { data_dir: '/var/lib/vector', api: { enabled: true, address: '127.0.0.1:8686' } };
+  v.note('info', 'API Vector sur la boucle locale', 'L’API de Vector (vector top, santé) écoute sur 127.0.0.1:8686 : elle n’a pas d’authentification et ne doit pas être joignable du réseau. Dans un conteneur, pour l’atteindre depuis l’hôte, remplacez l’adresse par 0.0.0.0:8686 et ne publiez le port que sur une interface de confiance.');
   if (Object.keys(v.enrich).length) config.enrichment_tables = v.enrich;
   config.sources = sources; config.transforms = transforms; config.sinks = sinks;
   if (!Object.keys(transforms).length) delete config.transforms;

@@ -10,6 +10,7 @@ clickhouse:
   cluster: ''
   default_table: logs.events
   time_field: timestamp
+  timezone: ''                        # UTC si le serveur et les colonnes de date sont en UTC : le SQL n'a alors plus besoin de préciser le fuseau
   text_fields: [message, error.message]
   index_mapping:
     'logs-*': logs.events
@@ -17,6 +18,17 @@ clickhouse:
     'metrics-*': metrics.samples
   field_mapping:
     '@timestamp': timestamp
+  # Types des colonnes de la table cible, pour traduire fidèlement les champs facultatifs (Nullable),
+  # multivalués (Array) et entiers. À produire avec :
+  #   SELECT concat('    ', name, ': ', type) FROM system.columns WHERE database = 'logs' AND table = 'events' FORMAT TSVRaw
+  columns: {}
+  empty_as_missing: false             # true : dans une colonne String non Nullable, la chaîne vide représente un champ absent
+  composite_mode: page                # stream : une agrégation composite devient une seule requête, sans pagination, lue en flux
+  text_match: tokens                  # strict : chaque mot cherché est vérifié par une expression régulière, pour le découpage exact d'Elasticsearch
+  lists:
+    threshold: 0                      # au-delà de ce nombre de valeurs, une liste (terms, should…) quitte le SQL pour une table ; 0 : jamais
+    table: ''                         # table des listes ; vide : passerelle_lists dans la base de données
+    names: {}                         # empreinte d'une liste → nom lisible
 kafka:
   bootstrap_servers: ''
   security_protocol: ''

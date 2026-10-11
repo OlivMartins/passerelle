@@ -100,16 +100,15 @@ Une requête typique de tableau de bord, avec un champ runtime Painless. Le SQL 
 
 ```sql
 WITH
-    toHour(timestamp) AS heure
+    toHour(timestamp, 'UTC') AS heure
 SELECT
     heure AS par_heure,
     count() AS doc_count,
     quantilesTDigest(0.95)(latency_ms) AS p95
 FROM logs.events
-WHERE timestamp >= toStartOfDay(now() - INTERVAL 7 DAY)
-  AND hasTokenCaseInsensitive(message, 'timeout')
+WHERE timestamp >= toStartOfDay(now('UTC') - INTERVAL 7 DAY)
+  AND hasToken(lowerUTF8(message), 'timeout')
   AND env != 'staging'
-  AND isNotNull(heure)
 GROUP BY par_heure
 ORDER BY doc_count DESC, par_heure ASC
 LIMIT 24;
@@ -117,7 +116,9 @@ LIMIT 24;
 
 Le script Painless devient une expression `WITH`. Le `match` plein texte devient une recherche par tokens, qu’un index peut accélérer. Le percentile garde l’algorithme t-digest d’Elasticsearch, donc des résultats comparables.
 
-Passerelle signale aussi que `heure` gagnerait à être une colonne matérialisée et que `message` mérite un index `tokenbf_v1`. Le `ALTER TABLE` correspondant est prêt à copier.
+Les dates sont calculées en UTC, comme dans Elasticsearch, quel que soit le fuseau du serveur ClickHouse : c’est le rôle des `'UTC'` du SQL. Si votre serveur et vos colonnes sont déjà en UTC, déclarez `timezone: UTC` dans la configuration et le SQL s’en passe.
+
+Passerelle signale aussi que `heure` gagnerait à être une colonne matérialisée et que `message` mérite un index `text`. Le `ALTER TABLE` correspondant est prêt à copier.
 
 ## Une lecture pour chacun
 
@@ -225,6 +226,10 @@ clickhouse:
     'logs-*': logs.events             # index Elasticsearch → table ClickHouse
   field_mapping:
     '@timestamp': timestamp
+  columns:                            # types des colonnes : facultatif, mais nécessaire à une traduction fidèle
+    env: LowCardinality(Nullable(String))
+    tags: Array(String)
+    latency_ms: UInt32
 kafka:
   bootstrap_servers: kafka-1:9092,kafka-2:9092
   consumer_group: vector-logs
@@ -232,6 +237,71 @@ vector:
   acknowledgements: true              # offsets validés après écriture seulement
   shadow_mode: false
 ```
+
+### Donnez-lui le schéma de vos colonnes
+
+Elasticsearch et ClickHouse ne répondent pas pareil dès qu’un champ est facultatif, multivalué ou entier. `columns` indique à Passerelle le type de chaque colonne, et la traduction s’adapte :
+
+| Colonne | Ce que Passerelle écrit |
+|---|---|
+| `Nullable` | Un `must_not` garde les lignes `NULL`, comme Elasticsearch garde les documents sans le champ : `(env != 'staging' OR env IS NULL)`. Un regroupement les écarte. |
+| `Array` | Un champ multivalué : `has(tags, 'a')` pour un `term`, `arrayJoin(tags)` pour un regroupement, `notEmpty(tags)` pour `exists`. |
+| Entier | La division de deux entiers d’un script Painless devient `intDiv()`, entière comme en Java. |
+| Date | Une borne numérique est lue comme un instant en epoch millis. |
+
+Une requête suffit à produire ce bloc :
+
+```sql
+SELECT concat('    ', name, ': ', type)
+FROM system.columns
+WHERE database = 'logs' AND table = 'events'
+FORMAT TSVRaw
+```
+
+Sans `columns`, Passerelle traduit comme si toutes les colonnes étaient simples et non `Nullable`, et le signale par une remarque « à vérifier » sur les requêtes concernées.
+
+Si vos colonnes de texte ne sont pas `Nullable` et qu’une chaîne vide y représente un champ absent, ajoutez `empty_as_missing: true` : `exists` devient `colonne != ''`, et les regroupements ignorent les chaînes vides.
+
+### Recherche plein texte : lisible ou stricte
+
+L’analyseur standard d’Elasticsearch ne découpe pas un texte comme `hasToken()` : pour lui, `user_id`, `10.0.0.1`, `index.html` et `don't` sont chacun un seul mot. Passerelle découpe le texte cherché comme Elasticsearch, puis cherche chaque mot.
+
+| `text_match` | Ce que Passerelle écrit | Équivalence |
+|---|---|---|
+| `tokens` (par défaut) | `hasToken(lowerUTF8(message), 'timeout')` pour un mot simple ; les fragments d’un mot composé doivent en plus se suivre | Un mot simple trouve aussi ses occurrences collées par `_`, `.` ou une apostrophe : `user` trouve `user_id` |
+| `strict` | La même recherche, suivie d’une expression régulière qui vérifie que le mot apparaît entier | Identique à Elasticsearch sur tous les cas du banc de tests |
+
+La casse est ignorée comme le fait Elasticsearch, lettres accentuées comprises : `échec` trouve `Échec`. C’est le rôle de `lowerUTF8()`, là où `hasTokenCaseInsensitive()` ne connaît que l’ASCII.
+
+Dans les deux modes, `hasToken` reste en tête de condition : c’est lui qu’un index `text` exploite, pourvu qu’il soit construit sur la même expression. Passerelle en donne le DDL avec chaque requête concernée :
+
+```sql
+ALTER TABLE logs.events
+    ADD INDEX idx_message_text lowerUTF8(message) TYPE text(tokenizer = splitByNonAlpha);
+ALTER TABLE logs.events MATERIALIZE INDEX idx_message_text;
+```
+
+Sans l’index, le SQL donne le même résultat en lisant toute la colonne. Une phrase (`match_phrase`) est cherchée mots à la suite, quels que soient les séparateurs : `connection reset` trouve `connection-reset`.
+
+### Listes noires et listes blanches
+
+Un `terms`, une série de `should` sur le même champ (le filtre « est l’un de » de Kibana) ou des `OR` dans une `query_string` sont réunis en un seul `IN`.
+
+Au-delà de 256 Kio, ClickHouse refuse une requête : une liste de quelques dizaines de milliers de valeurs suffit. Fixez un seuil, et les listes plus longues quittent le SQL pour une table :
+
+```yaml
+clickhouse:
+  lists:
+    threshold: 200                    # au-delà de 200 valeurs, la liste devient une table nommée
+    names:
+      c70cbd66b3c3: robots_connus     # facultatif : un nom lisible pour une empreinte
+```
+
+```sql
+WHERE host NOT IN (SELECT value FROM logs.passerelle_lists WHERE name = 'robots_connus')
+```
+
+Le nom par défaut est l’empreinte du contenu de la liste : la même liste dans trois cents tableaux de bord ne donne qu’une entrée. Passerelle fournit le `CREATE TABLE` et les `INSERT`, dans le champ `lists` de l’API et dans un fichier `.lists.sql` à côté de chaque requête traduite par la CLI.
 
 ## Démarrer
 
@@ -281,6 +351,8 @@ Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
 
 **28** types de requêtes, **51** agrégations, **18** filtres Logstash, avec les langages qui vont avec : Painless, syntaxe Lucene et grok. Les cas approchés sont signalés « à vérifier », les cas non traduits « à reprendre », sans jamais passer inaperçus.
 
+Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc différentiel](tests/README.md) exécute les mêmes requêtes sur Elasticsearch 7.17, 8.19 et 9.5 et sur ClickHouse, puis compare les résultats.
+
 <details>
 <summary><b>Couverture détaillée</b></summary>
 
@@ -307,6 +379,7 @@ Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
 ```bash
 npm ci
 npm test            # traduit chaque exemple et vérifie le résultat
+npm run test:diff   # compare les résultats de ClickHouse à ceux d’Elasticsearch (voir tests/README.md)
 npm run build:ui    # dist/passerelle.html : l’interface autonome
 npm run build       # interface, binaire Linux x86_64 et archive de release
 ```

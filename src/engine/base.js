@@ -11,9 +11,15 @@ const DEFAULT_CONFIG = {
     cluster: '',
     default_table: 'logs.events',
     time_field: 'timestamp',
+    timezone: '',
     text_fields: ['message', 'error.message'],
     index_mapping: { 'logs-*': 'logs.events', 'nginx-*': 'logs.nginx_access', 'metrics-*': 'metrics.samples' },
-    field_mapping: { '@timestamp': 'timestamp' }
+    field_mapping: { '@timestamp': 'timestamp' },
+    columns: {},
+    empty_as_missing: false,
+    composite_mode: 'page',
+    lists: { threshold: 0, table: '', names: {} },
+    text_match: 'tokens'
   },
   kafka: {
     bootstrap_servers: '',
@@ -34,12 +40,70 @@ function mergeConfig(base, over) {
   (function walk(dst, src) {
     if (!isObj(src)) return;
     for (const [k, v] of Object.entries(src)) {
-      if (isObj(v) && isObj(dst[k]) && !['index_mapping', 'field_mapping'].includes(k)) walk(dst[k], v);
+      if (isObj(v) && isObj(dst[k]) && !['index_mapping', 'field_mapping', 'columns', 'names'].includes(k)) walk(dst[k], v);
       else if (v !== undefined) dst[k] = clone(v);
     }
   })(out, over);
   return out;
 }
+
+/*
+ * Fuseau des calculs de date.
+ *
+ * Elasticsearch calcule en UTC, sauf fuseau donné par la requête. ClickHouse suit le fuseau du serveur
+ * ou de la colonne : sur un serveur en Europe/Paris, toStartOfDay(), toStartOfInterval(), toHour()
+ * ou une date écrite sans fuseau sont décalés d’une heure ou deux, donc les jours et les tranches aussi.
+ * Le fuseau est donc passé explicitement aux fonctions de date, sauf si la configuration déclare
+ * clickhouse.timezone: UTC (serveur et colonnes en UTC) : le SQL reste alors sans argument de fuseau.
+ */
+function zoneOf(cfg, tz) {
+  if (tz) return String(tz);
+  return String(cfg.clickhouse.timezone || '').toUpperCase() === 'UTC' ? null : 'UTC';
+}
+function tzArg(cfg, tz) {
+  const zone = zoneOf(cfg, tz);
+  return zone ? `, ${chStr(zone)}` : '';
+}
+
+/*
+ * Schéma des colonnes.
+ *
+ * clickhouse.columns associe à chaque colonne son type ClickHouse (env: LowCardinality(Nullable(String))).
+ * Il est facultatif, mais sans lui la traduction ignore si une colonne accepte NULL, si elle est un tableau,
+ * une date ou un entier : autant de cas où Elasticsearch et ClickHouse ne répondent pas pareil.
+ * Une clé peut être préfixée par la table (logs.events.env) quand deux tables n’ont pas le même type.
+ *
+ * columnType renvoie { nullable, array, kind } ou null si le type n’est pas connu.
+ *   kind : 'string' | 'int' | 'float' | 'date' | 'bool' | 'other' (celui des éléments pour un tableau)
+ */
+function parseColumnType(raw) {
+  let t = String(raw).trim();
+  const unwrap = name => {
+    if (!t.startsWith(`${name}(`) || !t.endsWith(')')) return false;
+    t = t.slice(name.length + 1, -1).trim();
+    return true;
+  };
+  unwrap('LowCardinality');
+  const array = unwrap('Array');
+  if (array) unwrap('LowCardinality');
+  const nullable = unwrap('Nullable');
+  let kind = 'other';
+  if (/^U?Int\d+$/.test(t)) kind = 'int';
+  else if (/^(Float\d+|Decimal)/.test(t)) kind = 'float';
+  else if (/^Date/.test(t)) kind = 'date';
+  else if (/^(String|FixedString|Enum|UUID|IPv[46])/.test(t)) kind = 'string';
+  else if (t === 'Bool') kind = 'bool';
+  // Un tableau n’est jamais NULL lui-même : seul le caractère Nullable d’une colonne simple compte ici
+  return { array, nullable: !array && nullable, kind };
+}
+function columnType(cfg, table, column) {
+  const columns = cfg.clickhouse.columns;
+  if (!isObj(columns)) return null;
+  const qualified = columns[`${table}.${column}`];
+  const raw = qualified !== undefined ? qualified : columns[column];
+  return raw === undefined || raw === null || raw === '' ? null : parseColumnType(raw);
+}
+const hasSchema = cfg => isObj(cfg.clickhouse.columns) && Object.keys(cfg.clickhouse.columns).length > 0;
 
 function makeNotes() {
   const list = [];
@@ -65,6 +129,23 @@ function chVal(v) {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   return chStr(v);
 }
+/*
+ * Nombre fourni par la requête et recopié tel quel dans le SQL (taille, intervalle, coordonnée…).
+ * Seul un nombre fini est accepté, ou une chaîne purement numérique comme le tolère Elasticsearch :
+ * toute autre valeur est refusée, comme Elasticsearch le fait avec une erreur 400.
+ */
+function chNum(v, what) {
+  const n = typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(v) ? Number(v) : v;
+  if (typeof n !== 'number' || !Number.isFinite(n)) throw new Error(`${what} : nombre attendu, reçu ${JSON.stringify(v)}`);
+  return n;
+}
+function chInt(v, what) {
+  const n = chNum(v, what);
+  if (!Number.isInteger(n) || n < 0) throw new Error(`${what} : entier positif attendu, reçu ${JSON.stringify(v)}`);
+  return n;
+}
+/* Texte libre placé dans un commentaire SQL : il ne doit pas pouvoir le refermer */
+function chComment(s) { return String(s).replace(/\*\//g, '* /').replace(/[\r\n]+/g, ' '); }
 
 /* Analyse lexicale légère pour savoir si une expression SQL doit être parenthésée */
 function scanTop(s, cb) {
@@ -214,7 +295,8 @@ function ptokens(src) {
       t.push({ t: 're', v }); i = j; continue;
     }
     let m = /^(\d+\.\d+|\d+)([eE][+-]?\d+)?[LlFfDd]?/.exec(src.slice(i));
-    if (m) { t.push({ t: 'num', v: m[0].replace(/[LlFfDd]$/, '') }); i += m[0].length; continue; }
+    // int : littéral entier (12, 12L), par opposition à 1.5, 1e3, 12f ou 12d ; la division en dépend
+    if (m) { t.push({ t: 'num', v: m[0].replace(/[LlFfDd]$/, ''), int: !/[.eEFfDd]/.test(m[0]) }); i += m[0].length; continue; }
     m = /^[A-Za-z_$][\w$]*/.exec(src.slice(i));
     if (m) { t.push({ t: 'id', v: m[0] }); i += m[0].length; continue; }
     const op = P_OPS.find(o => src.startsWith(o, i));
@@ -290,7 +372,7 @@ function pparse(src) {
   function primary() {
     const t = next();
     if (!t) throw new Error('expression incomplète');
-    if (t.t === 'num') return { k: 'num', v: t.v };
+    if (t.t === 'num') return { k: 'num', v: t.v, int: t.int };
     if (t.t === 'str') return { k: 'str', v: t.v };
     if (t.t === 're') return { k: 're', v: t.v };
     if (t.t === 'op' && t.v === '(') { const e = expr(0); expect(')'); return e; }
@@ -327,22 +409,41 @@ function pparse(src) {
 }
 
 const P_CLASSES = new Set(['Math', 'Integer', 'Long', 'Double', 'Float', 'String', 'ZoneId', 'ZoneOffset', 'DateTimeFormatter', 'Instant', 'ChronoUnit', 'TextStyle', 'Locale', 'Objects', 'Boolean']);
+/*
+ * Valeurs numériques d’un script. « int » dit si la valeur est entière au sens de Java : true, false,
+ * ou absent quand on ne sait pas (champ dont le type n’est pas fourni par clickhouse.columns).
+ * Seule la division en dépend : entre deux entiers elle est entière en Painless, décimale dans ClickHouse.
+ */
 const pNum = sql => ({ sql, ty: 'num' });
+const pInt = sql => ({ sql, ty: 'num', int: true });
+const pFloat = sql => ({ sql, ty: 'num', int: false });
+const bothInt = (a, b) => (a.int === true && b.int === true ? true : a.int === false || b.int === false ? false : undefined);
 const pStr = sql => ({ sql, ty: 'str' });
 const pBool = sql => ({ sql, ty: 'bool' });
 
 function guessType(ctx, field) {
   const rt = ctx.runtime && ctx.runtime[field];
   if (rt) return rt.type === 'keyword' ? 'str' : rt.type === 'date' ? 'date' : ['long', 'double'].includes(rt.type) ? 'num' : 'any';
+  // Le schéma des colonnes fait foi ; à défaut, le nom du champ sert d’indice pour les dates
+  const kind = ctx.kindOf ? ctx.kindOf(field) : null;
+  if (kind) return kind === 'string' ? 'str' : kind === 'date' ? 'date' : kind === 'int' || kind === 'float' ? 'num' : 'any';
   if (/(^|[._@])(timestamp|date|time|ts)$|_at$/i.test(field)) return 'date';
   return 'any';
 }
 function pval(ctx, x) {
   if (!x) throw new Error('valeur vide');
-  if (x.kind === 'field') return { sql: ctx.mapField(x.field), ty: guessType(ctx, x.field.replace(/\.keyword$/, '')) };
-  if (x.kind === 'dow') return pStr(`upper(dateName('weekday', ${x.sql}))`);
-  if (x.kind === 'mon') return pStr(`upper(dateName('month', ${x.sql}))`);
-  if (x.kind === 'size') return pNum(`toUInt8(isNotNull(${ctx.mapField(x.field)}))`);
+  if (x.kind === 'field') {
+    const name = x.field.replace(/\.keyword$/, '');
+    const rt = ctx.runtime && ctx.runtime[name];
+    const kind = rt ? { long: 'int', double: 'float' }[rt.type] : ctx.kindOf ? ctx.kindOf(name) : null;
+    const v = { sql: ctx.mapField(x.field), ty: guessType(ctx, name) };
+    if (kind === 'int') v.int = true; else if (kind === 'float') v.int = false;
+    return v;
+  }
+  if (x.kind === 'dow') return pStr(`upper(dateName('weekday', ${x.sql}${x.zone}))`);
+  if (x.kind === 'mon') return pStr(`upper(dateName('month', ${x.sql}${x.zone}))`);
+  // doc[champ].size() : nombre de valeurs du document pour ce champ
+  if (x.kind === 'size') return isArrayField(ctx, x.field) ? pInt(`length(${ctx.mapField(x.field)})`) : pInt(`toUInt8(${presentSQL(ctx, x.field)})`);
   if (x.kind) throw new Error(`expression « ${x.kind} » inutilisable comme valeur`);
   return x;
 }
@@ -354,10 +455,11 @@ function concatOf(parts) {
   return { sql: `concat(${flat.join(', ')})`, ty: 'str', concat: flat };
 }
 function paramVal(ctx, name, o) {
-  if (o.paramSQL && name in o.paramSQL) return { sql: o.paramSQL[name], ty: 'num' };
+  // Les valeurs de buckets_path arrivent au script en double, _count compris
+  if (o.paramSQL && name in o.paramSQL) return pFloat(o.paramSQL[name]);
   if (o.params && name in o.params) {
     const v = o.params[name];
-    if (typeof v === 'number') return pNum(String(v));
+    if (typeof v === 'number') return Number.isInteger(v) ? pInt(String(v)) : pFloat(String(v));
     if (typeof v === 'boolean') return pBool(String(v));
     if (typeof v === 'string') return { sql: chStr(v), ty: 'str', lit: v };
     if (Array.isArray(v)) return { sql: `[${v.map(chVal).join(', ')}]`, ty: 'arr' };
@@ -368,7 +470,7 @@ function paramVal(ctx, name, o) {
 const JAVA_UNIT = { NANOS: 'nanosecond', MILLIS: 'millisecond', SECONDS: 'second', MINUTES: 'minute', HOURS: 'hour', DAYS: 'day', WEEKS: 'week', MONTHS: 'month', YEARS: 'year' };
 function pconv(ctx, n, env, o) {
   switch (n.k) {
-    case 'num': return pNum(n.v);
+    case 'num': return n.int ? pInt(n.v) : pFloat(n.v);
     case 'str': return { sql: chStr(n.v), ty: 'str', lit: n.v };
     case 're': return { sql: chStr(n.v), ty: 're', lit: n.v };
     case 'list': { const it = n.items.map(x => pval(ctx, pconv(ctx, x, env, o))); return { sql: `[${it.map(x => x.sql).join(', ')}]`, ty: 'arr' }; }
@@ -398,7 +500,7 @@ function pconv(ctx, n, env, o) {
       if (obj.kind === 'source') return { kind: 'field', field: n.name };
       if (obj.kind === 'field') {
         if (n.name === 'value') return pval(ctx, obj);
-        if (n.name === 'empty') return pBool(`isNull(${ctx.mapField(obj.field)})`);
+        if (n.name === 'empty') return pBool(absentSQL(ctx, obj.field));
         if (n.name === 'length') return { kind: 'size', field: obj.field };
       }
       if (obj.kind === 'grok') {
@@ -416,8 +518,8 @@ function pconv(ctx, n, env, o) {
         if (obj.name === 'Integer' || obj.name === 'Long') { if (n.name === 'MAX_VALUE') return pNum(obj.name === 'Integer' ? '2147483647' : '9223372036854775807'); if (n.name === 'MIN_VALUE') return pNum(obj.name === 'Integer' ? '-2147483648' : '-9223372036854775808'); }
       }
       const v = pval(ctx, obj);
-      if (n.name === 'millis') return pNum(`toUnixTimestamp64Milli(toDateTime64(${v.sql}, 3))`);
-      if (n.name === 'length') return pNum(`length(${v.sql})`);
+      if (n.name === 'millis') return pInt(`toUnixTimestamp64Milli(toDateTime64(${v.sql}, 3))`);
+      if (n.name === 'length') return pInt(`length(${v.sql})`);
       throw new Error(`accès « .${n.name} » non pris en charge`);
     }
     case 'call': {
@@ -433,19 +535,21 @@ function pconv(ctx, n, env, o) {
     case 'un': {
       const e = pval(ctx, pconv(ctx, n.e, env, o));
       if (n.op === '!') return pBool(`NOT ${pArg(e.sql)}`);
-      if (n.op === '-') return pNum(`-${pArg(e.sql)}`);
-      if (n.op === '~') return pNum(`bitNot(${e.sql})`);
+      if (n.op === '-') return { sql: `-${pArg(e.sql)}`, ty: 'num', int: e.int };
+      if (n.op === '~') return pInt(`bitNot(${e.sql})`);
       return e;
     }
     case 'cast': {
       const e = pval(ctx, pconv(ctx, n.e, env, o));
       const m = { int: 'toInt32', Integer: 'toInt32', long: 'toInt64', Long: 'toInt64', short: 'toInt16', byte: 'toInt8', double: 'toFloat64', Double: 'toFloat64', float: 'toFloat32', Float: 'toFloat32', String: 'toString', boolean: 'toBool' }[n.type];
       if (!m) return e;
-      return { sql: `${m}(${e.sql})`, ty: m === 'toString' ? 'str' : m === 'toBool' ? 'bool' : 'num' };
+      if (m === 'toString') return pStr(`${m}(${e.sql})`);
+      if (m === 'toBool') return pBool(`${m}(${e.sql})`);
+      return /Int/.test(m) ? pInt(`${m}(${e.sql})`) : pFloat(`${m}(${e.sql})`);
     }
     case 'tern': {
       const c = pval(ctx, pconv(ctx, n.c, env, o)), a = pval(ctx, pconv(ctx, n.a, env, o)), b = pval(ctx, pconv(ctx, n.b, env, o));
-      return { sql: `if(${c.sql}, ${a.sql}, ${b.sql})`, ty: a.ty !== 'null' ? a.ty : b.ty };
+      return { sql: `if(${c.sql}, ${a.sql}, ${b.sql})`, ty: a.ty !== 'null' ? a.ty : b.ty, int: bothInt(a, b) };
     }
     case 'elvis': {
       const a = pval(ctx, pconv(ctx, n.a, env, o)), b = pval(ctx, pconv(ctx, n.b, env, o));
@@ -458,9 +562,8 @@ function pconv(ctx, n, env, o) {
 function pbin(ctx, n, env, o) {
   const L = pconv(ctx, n.l, env, o), R = pconv(ctx, n.r, env, o); const op = n.op;
   if (L.kind === 'size' && R.sql === '0') {
-    const f = ctx.mapField(L.field);
-    if (op === '==' || op === '<=') return pBool(`isNull(${f})`);
-    if (op === '!=' || op === '>') return pBool(`isNotNull(${f})`);
+    if (op === '==' || op === '<=') return pBool(absentSQL(ctx, L.field));
+    if (op === '!=' || op === '>') return pBool(presentSQL(ctx, L.field));
   }
   const l = pval(ctx, L), r = pval(ctx, R);
   switch (op) {
@@ -479,11 +582,18 @@ function pbin(ctx, n, env, o) {
     case '==~': return pBool(`match(${l.sql}, ${chStr('^(?:' + (r.lit || '') + ')$')})`);
     case '+':
       if (l.ty === 'str' || r.ty === 'str' || l.concat || r.concat || (o.rtType === 'keyword' && !(l.ty === 'num' && r.ty === 'num'))) return concatOf([l, r]);
-      return pNum(`${l.sql} + ${pArg(r.sql)}`);
-    case '-': case '*': case '/': case '%': return pNum(`${pArg(l.sql)} ${op} ${pArg(r.sql)}`);
-    case '&': return pNum(`bitAnd(${l.sql}, ${r.sql})`);
-    case '|': return pNum(`bitOr(${l.sql}, ${r.sql})`);
-    case '^': return pNum(`bitXor(${l.sql}, ${r.sql})`);
+      return { sql: `${l.sql} + ${pArg(r.sql)}`, ty: 'num', int: bothInt(l, r) };
+    case '-': case '*': case '%': return { sql: `${pArg(l.sql)} ${op} ${pArg(r.sql)}`, ty: 'num', int: bothInt(l, r) };
+    case '/': {
+      // Entre deux entiers, la division de Painless est entière (7 / 2 = 3) ; celle de ClickHouse ne l’est jamais
+      const int = bothInt(l, r);
+      if (int === true) return pInt(`intDiv(${l.sql}, ${r.sql})`);
+      if (int === undefined) ctx.notes.add('warn', 'Division dans un script', 'Le type des opérandes n’est pas connu. Entre deux entiers, Painless fait une division entière (7 / 2 = 3) alors que ClickHouse renvoie 3.5 : il faudrait intDiv(). Renseignez clickhouse.columns pour que le bon opérateur soit choisi.');
+      return pFloat(`${pArg(l.sql)} / ${pArg(r.sql)}`);
+    }
+    case '&': return pInt(`bitAnd(${l.sql}, ${r.sql})`);
+    case '|': return pInt(`bitOr(${l.sql}, ${r.sql})`);
+    case '^': return pInt(`bitXor(${l.sql}, ${r.sql})`);
   }
   throw new Error(`opérateur « ${op} » non pris en charge`);
 }
@@ -501,22 +611,29 @@ function pmcall(ctx, n, env, o) {
   if (obj.kind === 'source' && name === 'get') return { kind: 'field', field: lit(0) };
   if (obj.kind === 'field') {
     if (name === 'size') return { kind: 'size', field: obj.field };
-    if (name === 'isEmpty') return pBool(`isNull(${ctx.mapField(obj.field)})`);
+    if (name === 'isEmpty') return pBool(absentSQL(ctx, obj.field));
     if (name === 'getValue' || name === 'get') return pval(ctx, obj);
   }
   if (obj.kind === 'unit' && name === 'between') {
     const [a, b] = A(); const u = JAVA_UNIT[obj.v];
     if (!u) throw new Error(`unité ChronoUnit.${obj.v} non prise en charge`);
-    return pNum(`dateDiff('${u}', ${a.sql}, ${b.sql})`);
+    // ChronoUnit.between compte les unités entières écoulées, comme age() ; dateDiff() compte les changements de jour, de mois…
+    return pInt(`age('${u}', ${a.sql}, ${b.sql}${a.zoned || b.zoned ? '' : tzArg(ctx.cfg)})`);
   }
   if (obj.kind === 'class') {
     const a = A(); const c = obj.name;
     if (c === 'Math') {
       const m = { abs: 'abs', floor: 'floor', ceil: 'ceil', round: 'round', sqrt: 'sqrt', pow: 'pow', max: 'greatest', min: 'least', log: 'log', log10: 'log10', exp: 'exp', signum: 'sign' }[name];
-      if (m) return pNum(`${m}(${a.map(x => x.sql).join(', ')})`);
+      if (m) {
+        const call = `${m}(${a.map(x => x.sql).join(', ')})`;
+        // Types de retour de Java : abs, max et min gardent celui des arguments, round renvoie un long, le reste un double
+        if (name === 'abs') return { sql: call, ty: 'num', int: a[0].int };
+        if (name === 'max' || name === 'min') return { sql: call, ty: 'num', int: bothInt(a[0], a[1]) };
+        return name === 'round' ? pInt(`toInt64(${call})`) : pFloat(call);
+      }
     }
-    if ((c === 'Integer' || c === 'Long') && ['parseInt', 'parseLong', 'valueOf'].includes(name)) return pNum(a[0].ty === 'num' ? a[0].sql : `toInt64OrNull(${a[0].sql})`);
-    if ((c === 'Double' || c === 'Float') && ['parseDouble', 'parseFloat', 'valueOf'].includes(name)) return pNum(a[0].ty === 'num' ? a[0].sql : `toFloat64OrNull(${a[0].sql})`);
+    if ((c === 'Integer' || c === 'Long') && ['parseInt', 'parseLong', 'valueOf'].includes(name)) return a[0].ty === 'num' ? a[0] : pInt(`toInt64OrNull(${a[0].sql})`);
+    if ((c === 'Double' || c === 'Float') && ['parseDouble', 'parseFloat', 'valueOf'].includes(name)) return pFloat(a[0].ty === 'num' ? a[0].sql : `toFloat64OrNull(${a[0].sql})`);
     if (c === 'Boolean' && name === 'parseBoolean') return pBool(`lower(${a[0].sql}) = 'true'`);
     if (['String', 'Integer', 'Long', 'Double'].includes(c) && ['valueOf', 'toString'].includes(name)) return pStr(asStrSQL(a[0]));
     if (c === 'String' && name === 'join') return pStr(`arrayStringConcat(${a[1].sql}, ${a[0].sql})`);
@@ -531,10 +648,10 @@ function pmcall(ctx, n, env, o) {
   }
   if (obj.kind === 'dow' || obj.kind === 'mon') {
     const unit = obj.kind === 'dow' ? 'weekday' : 'month';
-    if (name === 'getValue') return pNum(obj.kind === 'dow' ? `toDayOfWeek(${obj.sql})` : `toMonth(${obj.sql})`);
+    if (name === 'getValue') return pInt(obj.kind === 'dow' ? `toDayOfWeek(${obj.sql}${obj.zone ? `, 0${obj.zone}` : ''})` : `toMonth(${obj.sql}${obj.zone})`);
     if (name === 'getDisplayName') {
       const st = n.args[0] ? pconv(ctx, n.args[0], env, o) : null;
-      const full = `dateName('${unit}', ${obj.sql})`;
+      const full = `dateName('${unit}', ${obj.sql}${obj.zone})`;
       return pStr(st && st.v && /SHORT|NARROW/.test(st.v) ? `substring(${full}, 1, 3)` : full);
     }
     if (name === 'toString' || name === 'name') return pval(ctx, obj);
@@ -542,23 +659,25 @@ function pmcall(ctx, n, env, o) {
   }
   const v = pval(ctx, obj); const s = v.sql;
   const a = () => A();
-  const intervalOp = (sign, unit) => { const x = a()[0]; return { sql: `${s} ${sign} INTERVAL ${x.sql} ${unit}`, ty: 'date' }; };
+  const intervalOp = (sign, unit) => { const x = a()[0]; return { sql: `${s} ${sign} INTERVAL ${x.sql} ${unit}`, ty: 'date', zoned: v.zoned }; };
+  // Les composantes d’une date se lisent en UTC, comme dans Painless, sauf si le script a déjà choisi un fuseau (withZoneSameInstant)
+  const zone = v.zoned ? '' : tzArg(ctx.cfg);
   switch (name) {
-    case 'getHour': return pNum(`toHour(${s})`);
-    case 'getMinute': return pNum(`toMinute(${s})`);
-    case 'getSecond': return pNum(`toSecond(${s})`);
-    case 'getDayOfMonth': return pNum(`toDayOfMonth(${s})`);
-    case 'getDayOfYear': return pNum(`toDayOfYear(${s})`);
-    case 'getMonthValue': return pNum(`toMonth(${s})`);
-    case 'getYear': return pNum(`toYear(${s})`);
-    case 'getDayOfWeek': case 'getDayOfWeekEnum': return { kind: 'dow', sql: s };
-    case 'getMonth': return { kind: 'mon', sql: s };
-    case 'toInstant': case 'toLocalDateTime': return { sql: s, ty: 'date' };
-    case 'toLocalDate': return { sql: `toDate(${s})`, ty: 'date' };
-    case 'toEpochMilli': case 'getMillis': return pNum(`toUnixTimestamp64Milli(toDateTime64(${s}, 3))`);
-    case 'toEpochSecond': case 'getEpochSecond': return pNum(`toUnixTimestamp(${s})`);
-    case 'withZoneSameInstant': case 'atZone': { const z = pconv(ctx, n.args[0], env, o); if (z.kind !== 'zone') throw new Error('fuseau attendu (ZoneId.of)'); return { sql: `toTimeZone(${s}, ${chStr(z.v)})`, ty: 'date' }; }
-    case 'format': { const f = pconv(ctx, n.args[0], env, o); if (f.kind !== 'fmt') throw new Error('format attendu (DateTimeFormatter.ofPattern)'); return pStr(`formatDateTimeInJodaSyntax(${s}, ${chStr(f.v)})`); }
+    case 'getHour': return pInt(`toHour(${s}${zone})`);
+    case 'getMinute': return pInt(`toMinute(${s}${zone})`);
+    case 'getSecond': return pInt(`toSecond(${s})`);
+    case 'getDayOfMonth': return pInt(`toDayOfMonth(${s}${zone})`);
+    case 'getDayOfYear': return pInt(`toDayOfYear(${s}${zone})`);
+    case 'getMonthValue': return pInt(`toMonth(${s}${zone})`);
+    case 'getYear': return pInt(`toYear(${s}${zone})`);
+    case 'getDayOfWeek': case 'getDayOfWeekEnum': return { kind: 'dow', sql: s, zone };
+    case 'getMonth': return { kind: 'mon', sql: s, zone };
+    case 'toInstant': case 'toLocalDateTime': return { sql: s, ty: 'date', zoned: v.zoned };
+    case 'toLocalDate': return { sql: `toDate(${s}${zone})`, ty: 'date', zoned: v.zoned };
+    case 'toEpochMilli': case 'getMillis': return pInt(`toUnixTimestamp64Milli(toDateTime64(${s}, 3))`);
+    case 'toEpochSecond': case 'getEpochSecond': return pInt(`toUnixTimestamp(${s})`);
+    case 'withZoneSameInstant': case 'atZone': { const z = pconv(ctx, n.args[0], env, o); if (z.kind !== 'zone') throw new Error('fuseau attendu (ZoneId.of)'); return { sql: `toTimeZone(${s}, ${chStr(z.v)})`, ty: 'date', zoned: true }; }
+    case 'format': { const f = pconv(ctx, n.args[0], env, o); if (f.kind !== 'fmt') throw new Error('format attendu (DateTimeFormatter.ofPattern)'); return pStr(`formatDateTimeInJodaSyntax(${s}, ${chStr(f.v)}${zone})`); }
     case 'plusSeconds': return intervalOp('+', 'SECOND'); case 'plusMinutes': return intervalOp('+', 'MINUTE');
     case 'plusHours': return intervalOp('+', 'HOUR'); case 'plusDays': return intervalOp('+', 'DAY');
     case 'plusWeeks': return intervalOp('+', 'WEEK'); case 'plusMonths': return intervalOp('+', 'MONTH'); case 'plusYears': return intervalOp('+', 'YEAR');
@@ -572,13 +691,14 @@ function pmcall(ctx, n, env, o) {
       const u = pconv(ctx, n.args[0], env, o);
       const f = { SECONDS: 'toStartOfSecond', MINUTES: 'toStartOfMinute', HOURS: 'toStartOfHour', DAYS: 'toStartOfDay' }[u.v];
       if (!f) throw new Error('unité de troncature non prise en charge');
-      return { sql: `${f}(${s})`, ty: 'date' };
+      return { sql: `${f}(${s}${f === 'toStartOfSecond' ? '' : zone})`, ty: 'date', zoned: v.zoned };
     }
-    case 'toLowerCase': return pStr(`lower(${s})`);
-    case 'toUpperCase': return pStr(`upper(${s})`);
+    // Java replie la casse de toutes les lettres : lowerUTF8() et upperUTF8(), là où lower() et upper() ne connaissent que l’ASCII
+    case 'toLowerCase': return pStr(`lowerUTF8(${s})`);
+    case 'toUpperCase': return pStr(`upperUTF8(${s})`);
     case 'trim': case 'strip': return pStr(`trimBoth(${s})`);
-    case 'length': return pNum(`lengthUTF8(${s})`);
-    case 'size': return pNum(`length(${s})`);
+    case 'length': return pInt(`lengthUTF8(${s})`);
+    case 'size': return pInt(`length(${s})`);
     case 'isEmpty': return pBool(`empty(${s})`);
     case 'substring': {
       const x = a(); const b = x[0], e = x[1];
@@ -587,12 +707,12 @@ function pmcall(ctx, n, env, o) {
       const len = /^\d+$/.test(b.sql) && /^\d+$/.test(e.sql) ? String(+e.sql - +b.sql) : `${pArg(e.sql)} - ${pArg(b.sql)}`;
       return pStr(`substringUTF8(${s}, ${start}, ${len})`);
     }
-    case 'indexOf': return pNum(`(positionUTF8(${s}, ${a()[0].sql}) - 1)`);
+    case 'indexOf': return pInt(`(positionUTF8(${s}, ${a()[0].sql}) - 1)`);
     case 'contains': { const x = a()[0]; return pBool(v.ty === 'arr' ? `has(${s}, ${x.sql})` : `positionUTF8(${s}, ${x.sql}) > 0`); }
     case 'startsWith': return pBool(`startsWith(${s}, ${a()[0].sql})`);
     case 'endsWith': return pBool(`endsWith(${s}, ${a()[0].sql})`);
     case 'equals': return pBool(`${pArg(s)} = ${pArg(a()[0].sql)}`);
-    case 'equalsIgnoreCase': return pBool(`lower(${s}) = lower(${a()[0].sql})`);
+    case 'equalsIgnoreCase': return pBool(`lowerUTF8(${s}) = lowerUTF8(${a()[0].sql})`);
     case 'replace': { const x = a(); return pStr(`replaceAll(${s}, ${x[0].sql}, ${x[1].sql})`); }
     case 'replaceAll': case 'replaceFirst': {
       const re = lit(0); const rep = lit(1).replace(/\$(\d)/g, '\\$1');
@@ -604,13 +724,21 @@ function pmcall(ctx, n, env, o) {
     case 'toString': return pStr(asStrSQL(v));
     case 'get': { const x = a()[0]; return { sql: `arrayElement(${s}, ${/^\d+$/.test(x.sql) ? +x.sql + 1 : pArg(x.sql) + ' + 1'})`, ty: 'any' }; }
     case 'getValue': return v;
-    case 'hashCode': return pNum(`cityHash64(${s})`);
+    case 'hashCode': return pInt(`cityHash64(${s})`);
   }
   throw new Error(`méthode « .${name}() » non prise en charge`);
 }
 const P_NONE = { k: 'none' };
+/*
+ * Chaque « if » sans else recopie la suite du script dans ses deux branches : n conditions successives
+ * donnent 2^n chemins, donc un SQL illisible puis un temps de traduction déraisonnable.
+ * Au-delà de ce plafond, le script est déclaré « à reprendre ».
+ */
+const PAINLESS_MAX_STEPS = 500;
 function hasEmit(stmts) { return JSON.stringify(stmts).includes('"name":"emit"'); }
 function pexec(ctx, stmts, env, o) {
+  o.steps = (o.steps || 0) + 1;
+  if (o.steps > PAINLESS_MAX_STEPS) throw new Error('script trop ramifié (conditions successives) pour une expression SQL lisible');
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i]; const rest = stmts.slice(i + 1);
     if (s.k === 'nop') continue;
@@ -649,7 +777,8 @@ function painlessToSQL(ctx, src, o) {
   o = o || {};
   const prog = pparse(String(src));
   const r = pexec(ctx, prog, {}, o);
-  return { sql: prender(r), ty: prType(r) };
+  // tree : l’arbre de décision du script (conditions et valeurs émises), dont un filtre peut remonter les branches
+  return { sql: prender(r), ty: prType(r), tree: r };
 }
 
 /* ---------- Lucene (query_string) ---------- */
@@ -665,16 +794,19 @@ function luceneTokens(qs) {
     if (c === '"') {
       let j = i + 1, v = '';
       while (j < qs.length && qs[j] !== '"') { if (qs[j] === '\\') { v += qs[j + 1] || ''; j += 2; } else v += qs[j++]; }
+      if (j >= qs.length) throw new Error('guillemet non fermé');
       i = j + 1; if (qs[i] === '~') { i++; while (/\d/.test(qs[i] || '')) i++; }
       toks.push({ t: 'phrase', v }); continue;
     }
     if (c === '[' || c === '{') {
       let j = i + 1; while (j < qs.length && qs[j] !== ']' && qs[j] !== '}') j++;
+      if (j >= qs.length) throw new Error('intervalle non fermé');
       toks.push({ t: 'range', v: qs.slice(i + 1, j), lo: c === '[', hi: qs[j] === ']' }); i = j + 1; continue;
     }
     if (c === '/') {
       let j = i + 1, v = '';
       while (j < qs.length && qs[j] !== '/') { if (qs[j] === '\\' && qs[j + 1] === '/') { v += '/'; j += 2; } else v += qs[j++]; }
+      if (j >= qs.length) throw new Error('expression régulière non fermée');
       toks.push({ t: 'regex', v }); i = j + 1; continue;
     }
     let s = '';
@@ -722,20 +854,99 @@ function luceneParse(qs, defaultOp) {
     if (t.t === 'PLUS') { next(); return unary(); }
     return primary();
   }
+  // Elasticsearch refuse une requête mal formée (HTTP 400) : l’analyse doit échouer de la même façon
+  function close() {
+    if (!peek() || peek().t !== ')') throw new Error('parenthèse non fermée');
+    next();
+  }
   function primary() {
     const t = next();
     if (!t) throw new Error('requête query_string incomplète');
-    if (t.t === '(') { const e = orE(); if (peek() && peek().t === ')') next(); return e; }
+    if (t.t === '(') { const e = orE(); close(); return e; }
     if (t.t === 'field') {
       const nt = peek();
-      if (nt && nt.t === '(') { next(); const e = orE(); if (peek() && peek().t === ')') next(); assign(e, t.v); return e; }
+      if (nt && nt.t === '(') { next(); const e = orE(); close(); assign(e, t.v); return e; }
       const leaf = primary(); assign(leaf, t.v); return leaf;
     }
     if (t.t === ')') throw new Error('parenthèse fermante inattendue');
+    if (t.t === 'AND' || t.t === 'OR' || t.t === 'NOT' || t.t === 'PLUS') throw new Error(`opérateur ${t.t} inattendu`);
     return { op: 'leaf', field: null, tok: t };
   }
   const e = orE();
+  if (p < toks.length) throw new Error(toks[p].t === ')' ? 'parenthèse fermante en trop' : 'fin de requête inattendue');
   return e;
+}
+
+/* ---------- simple_query_string ---------- */
+/*
+ * Syntaxe distincte de query_string, et jamais refusée par Elasticsearch : un caractère en trop est ignoré.
+ *   +  ET      |  OU      -mot  négation      "…"  phrase      mot*  préfixe      mot~N  flou      ( )  priorité
+ * Les opérateurs s’appliquent de gauche à droite, sans priorité entre eux : a | b + c vaut (a OU b) ET c.
+ * Sans opérateur, deux termes sont reliés par l’opérateur par défaut. Une négation forme une clause à part
+ * entière : avec OU par défaut, « a -b » vaut a OU (NON b).
+ */
+function simpleQueryParse(qs, defaultOp) {
+  const text = String(qs);
+  const defOp = String(defaultOp || 'OR').toUpperCase() === 'AND' ? 'and' : 'or';
+  const isSpace = c => c === ' ' || c === '\t' || c === '\n' || c === '\r';
+  const endsToken = c => c === '"' || c === '|' || c === '+' || c === '(' || c === ')' || isSpace(c);
+
+  function parse(from, to) {
+    let i = from;
+    let top = null; let pending = null; let previous = null; let negations = 0;
+    function add(branch) {
+      if (negations % 2 === 1) branch = { op: 'not', a: [branch] };
+      negations = 0;
+      if (top === null) { top = branch; pending = null; return; }
+      const op = pending || defOp;
+      if (previous !== op) top = { op, a: [top] };
+      top.a.push(branch);
+      previous = op; pending = null;
+    }
+    while (i < to) {
+      const c = text[i];
+      if (c === '(') {
+        // Cherche la parenthèse fermante correspondante, hors des phrases
+        let depth = 1; let j = i + 1; let inPhrase = false;
+        for (; j < to && depth > 0; j++) {
+          if (text[j] === '"') inPhrase = !inPhrase;
+          else if (!inPhrase && text[j] === '(') depth++;
+          else if (!inPhrase && text[j] === ')') depth--;
+        }
+        if (depth > 0) { i++; negations = 0; continue; }
+        const sub = parse(i + 1, j - 1);
+        i = j;
+        if (sub) add(sub); else negations = 0;
+        continue;
+      }
+      if (c === ')') { i++; negations = 0; continue; }
+      if (c === '"') {
+        const end = text.indexOf('"', i + 1);
+        if (end < 0 || end >= to) { i++; negations = 0; continue; }
+        const phrase = text.slice(i + 1, end);
+        i = end + 1;
+        if (text[i] === '~') { i++; while (i < to && /\d/.test(text[i])) i++; }
+        if (phrase.trim()) add({ op: 'leaf', field: null, tok: { t: 'phrase', v: phrase } }); else negations = 0;
+        continue;
+      }
+      if (c === '+') { if (pending === null && top !== null) pending = 'and'; i++; negations = 0; continue; }
+      if (c === '|') { if (pending === null && top !== null) pending = 'or'; i++; negations = 0; continue; }
+      if (c === '-') { negations++; i++; continue; }
+      if (isSpace(c)) { i++; negations = 0; continue; }
+      let word = '';
+      while (i < to) {
+        if (text[i] === '\\' && i + 1 < to) { word += text[i + 1]; i += 2; continue; }
+        if (endsToken(text[i])) break;
+        word += text[i++];
+      }
+      const fuzzy = /^(.+)~(\d*)$/.exec(word);
+      if (fuzzy) add({ op: 'leaf', field: null, tok: { t: 'fuzzy', v: fuzzy[1], n: fuzzy[2] === '' ? null : +fuzzy[2] } });
+      else if (word.length > 1 && word.endsWith('*')) add({ op: 'leaf', field: null, tok: { t: 'prefix', v: word.slice(0, -1) } });
+      else if (word) add({ op: 'leaf', field: null, tok: { t: 'term', v: word } });
+    }
+    return top;
+  }
+  return parse(0, text.length);
 }
 
 
