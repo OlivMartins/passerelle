@@ -148,7 +148,7 @@ Passerelle signale aussi que `heure` gagnerait à être une colonne matérialis�
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/remarques-dark.png">
-  <img src="docs/assets/remarques-light.png" width="100%" alt="Onglet Remarques : suggestions d’optimisation avec le DDL ClickHouse correspondant">
+  <img src="docs/assets/remarques-light.png" width="100%" alt="Onglet Remarques : points à vérifier et suggestions d’optimisation avec le DDL ClickHouse correspondant">
 </picture>
 
 </td>
