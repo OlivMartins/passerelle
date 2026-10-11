@@ -130,6 +130,10 @@ for (const q of ['status:500) AND service:api', 'status:(500', '(status:500', 's
 // Les secrets passent par des variables d’environnement, jamais par la configuration générée
 const ls = E.translateLogstash(rd('examples/logstash/routage.conf'), E.DEFAULT_CONFIG);
 check(ls.yaml.includes("'${KAFKA_PASSWORD}'") && ls.env.includes('KAFKA_PASSWORD'), 'routage.conf : identifiants Kafka référencés par variable d’environnement');
+// Le VRL de préparation suppose le namespace de logs : chaque source doit le déclarer, Kafka ou non
+const everyInput = 'input { kafka { topics => ["t"] } stdin { } file { path => "/var/log/app.log" } tcp { port => 5000 } udp { port => 5001 } http { port => 8080 } beats { port => 5044 } generator { } } output { stdout { } }';
+const namespaced = cfg => Object.values(E.translateLogstash(everyInput, cfg).config.sources).filter(s => s.log_namespace === true).length;
+check(namespaced(E.DEFAULT_CONFIG) === 8 && namespaced(E.mergeConfig(E.DEFAULT_CONFIG, { vector: { log_namespace: false } })) === 0, 'entrées : chaque source déclare le namespace de logs que suppose le VRL généré');
 
 process.stdout.write(failures ? `\n${failures} échec(s)\n` : '\nTous les tests passent.\n');
 process.exit(failures ? 1 : 0);

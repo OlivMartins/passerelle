@@ -633,6 +633,8 @@ function buildSource(v, st, cfg, idx, used) {
     if (!map[st.name]) { v.stats.ko++; v.note('err', `Entrée ${st.name} non traduite (ligne ${st.line})`, 'Aucune source Vector équivalente n’a été choisie automatiquement.'); return null; }
     src = map[st.name](); src.__label = st.name; src.__detail = src.type; src.__plain = !/json/.test(codecOf(s.codec) || '');
     if (/json/.test(codecOf(s.codec) || '')) src.decoding = { codec: 'json' };
+    // Le VRL de préparation suppose le namespace de logs, quelle que soit la source
+    if (v.ns) src.log_namespace = true;
     v.stats.ok++;
     v.note('info', `Entrée ${st.name}`, `Traduite en source ${src.type}. Le sujet de la migration étant Kafka, vérifiez les options réseau.`);
   }
