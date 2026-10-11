@@ -581,12 +581,24 @@ class VrlGen {
     this.common(s); this.ok();
   }
   f_split(s) {
-    const x = this.path(s.field || 'message'); const term = s.terminator !== undefined ? s.terminator : '\n';
-    if (this.tget(x) === 'str') this.assign(x, `split(${x}, ${vq(term)})`, 'arr');
-    else { this.open(`if is_string(${x})`); this.assign(x, `split(string!(${x}), ${vq(term)})`); this.close(); this.tset(x, 'any'); }
-    if (s.target) this.approx('split target', 'L’option target n’est pas reprise : chaque élément remplace le champ d’origine.');
+    const x = this.path(s.field || 'message'); const tgt = s.target ? this.path(s.target) : x;
+    const term = s.terminator !== undefined ? s.terminator : '\n';
+    // Comme Logstash : une chaîne est découpée, sauf si elle ne donne qu’un élément (rien ne se passe alors) ; un tableau
+    // est pris tel quel ; toute autre valeur est un échec. Un élément vide ou nul ne donne pas d’événement.
+    this.emit('parts = null');
+    this.open(`if is_string(${x})`);
+    this.emit(`parts = split!(${x}, ${vq(term)})`);
+    this.emit(`if length(parts) == 1 && ${x} != "" { parts = null }`);
+    this.close(`} else if is_array(${x}) {`); this.ind++;
+    this.emit(`parts = ${x}`);
+    this.close('} else {'); this.ind++;
+    this.failTags(['_split_type_failure']);
+    this.close();
+    this.open('if parts != null');
+    this.emit(`${tgt} = filter(array!(parts)) -> |_index, value| { value != null && value != "" }`);
     this.common(s);
-    this.emit(`. = unnest(${x}) ?? [.]`);
+    this.emit(`. = unnest!(${tgt})`);
+    this.close();
     this.treset(); this.types.delete('.'); this.splitDone = true;
     if (this.depth > 0) this.v.note('warn', 'split dans une condition', 'Après unnest, la racine de l’événement devient un tableau : placez les filtres suivants dans une étape séparée.');
     this.v.note('info', 'split → unnest', 'unnest() crée un événement par élément du tableau, comme le filtre split.');

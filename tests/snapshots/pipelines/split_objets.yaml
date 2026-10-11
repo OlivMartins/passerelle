@@ -6,7 +6,16 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # split
+      parts = null
       if is_string(.articles) {
-        .articles = split(string!(.articles), "\n")
+        parts = split!(.articles, "\n")
+        if length(parts) == 1 && .articles != "" { parts = null }
+      } else if is_array(.articles) {
+        parts = .articles
+      } else {
+        .tags = compact(flatten([.tags, "_split_type_failure"]))
       }
-      . = unnest(.articles) ?? [.]
+      if parts != null {
+        .articles = filter(array!(parts)) -> |_index, value| { value != null && value != "" }
+        . = unnest!(.articles)
+      }

@@ -68,10 +68,19 @@ transforms:
     inputs: [json]
     source: |
       # split
+      parts = null
       if is_string(.body.items) {
-        .body.items = split(string!(.body.items), "\n")
+        parts = split!(.body.items, "\n")
+        if length(parts) == 1 && .body.items != "" { parts = null }
+      } else if is_array(.body.items) {
+        parts = .body.items
+      } else {
+        .tags = compact(flatten([.tags, "_split_type_failure"]))
       }
-      . = unnest(.body.items) ?? [.]
+      if parts != null {
+        .body.items = filter(array!(parts)) -> |_index, value| { value != null && value != "" }
+        . = unnest!(.body.items)
+      }
   mutate_2:
     type: remap
     inputs: [split]

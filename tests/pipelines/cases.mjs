@@ -236,9 +236,13 @@ export const CASES = [
   { id: 'split_imbrique', filter: 'split { field => "[corps][articles]" }', events: [{ corps: { articles: ['a', 'b'], client: 'x' } }] },
   { id: 'split_chaine', filter: 'split { field => "liste" terminator => "," }', events: [{ liste: 'a,b,c' }] },
   { id: 'split_lignes', filter: 'split { }', events: [{ message: 'ligne 1\nligne 2' }] },
-  { id: 'split_cible', filter: 'split { field => "articles" target => "article" }', events: [{ articles: ['a', 'b'] }], known: 'target n’est pas appliqué : l’élément remplace le tableau au lieu d’aller dans le champ cible' },
+  { id: 'split_cible', filter: 'split { field => "articles" target => "article" }', events: [{ articles: ['a', 'b'] }, { articles: 'x\ny' }, { articles: 'seul' }] },
+  // Un élément vide ou nul ne donne pas d’événement
+  { id: 'split_elements_vides', filter: 'split { field => "articles" }', events: [{ n: 1, articles: ['a', '', null, 'b'] }, { n: 2, articles: ['', null] }] },
+  // Une chaîne qui ne donne qu’un élément n’est pas touchée, et add_tag ne lui est pas appliqué ; une chaîne vide ne donne aucun événement
+  { id: 'split_chaine_seule', filter: 'split { field => "liste" terminator => "," add_tag => ["decoupe"] }', events: [{ liste: 'seul' }, { liste: 'a,b' }, { liste: 'a,,b,' }, { liste: '' }] },
   { id: 'split_tableau_vide', filter: 'split { field => "articles" }', events: [{ n: 1, articles: [] }] },
-  { id: 'split_non_decoupable', filter: 'split { field => "articles" }', events: [{ n: 1 }, { n: 2, articles: 42 }, { n: 3, articles: null }], known: 'quand le champ est absent, nul, ou ni une chaîne ni un tableau, Logstash pose _split_type_failure ; la traduction ne pose rien' },
+  { id: 'split_non_decoupable', filter: 'split { field => "articles" }', events: [{ n: 1 }, { n: 2, articles: 42 }, { n: 3, articles: null }] },
   { id: 'split_sous_condition', filter: 'if [type] == "lot" { split { field => "articles" } }', events: [{ type: 'lot', articles: ['a', 'b'] }, { type: 'unitaire', articles: ['c', 'd'] }] },
 
   // drop
