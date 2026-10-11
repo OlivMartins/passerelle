@@ -7,10 +7,8 @@ transforms:
     source: |
       # json
       parsed, err = parse_json(.charge)
-      if err == null {
-        if is_object(parsed) {
-          . = merge(object!(.), object!(parsed))
-        }
+      if err == null && is_object(parsed) {
+        . = merge(object!(.), object!(parsed))
       } else if .charge != null {
         .tags = compact(flatten([.tags, "_jsonparsefailure"]))
       }

@@ -188,16 +188,18 @@ export const CASES = [
   // json
   { id: 'json_simple', filter: 'json { source => "message" }', lines: ['{"a":1,"b":{"c":"deux"},"d":[1,2]}', '{"message":"remplacé"}'] },
   { id: 'json_invalide', filter: 'json { source => "message" }', lines: ['pas du json', '{"a":'] },
-  { id: 'json_racine_non_objet', filter: 'json { source => "message" }', lines: ['[1,2,3]', '42', '"texte"', 'null'], known: 'un JSON qui n’est pas un objet ne peut pas être posé à la racine : Logstash pose _jsonparsefailure, la traduction ne dit rien' },
+  // Un JSON qui n’est pas un objet ne peut pas être posé à la racine : c’est un échec, même avec skip_on_invalid_json
+  { id: 'json_racine_non_objet', filter: 'json { source => "message" }', lines: ['[1,2,3]', '42', '"texte"', 'null'] },
+  { id: 'json_racine_non_objet_ignore', filter: 'json { source => "message" skip_on_invalid_json => true }', lines: ['[1,2]', '42'] },
   { id: 'json_target', filter: 'json { source => "message" target => "doc" }', lines: ['{"a":1}', '[1,2]', '42'] },
   { id: 'json_champ_existant', filter: 'json { source => "charge" }', events: [{ charge: '{"a":1,"b":{"c":2}}', a: 'ancien', b: { d: 3 } }] },
-  { id: 'json_retire_la_source', filter: 'json { source => "message" remove_field => ["message"] }', lines: ['{"a":1}', 'pas du json'] },
+  { id: 'json_retire_la_source', filter: 'json { source => "message" remove_field => ["message"] }', lines: ['{"a":1}', 'pas du json', '[1,2]'] },
   { id: 'json_invalide_ignore', filter: 'json { source => "message" skip_on_invalid_json => true }', lines: ['{"a":1}', 'pas du json'] },
   { id: 'json_source_non_chaine', filter: 'json { source => "charge" }', events: [{ charge: 42 }, { charge: { deja: 'objet' } }] },
   { id: 'json_source_absente', filter: 'json { source => "charge" }', events: [{ n: 1 }, { charge: null }] },
   { id: 'json_horodatage', filter: 'json { source => "message" }', lines: ['{"@timestamp":"2026-03-10T08:15:30.123Z","a":1}'] },
   { id: 'json_horodatage_invalide', filter: 'json { source => "message" }', lines: ['{"@timestamp":"pas une date","a":2}'], known: 'Logstash garde l’horodatage d’ingestion, range la valeur dans _@timestamp et pose _timestampparsefailure ; la traduction écrit la chaîne dans @timestamp' },
-  { id: 'json_etiquette_echec', filter: 'json { source => "message" tag_on_failure => ["json_illisible"] }', lines: ['pas du json'] },
+  { id: 'json_etiquette_echec', filter: 'json { source => "message" tag_on_failure => ["json_illisible"] }', lines: ['pas du json', '[1,2]'] },
 
   // kv
   { id: 'kv_simple', filter: 'kv { }', lines: ['a=1 b=deux c="trois quatre"', 'a=1 a=2'] },

@@ -454,14 +454,15 @@ class VrlGen {
   }
   f_json(s) {
     const src = this.path(s.source || 'message'); const there = this.present(src);
+    const tags = s.tag_on_failure !== undefined ? lsList(s.tag_on_failure) : ['_jsonparsefailure'];
     this.emit(`parsed, err = parse_json(${src})`);
-    this.open('if err == null');
-    if (s.target) this.assign(this.path(s.target), 'parsed');
-    else { this.open('if is_object(parsed)'); this.mergeRoot('object!(parsed)'); this.close(); this.treset(); }
+    // Sans target, seul un objet peut être posé à la racine : pour Logstash, toute autre valeur JSON est un échec
+    if (s.target) { this.open('if err == null'); this.assign(this.path(s.target), 'parsed'); }
+    else { this.open('if err == null && is_object(parsed)'); this.mergeRoot('object!(parsed)'); }
     this.common(s);
-    const tags = s.skip_on_invalid_json ? [] : s.tag_on_failure !== undefined ? lsList(s.tag_on_failure) : ['_jsonparsefailure'];
-    // Champ source absent ou nul : Logstash ne signale pas d’échec
-    if (tags.length) { this.close(there ? '} else {' : `} else if ${src} != null {`); this.ind++; this.failTags(tags); }
+    // Un JSON illisible n’est signalé ni avec skip_on_invalid_json, ni quand le champ source est absent ou nul
+    const when = !s.skip_on_invalid_json ? (there ? '' : `${src} != null`) : s.target ? null : 'err == null';
+    if (tags.length && when !== null) { this.close(when ? `} else if ${when} {` : '} else {'); this.ind++; this.failTags(tags); }
     this.close(); this.ok();
   }
   f_kv(s) {

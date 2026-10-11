@@ -8,10 +8,8 @@ transforms:
       if .t == "x" {
         # json
         parsed, err = parse_json(.message)
-        if err == null {
-          if is_object(parsed) {
-            . = merge(object!(.), object!(parsed))
-          }
+        if err == null && is_object(parsed) {
+          . = merge(object!(.), object!(parsed))
         } else if .message != null {
           .tags = compact(flatten([.tags, "_jsonparsefailure"]))
         }
