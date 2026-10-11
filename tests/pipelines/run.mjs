@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CASES } from './cases.mjs';
-import { ECS_MODES, inputOf, translatedPipeline, logstashPipeline } from './transport.mjs';
+import { ECS_MODES, inputOf, outputsOf, outputFile, translatedPipeline, logstashPipeline } from './transport.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
@@ -78,22 +78,25 @@ function launch(script, dir) {
 
 const eventsOf = file => (existsSync(file) ? readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []);
 
-function logstashResult(id, mode, log) {
-  if (new RegExp(`Failed to execute action.*pipeline_id:${id}__${mode}\\b`).test(log)) return { error: 'pipeline refusé par Logstash' };
-  return { events: eventsOf(join(LS, 'out', `${id}.${mode}.ndjson`)) };
+// Événements de chaque sortie du cas, par nom de sortie
+const outputsFrom = (dir, c, prefix) => Object.fromEntries(outputsOf(c).map(name => [name, eventsOf(join(dir, 'out', `${outputFile(prefix, name)}.ndjson`))]));
+
+function logstashResult(c, mode, log) {
+  if (new RegExp(`Failed to execute action.*pipeline_id:${c.id}__${mode}\\b`).test(log)) return { error: 'pipeline refusé par Logstash' };
+  return { outputs: outputsFrom(LS, c, `${c.id}.${mode}`) };
 }
 
-function vectorResult(id, t, codes) {
+function vectorResult(c, t, codes) {
   if (t.error || t.empty) return { error: `traduction impossible : ${t.error || 'résultat vide'}` };
-  const code = codes.get(id);
+  const code = codes.get(c.id);
   if (code === undefined) return { error: 'configuration non jouée' };
   if (code !== 0) {
-    const log = readFileSync(join(VEC, 'log', `${id}.log`), 'utf8');
+    const log = readFileSync(join(VEC, 'log', `${c.id}.log`), 'utf8');
     const where = /(?:Transform|Source|Sink) "[^"]+"/.exec(log);
     const what = /^error\[E\d+\]: .*$/m.exec(log);
     return { error: `configuration refusée par Vector (code ${code})${where ? `, ${where[0]}` : ''}${what ? ` : ${what[0]}` : ''}` };
   }
-  return { events: eventsOf(join(VEC, 'out', `${id}.ndjson`)) };
+  return { outputs: outputsFrom(VEC, c, c.id) };
 }
 
 /* ---------- Comparaison ---------- */
@@ -103,12 +106,14 @@ function vectorResult(id, t, codes) {
  *   original     en mode v8, les codecs de Logstash ajoutent [event][original] ; la traduction ne le pose pas
  *   horodatage   un @timestamp posé à l’ingestion ne peut pas être égal des deux côtés : il est reconnu à ce
  *                qu’il tombe pendant l’exécution du banc, et sa précision n’est pas comparée non plus
+ * Un UUID, tiré au hasard par chaque moteur, n’est comparé que par sa forme.
  */
 const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 const canon = v => JSON.stringify(v, (k, x) => (isObj(x) ? Object.fromEntries(Object.keys(x).sort().map(key => [key, x[key]])) : x));
+const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 function normalize(event, c, window) {
-  const e = structuredClone(event);
+  const e = JSON.parse(JSON.stringify(event), (k, v) => (typeof v === 'string' && UUID.test(v) ? '<uuid>' : v));
   const exact = c.exact || [];
   if (!exact.includes('original') && isObj(e.event)) {
     delete e.event.original;
@@ -147,18 +152,21 @@ const short = s => (s.length > 120 ? s.slice(0, 117) + '…' : s);
 function compare(c, l, v, window) {
   if (l.error) return { verdict: 'L✗', detail: l.error };
   if (v.error) return { verdict: 'V✗', detail: v.error };
-  const ln = l.events.map(e => normalize(e, c, window)); const vn = v.events.map(e => normalize(e, c, window));
   const diffs = [];
-  if (ln.length !== vn.length) diffs.push(`${ln.length} événement(s) côté Logstash, ${vn.length} côté Vector`);
-  for (const gap of align(ln.map(canon), vn.map(canon))) {
-    gap.a.forEach((i, k) => {
-      if (k >= gap.b.length) { diffs.push(`[événement ${i + 1}] sans équivalent côté Vector : ${short(canon(ln[i]))}`); return; }
-      const a = leaves(ln[i], '', new Map()); const b = leaves(vn[gap.b[k]], '', new Map());
-      for (const key of [...new Set([...a.keys(), ...b.keys()])].sort()) {
-        if (a.get(key) !== b.get(key)) diffs.push(`[événement ${i + 1}] ${key} : Logstash ${a.has(key) ? short(a.get(key)) : 'absent'} / Vector ${b.has(key) ? short(b.get(key)) : 'absent'}`);
-      }
-    });
-    for (const j of gap.b.slice(gap.a.length)) diffs.push(`[Vector seul] ${short(canon(vn[j]))}`);
+  for (const name of outputsOf(c)) {
+    const where = name ? `[sortie ${name}] ` : '';
+    const ln = l.outputs[name].map(e => normalize(e, c, window)); const vn = v.outputs[name].map(e => normalize(e, c, window));
+    if (ln.length !== vn.length) diffs.push(`${where}${ln.length} événement(s) côté Logstash, ${vn.length} côté Vector`);
+    for (const gap of align(ln.map(canon), vn.map(canon))) {
+      gap.a.forEach((i, k) => {
+        if (k >= gap.b.length) { diffs.push(`${where}[événement ${i + 1}] sans équivalent côté Vector : ${short(canon(ln[i]))}`); return; }
+        const a = leaves(ln[i], '', new Map()); const b = leaves(vn[gap.b[k]], '', new Map());
+        for (const key of [...new Set([...a.keys(), ...b.keys()])].sort()) {
+          if (a.get(key) !== b.get(key)) diffs.push(`${where}[événement ${i + 1}] ${key} : Logstash ${a.has(key) ? short(a.get(key)) : 'absent'} / Vector ${b.has(key) ? short(b.get(key)) : 'absent'}`);
+        }
+      });
+      for (const j of gap.b.slice(gap.a.length)) diffs.push(`${where}[Vector seul] ${short(canon(vn[j]))}`);
+    }
   }
   return { verdict: diffs.length ? '≠' : '=', detail: diffs.join(' || ') };
 }
@@ -192,7 +200,7 @@ for (const mode of modes) {
   console.log(`--- Logstash en ecs_compatibility ${mode}`);
   for (const c of cases) {
     const t = translations.get(c.id);
-    const res = compare(c, logstashResult(c.id, mode, logstash.text), vectorResult(c.id, t, codes), window);
+    const res = compare(c, logstashResult(c, mode, logstash.text), vectorResult(c, t, codes), window);
     const known = knownFor(c, mode);
     const flagged = !!((t.stats && (t.stats.approx || t.stats.ko)) || (t.notes || []).some(n => n.level === 'warn' || n.level === 'err'));
     let status;

@@ -8,6 +8,9 @@
  *   events   événements d’entrée, un objet JSON par ligne (codec json)
  *   lines    ou lignes brutes, que les deux moteurs rangent dans le champ message (codec plain)
  *   codec    'json' avec lines : les lignes brutes passent par le codec JSON (pour y glisser une ligne invalide)
+ *   input    options de l’entrée, recopiées des deux côtés (add_field, tags…)
+ *   output   sorties du cas quand il en a plusieurs, pour éprouver le routage :
+ *              o => `if [niveau] == "erreur" { ${o('erreurs')} } else { ${o('autres')} }`
  *   known    écart connu, avec sa raison. Le cas doit alors diverger : s’il devient identique,
  *            le banc échoue pour rappeler de retirer la mention. Formes acceptées :
  *              'raison'            dans les deux modes de compatibilité ECS de Logstash
@@ -16,9 +19,12 @@
  *
  * Un cas ne porte qu’un comportement : quand une opération diverge sur un type d’entrée, ce type a son propre cas.
  */
+import { example } from './transport.mjs';
+
 const convert = type => `mutate { convert => { "n" => "${type}" } }`;
 // Marque l’événement selon le résultat d’une condition
 const si = condition => `if ${condition} { mutate { add_tag => ["oui"] } } else { mutate { add_tag => ["non"] } }`;
+const DICTIONNAIRE = 'dictionary => { "200" => "OK" "404" => "Introuvable" }';
 
 export const CASES = [
   // Sans filtre : ce que chaque moteur fait d’un événement qu’il ne transforme pas
@@ -200,4 +206,76 @@ export const CASES = [
   { id: 'xml_sans_tableaux', filter: 'xml { source => "message" target => "doc" force_array => false }', lines: ['<a><b>1</b><c x="2">3</c></a>'], known: 'même sans tableaux forcés, la racine, les attributs, le texte et les nombres ne sont pas rendus comme par Logstash' },
   { id: 'xml_invalide', filter: 'xml { source => "message" target => "doc" }', lines: ['<a><b>1</a>', 'pas du xml'] },
   { id: 'xml_xpath', filter: 'xml { source => "message" store_xml => false xpath => { "/a/b/text()" => "b" } }', lines: ['<a><b>1</b><b>2</b></a>'], known: 'xpath n’est pas appliqué : le document entier est rangé sous xml' },
+
+  // split
+  { id: 'split_tableau', filter: 'split { field => "articles" }', events: [{ commande: 1, articles: ['a', 'b', 'c'] }, { commande: 2, articles: ['seul'] }] },
+  { id: 'split_objets', filter: 'split { field => "articles" }', events: [{ commande: 1, articles: [{ ref: 'a', q: 1 }, { ref: 'b', q: 2 }] }] },
+  { id: 'split_imbrique', filter: 'split { field => "[corps][articles]" }', events: [{ corps: { articles: ['a', 'b'], client: 'x' } }] },
+  { id: 'split_chaine', filter: 'split { field => "liste" terminator => "," }', events: [{ liste: 'a,b,c' }] },
+  { id: 'split_lignes', filter: 'split { }', events: [{ message: 'ligne 1\nligne 2' }] },
+  { id: 'split_cible', filter: 'split { field => "articles" target => "article" }', events: [{ articles: ['a', 'b'] }], known: 'target n’est pas appliqué : l’élément remplace le tableau au lieu d’aller dans le champ cible' },
+  { id: 'split_tableau_vide', filter: 'split { field => "articles" }', events: [{ n: 1, articles: [] }] },
+  { id: 'split_non_decoupable', filter: 'split { field => "articles" }', events: [{ n: 1 }, { n: 2, articles: 42 }, { n: 3, articles: null }], known: 'quand le champ est absent, nul, ou ni une chaîne ni un tableau, Logstash pose _split_type_failure ; la traduction ne pose rien' },
+  { id: 'split_sous_condition', filter: 'if [type] == "lot" { split { field => "articles" } }', events: [{ type: 'lot', articles: ['a', 'b'] }, { type: 'unitaire', articles: ['c', 'd'] }] },
+
+  // drop
+  { id: 'drop_conditionnel', filter: 'if [niveau] == "debug" { drop { } }', events: [{ niveau: 'info', n: 1 }, { niveau: 'debug', n: 2 }, { niveau: 'erreur', n: 3 }] },
+  { id: 'drop_tout', filter: 'drop { }', events: [{ n: 1 }, { n: 2 }] },
+  { id: 'drop_puis_suite', filter: 'if [n] == 2 { drop { } }\nmutate { add_tag => ["garde"] }', events: [{ n: 1 }, { n: 2 }, { n: 3 }] },
+
+  // translate
+  { id: 'translate_dictionnaire', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} }`, events: [{ code: '200' }, { code: '404' }, { code: '500' }, { n: 1 }] },
+  { id: 'translate_valeur_de_repli', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} fallback => "inconnu" }`, events: [{ code: '200' }, { code: '500' }] },
+  { id: 'translate_repli_source_absente', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} fallback => "inconnu" }`, events: [{ n: 1 }], known: 'la valeur de repli est posée même quand le champ source est absent ; Logstash ne fait rien' },
+  { id: 'translate_nombre', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} }`, events: [{ code: 200 }] },
+  { id: 'translate_cible_existante', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} }`, events: [{ code: '200', libelle: 'déjà' }], known: 'la cible qui existe déjà est écrasée ; Logstash la garde, sauf avec override' },
+  { id: 'translate_override', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} override => true }`, events: [{ code: '200', libelle: 'déjà' }] },
+  { id: 'translate_sans_cible', filter: `translate { source => "code" ${DICTIONNAIRE} }`, events: [{ code: '200' }], known: { v8: 'sans target, Logstash en mode ECS écrit sur place, dans le champ source ; la traduction écrit dans translation, comme le mode historique' } },
+
+  // fingerprint
+  { id: 'fingerprint_sha256', filter: 'fingerprint { source => "message" target => "empreinte" method => "SHA256" }', lines: ['abc', 'été'] },
+  { id: 'fingerprint_sha1', filter: 'fingerprint { source => "message" target => "empreinte" method => "SHA1" }', lines: ['abc'] },
+  { id: 'fingerprint_md5', filter: 'fingerprint { source => "message" target => "empreinte" method => "MD5" }', lines: ['abc'] },
+  { id: 'fingerprint_murmur3', filter: 'fingerprint { source => "message" target => "empreinte" method => "MURMUR3" }', lines: ['abc'], known: 'MURMUR3 : Logstash donne un entier sur 32 bits, la traduction une chaîne tirée d’un autre hachage' },
+  { id: 'fingerprint_sans_cible', filter: 'fingerprint { source => "message" method => "SHA256" }', lines: ['abc'], known: { v8: 'sans target, Logstash en mode ECS écrit dans [event][hash] ; la traduction écrit dans fingerprint, comme le mode historique' } },
+  { id: 'fingerprint_nombre', filter: 'fingerprint { source => "n" target => "empreinte" method => "SHA256" }', events: [{ n: 42 }, { n: 1.5 }] },
+  { id: 'fingerprint_source_absente', filter: 'fingerprint { source => "absent" target => "empreinte" method => "SHA256" }', events: [{ n: 1 }], known: 'quand le champ source est absent, la traduction écrit l’empreinte d’une chaîne vide ; Logstash ne fait rien' },
+  { id: 'fingerprint_champs_concatenes', filter: 'fingerprint { source => ["a", "b"] target => "empreinte" method => "SHA256" concatenate_sources => true }', events: [{ a: 'x', b: 'y' }], known: 'avec concatenate_sources, la chaîne hachée n’est pas celle que compose Logstash' },
+  { id: 'fingerprint_champs_separes', filter: 'fingerprint { source => ["a", "b"] target => "empreinte" method => "SHA256" }', events: [{ a: 'x', b: 'y' }], known: 'sans concatenate_sources, Logstash garde l’empreinte du dernier champ ; la traduction hache les champs réunis' },
+
+  // uuid
+  { id: 'uuid_cible', filter: 'uuid { target => "id" }', events: [{ n: 1 }] },
+  { id: 'uuid_cible_existante', filter: 'uuid { target => "id" }', events: [{ id: 'déjà' }] },
+  { id: 'uuid_overwrite', filter: 'uuid { target => "id" overwrite => true }', events: [{ id: 'déjà' }] },
+
+  // urldecode
+  { id: 'urldecode_champ', filter: 'urldecode { field => "url" }', events: [{ url: 'a%20b%2Fc%C3%A9' }, { url: 'a+b' }, { url: '100%' }, { n: 1 }] },
+  { id: 'urldecode_octet_invalide', filter: 'urldecode { field => "url" }', events: [{ url: '%E9' }], known: 'un octet qui n’est pas de l’UTF-8 est écrit « \\xE9 » par Logstash, « � » par la traduction' },
+  { id: 'urldecode_tous_les_champs', filter: 'urldecode { all_fields => true }', events: [{ a: 'x%20y', b: 'z%21' }], known: 'all_fields n’est pas appliqué : aucun champ n’est décodé, et message est créé à null' },
+
+  // truncate
+  { id: 'truncate_octets', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: 'abcdefgh' }, { a: 'abc' }, { a: 12345678 }] },
+  { id: 'truncate_accents', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: 'éééé' }], known: 'length_bytes compte des octets : Logstash coupe « éééé » en « éé », la traduction laisse la valeur entière' },
+  { id: 'truncate_tableau', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: ['abcdefgh', 'x'] }], known: 'un tableau n’est pas tronqué élément par élément' },
+
+  // cidr
+  { id: 'cidr_reseau', filter: `cidr { address => ["%{ip}"] network => ["10.0.0.0/8", "192.168.0.0/16"] add_tag => ["interne"] }`, events: [{ ip: '10.1.2.3' }, { ip: '192.168.5.5' }, { ip: '8.8.8.8' }] },
+  { id: 'cidr_adresse_invalide', filter: `cidr { address => ["%{ip}"] network => ["10.0.0.0/8"] add_tag => ["interne"] }`, events: [{ ip: 'pas une adresse' }, { n: 1 }] },
+  { id: 'cidr_ipv6', filter: `cidr { address => ["%{ip}"] network => ["fd00::/8"] add_tag => ["interne"] }`, events: [{ ip: 'fd12::1' }, { ip: '2001:db8::1' }] },
+
+  // useragent
+  { id: 'useragent_navigateur', filter: 'useragent { source => "ua" target => "navigateur" }', events: [{ ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }, { ua: 'curl/8.4.0' }], known: 'les champs produits n’ont ni les mêmes noms ni les mêmes valeurs : name, os, major… pour Logstash (ou leurs équivalents ECS), browser.family, os.family, device.category pour la traduction' },
+  { id: 'useragent_source_absente', filter: 'useragent { source => "ua" target => "navigateur" }', events: [{ n: 1 }] },
+
+  // Sorties : le routage par conditions
+  { id: 'sortie_selon_condition', filter: '', output: o => `if [niveau] == "erreur" { ${o('erreurs')} } else { ${o('autres')} }`, events: [{ niveau: 'erreur', n: 1 }, { niveau: 'info', n: 2 }, { n: 3 }] },
+  { id: 'sortie_sans_sinon', filter: '', output: o => `if [niveau] == "erreur" { ${o('erreurs')} }`, events: [{ niveau: 'erreur', n: 1 }, { niveau: 'info', n: 2 }] },
+  { id: 'sortie_double', filter: '', output: o => `${o('une')}\n${o('deux')}`, events: [{ n: 1 }, { n: 2 }] },
+  { id: 'sortie_en_cascade', filter: '', output: o => `if "alerte" in [tags] { ${o('alertes')} } else if [region] == "EMEA" { ${o('emea')} } else { ${o('autres')} }`, events: [{ tags: ['alerte'], region: 'EMEA' }, { region: 'EMEA' }, { region: 'APAC' }, { n: 1 }] },
+  { id: 'sortie_commune_et_conditionnelle', filter: '', output: o => `${o('tout')}\nif [niveau] == "erreur" { ${o('erreurs')} }`, events: [{ niveau: 'erreur', n: 1 }, { niveau: 'info', n: 2 }] },
+
+  // Les pipelines d’exemple du dépôt, à leur transport près (voir example dans transport.mjs).
+  // nginx.conf n’est pas joué : son filtre geoip demande la même base de données des deux côtés.
+  { id: 'exemple_batch', ...example('batch.conf'), lines: ['2026-03-10 09:15:30,123 [INFO] billing: {"order":"A1","items":[{"sku":"x","qty":"2"},{"sku":"y","qty":"1"}]}', '2026-07-15 14:00:00,000 [WARN] Api Gateway: {"order":"A2","items":[{"sku":"z","qty":"5"}]}'], known: 'le filtre ruby n’est pas traduit : le champ computed manque' },
+  { id: 'exemple_routage', ...example('routage.conf'), events: [{ level: 'ERROR', env: 'prod', payload: '{"country":"FR","user_id":"u1","extra":"a=1&b=2"}' }, { level: 'INFO', env: 'prod', payload: '{"country":"DE","user_id":"u2","extra":"c=3"}' }, { level: 'INFO', env: 'dev', payload: '{"country":"JP","user_id":"u3","extra":"d=4"}' }, { level: 'DEBUG', env: 'dev', payload: '{"country":"US","user_id":"u4","extra":"e=5"}' }] },
 ];
