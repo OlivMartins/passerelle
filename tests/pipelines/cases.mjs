@@ -87,6 +87,7 @@ export const CASES = [
 
   // mutate applique ses opérations dans un ordre fixe, pas dans celui du pipeline : rename avant uppercase, update avant replace
   { id: 'mutate_ordre_rename_uppercase', filter: 'mutate { uppercase => ["b"] rename => { "a" => "b" } }', events: [{ a: 'x' }] },
+  { id: 'mutate_split_puis_join', filter: 'mutate { replace => { "a" => "x,y" } split => { "a" => "," } join => { "a" => "-" } }', events: [{ n: 1 }], known: 'configuration refusée par Vector (E651) : après replace et split, VRL sait que le champ est un tableau de chaînes, et refuse le repli que le moteur écrit autour de join' },
   { id: 'mutate_ordre_update_replace', filter: 'mutate { replace => { "a" => "R" } update => { "a" => "U" } }', events: [{ a: 'x' }, { b: 1 }] },
 
   // Options communes à tous les filtres
@@ -129,10 +130,16 @@ export const CASES = [
   { id: 'condition_champ_contre_champ', filter: si('[a] == [b]'), events: [{ a: 1, b: 1 }, { a: 1, b: '1' }, { a: 'x', b: 'x' }, { a: 'x' }, { c: 1 }] },
   { id: 'condition_imbriquee', filter: si('[x][y] == "v"'), events: [{ x: { y: 'v' } }, { x: { y: 'w' } }, { x: 'v' }, { z: 1 }] },
 
+  // Plusieurs filtres dans un même bloc if : ils partagent un programme VRL, que Vector doit accepter
+  { id: 'bloc_json_puis_kv', filter: 'if [t] == "x" { json { source => "message" } kv { source => "extra" } }', events: [{ t: 'x', message: '{"a":1}', extra: 'k=v' }, { t: 'y', message: '{"a":1}', extra: 'k=v' }] },
+  { id: 'bloc_add_field_puis_mutate', filter: 'if [t] == "x" { grok { match => { "message" => "%{WORD:w}" } add_field => { "k" => "v" } } mutate { uppercase => ["k"] } }', events: [{ t: 'x', message: 'a' }, { t: 'x', message: '!' }] },
+  { id: 'bloc_remove_field_puis_mutate', filter: 'if [t] == "x" { grok { match => { "message" => "%{IP:ip}" } remove_field => ["message"] } mutate { uppercase => ["message"] } }', events: [{ t: 'x', message: '10.0.0.1' }, { t: 'x', message: 'pas une adresse' }] },
+
   // grok
   { id: 'grok_champs_types', filter: 'grok { match => { "message" => "%{WORD:verb} %{URIPATH:path} %{NUMBER:status:int} %{NUMBER:bytes:int}" } }', lines: ['GET /a 200 12', 'POST /b 500 7', 'ligne sans rapport'] },
   { id: 'grok_types', filter: 'grok { match => { "message" => "%{NUMBER:entier:int} %{NUMBER:flottant:float} %{NUMBER:texte}" } }', lines: ['12 3.5 42', '-7 10 0.5'] },
   { id: 'grok_plusieurs_motifs', filter: 'grok { match => { "message" => ["%{IP:ip} %{WORD:action}", "%{WORD:action} depuis %{IP:ip}"] } }', lines: ['10.0.0.1 connexion', 'connexion depuis 10.0.0.2', 'rien à voir'] },
+  { id: 'grok_plusieurs_champs', filter: 'grok { match => { "message" => "%{WORD:w}" "autre" => "%{WORD:z}" } }', events: [{ message: 'a', autre: 'b' }], known: 'avec plusieurs champs dans match, Logstash s’arrête au premier qui correspond (break_on_match) ; la traduction les applique tous' },
   { id: 'grok_motif_defini', filter: 'grok { pattern_definitions => { "CODE" => "[A-Z]{3}-[0-9]+" } match => { "message" => "%{CODE:code} %{GREEDYDATA:reste}" } }', lines: ['ABC-123 le reste du message', 'abc-1 pas de code'] },
   { id: 'grok_champ_imbrique', filter: 'grok { match => { "message" => "%{IP:[client][ip]} %{NUMBER:[http][status]:int}" } }', lines: ['10.0.0.1 200'] },
   { id: 'grok_capture_anonyme', filter: 'grok { match => { "message" => "%{IP} %{WORD:action} (?<code>[A-Z]+)" } }', lines: ['10.0.0.1 connexion OK'] },

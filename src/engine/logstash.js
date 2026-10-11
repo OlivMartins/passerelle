@@ -174,15 +174,31 @@ function joda2strf(f) {
 function compName(s) { return String(s).toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '') || 'etape'; }
 // Valeurs qu’une condition « if [champ] » de Logstash tient pour fausses
 const FALSY = '[null, false, "", "false"]';
+// Types connus à la sortie d’un bloc conditionnel : ceux qui sont les mêmes par tous les chemins
+function commonTypes(paths) {
+  const merged = new Map();
+  for (const k of new Set(paths.flatMap(m => [...m.keys()]))) { const vals = paths.map(m => m.get(k) || 'any'); if (vals.every(x => x === vals[0]) && vals[0] !== 'any') merged.set(k, vals[0]); }
+  return merged;
+}
 
 class VrlGen {
-  constructor(v) { this.v = v; this.lines = []; this.ind = 0; this.types = new Map(v.ns ? [] : [['.', 'obj']]); this.usedAbort = false; this.plugins = []; this.todo = false; this.depth = 0; }
+  constructor(v) { this.v = v; this.lines = []; this.ind = 0; this.types = new Map(v.ns ? [] : [['.', 'obj']]); this.blocks = []; this.usedAbort = false; this.plugins = []; this.todo = false; this.depth = 0; }
   root() { return this.types.get('.') === 'obj' ? '.' : 'object!(.)'; }
   mergeRoot(x) { this.emit(`. = merge(${this.root()}, ${x})`); this.treset(); this.types.set('.', 'obj'); }
   emit(s) { this.lines.push('  '.repeat(this.ind) + s); }
   comment(s) { this.emit('# ' + s); }
-  open(s) { this.emit(s + ' {'); this.ind++; }
-  close(s) { this.ind--; this.emit(s || '}'); }
+  open(s) { this.emit(s + ' {'); this.ind++; this.blocks.push({ before: new Map(this.types), ends: [], total: false }); }
+  // Ferme un bloc, ou passe à sa branche suivante (« } else { », « } else if … { »). Un type posé dans une branche
+  // n’est plus connu après le bloc, sauf s’il est le même par tous les chemins : VRL le déduit ainsi, et refuse
+  // un appel faillible que le moteur croirait sûr.
+  close(s) {
+    this.ind--; this.emit(s || '}');
+    const b = this.blocks[this.blocks.length - 1]; if (!b) return;
+    b.ends.push(this.types);
+    if (s) { b.total = /else \{$/.test(s); this.types = new Map(b.before); return; }
+    this.blocks.pop();
+    this.types = commonTypes(b.total ? b.ends : b.ends.concat(b.before));
+  }
   code() { return this.lines.join('\n').trim() + '\n'; }
   hasCode() { return this.lines.some(l => l.trim() && !l.trim().startsWith('#')); }
   path(ref) { return vPathOf(fieldSegs(ref), this.v.ns); }
@@ -258,10 +274,7 @@ class VrlGen {
     this.ind--; this.emit('}');
     this.depth--;
     if (!branches.some(b => !b.cond)) results.push(saved);
-    const merged = new Map();
-    const keys = new Set(results.flatMap(m => [...m.keys()]));
-    for (const k of keys) { const vals = results.map(m => m.get(k) || 'any'); if (vals.every(x => x === vals[0]) && vals[0] !== 'any') merged.set(k, vals[0]); }
-    this.types = merged;
+    this.types = commonTypes(results);
   }
   rv(x) {
     if (x.t === 'field') return vPathOf(x.v, this.v.ns);

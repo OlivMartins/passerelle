@@ -1,0 +1,19 @@
+# Couverture : 4 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  condition_1:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      if .t == "x" {
+        # grok
+        parsed, err = parse_grok(.message, s'%{WORD:w}')
+        if err == null {
+          . = merge(object!(.), parsed)
+          .k = "v"
+        } else {
+          .tags = compact(flatten([.tags, "_grokparsefailure"]))
+        }
+        # mutate
+        if is_string(.k) { .k = upcase!(.k) }
+      }
