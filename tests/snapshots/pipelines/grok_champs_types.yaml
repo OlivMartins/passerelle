@@ -1,0 +1,16 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  grok:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # grok
+      parsed, err = parse_grok(.message, s'%{WORD:verb} %{URIPATH:path} %{NUMBER:status} %{NUMBER:bytes}')
+      if err == null {
+        . = merge(object!(.), parsed)
+        .status = to_int(.status) ?? .status
+        .bytes = to_int(.bytes) ?? .bytes
+      } else {
+        .tags = compact(flatten([.tags, "_grokparsefailure"]))
+      }

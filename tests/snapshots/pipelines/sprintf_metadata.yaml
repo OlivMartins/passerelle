@@ -1,0 +1,15 @@
+# Couverture : 4 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      %cle = "valeur"
+  mutate_2:
+    type: remap
+    inputs: [mutate]
+    source: |
+      # mutate
+      .k = (to_string(%cle) ?? "")

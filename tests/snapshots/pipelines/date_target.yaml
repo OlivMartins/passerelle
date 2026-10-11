@@ -1,0 +1,23 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  date:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # date
+      ts = null
+      if ts == null {
+        ts = parse_timestamp(.ts, "%+") ?? null
+      }
+      if ts == null {
+        ts = parse_timestamp(.ts, "%Y-%m-%dT%H:%M:%S%.f") ?? null
+      }
+      if ts == null {
+        ts = parse_timestamp(.ts, "%Y-%m-%d %H:%M:%S%.f") ?? null
+      }
+      if ts != null {
+        .quand = ts
+      } else {
+        .tags = compact(flatten([.tags, "_dateparsefailure"]))
+      }

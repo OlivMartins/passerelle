@@ -1,0 +1,15 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : split dans une condition
+
+transforms:
+  condition_1:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      if .type == "lot" {
+        # split
+        if is_string(.articles) {
+          .articles = split(string!(.articles), "\n")
+        }
+        . = unnest(.articles) ?? [.]
+      }

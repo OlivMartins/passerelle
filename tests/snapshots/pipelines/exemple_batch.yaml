@@ -1,0 +1,79 @@
+# Couverture : 8 directs, 0 à vérifier, 1 à reprendre
+# À reprendre : Filtre ruby non traduit (ligne 10)
+
+transforms:
+  dissect:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # dissect
+      parsed, err = parse_regex(.message, r'^(?P<date>.*?) (?P<time>.*?) \[(?P<level>.*?)\] (?P<service>.*?): (?P<payload>.*)$$')
+      if err == null {
+        .date = parsed.date
+        .time = parsed.time
+        .level = parsed.level
+        .service = parsed.service
+        .payload = parsed.payload
+      } else {
+        .tags = compact(flatten([.tags, "_dissectfailure"]))
+      }
+  mutate:
+    type: remap
+    inputs: [dissect]
+    source: |
+      # mutate
+      .date_time = (to_string(.date) ?? "") + " " + (to_string(.time) ?? "")
+  date:
+    type: remap
+    inputs: [mutate]
+    source: |
+      # date
+      ts = null
+      if ts == null {
+        ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S,%3f", timezone: "Europe/Paris") ?? null
+      }
+      if ts == null {
+        ts = parse_timestamp(.date_time, "%+", timezone: "Europe/Paris") ?? null
+      }
+      if ts == null {
+        ts = parse_timestamp(.date_time, "%Y-%m-%dT%H:%M:%S%.f", timezone: "Europe/Paris") ?? null
+      }
+      if ts == null {
+        ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S%.f", timezone: "Europe/Paris") ?? null
+      }
+      if ts != null {
+        ."@timestamp" = ts
+        del(.date)
+        del(.time)
+        del(.date_time)
+      } else {
+        .tags = compact(flatten([.tags, "_dateparsefailure"]))
+      }
+  json:
+    type: remap
+    inputs: [date]
+    source: |
+      # json
+      parsed, err = parse_json(.payload)
+      if err == null {
+        .body = parsed
+        del(.payload)
+      } else {
+        .tags = compact(flatten([.tags, "_jsonparsefailure"]))
+      }
+  split:
+    type: remap
+    inputs: [json]
+    source: |
+      # split
+      if is_string(.body.items) {
+        .body.items = split(string!(.body.items), "\n")
+      }
+      . = unnest(.body.items) ?? [.]
+  mutate_2:
+    type: remap
+    inputs: [split]
+    source: |
+      # mutate
+      .body.items.qty = to_int(.body.items.qty) ?? .body.items.qty
+      .service = replace(.service, r'[^a-z0-9]+', "_") ?? .service

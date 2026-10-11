@@ -1,0 +1,17 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  dissect:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # dissect
+      parsed, err = parse_regex(.message, r'^(?P<date>.*?) (?P<niveau>.*?) \[(?P<service>.*?)\] (?P<texte>.*)$$')
+      if err == null {
+        .date = parsed.date
+        .niveau = parsed.niveau
+        .service = parsed.service
+        .texte = parsed.texte
+      } else {
+        .tags = compact(flatten([.tags, "_dissectfailure"]))
+      }

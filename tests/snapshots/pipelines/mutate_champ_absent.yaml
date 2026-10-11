@@ -1,0 +1,16 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      .a = replace(.a, r'x', "y") ?? .a
+      .b = upcase(.b) ?? .b
+      .d = (upcase(slice(.d, 0, 1) ?? "") ?? "") + (downcase(slice(.d, 1) ?? "") ?? "")
+      .c = downcase(.c) ?? .c
+      .e = strip_whitespace(.e) ?? .e
+      .f = split(.f, ",") ?? .f
+      .g = join(.g, ",") ?? .g
+      .i = .h

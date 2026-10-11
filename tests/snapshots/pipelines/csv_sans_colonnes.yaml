@@ -1,0 +1,13 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : csv sans columns
+
+transforms:
+  csv:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # csv
+      row, err = parse_csv(.message, delimiter: ",")
+      if err == null {
+        .csv = row
+      }

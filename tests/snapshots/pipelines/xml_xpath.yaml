@@ -1,0 +1,15 @@
+# Couverture : 3 directs, 1 à vérifier, 0 à reprendre
+# À vérifier : xml xpath
+
+transforms:
+  xml:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # xml
+      parsed, err = parse_xml(.message)
+      if err == null {
+        .xml = parsed
+      } else {
+        .tags = compact(flatten([.tags, "_xmlparsefailure"]))
+      }

@@ -1,0 +1,14 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  csv:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # csv
+      row, err = parse_csv(.message, delimiter: ",")
+      if err == null {
+        .a = row[0]
+        .n = row[1]
+        .n = to_int(.n) ?? .n
+      }

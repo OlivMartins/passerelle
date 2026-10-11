@@ -1,0 +1,11 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      if .a == null {
+        .a = "défaut"
+      }

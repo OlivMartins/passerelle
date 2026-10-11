@@ -1,0 +1,17 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  json:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # json
+      parsed, err = parse_json(.message)
+      if err == null {
+        if is_object(parsed) {
+          . = merge(object!(.), object!(parsed))
+        }
+        del(.message)
+      } else {
+        .tags = compact(flatten([.tags, "_jsonparsefailure"]))
+      }

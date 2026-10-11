@@ -1,0 +1,12 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  split:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # split
+      if is_string(.message) {
+        .message = split(string!(.message), "\n")
+      }
+      . = unnest(.message) ?? [.]

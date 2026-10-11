@@ -1,0 +1,9 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  fingerprint:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # fingerprint
+      .empreinte = md5((to_string(.message) ?? ""))

@@ -1,0 +1,10 @@
+# Couverture : 3 directs, 1 à vérifier, 0 à reprendre
+# À vérifier : fingerprint : concaténation
+
+transforms:
+  fingerprint:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # fingerprint
+      .empreinte = sha2((to_string(.a) ?? "") + "|" + (to_string(.b) ?? ""), variant: "SHA-256")

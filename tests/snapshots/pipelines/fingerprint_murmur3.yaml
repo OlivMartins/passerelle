@@ -1,0 +1,10 @@
+# Couverture : 3 directs, 1 à vérifier, 0 à reprendre
+# À vérifier : fingerprint MURMUR3
+
+transforms:
+  fingerprint:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # fingerprint
+      .empreinte = to_string(seahash((to_string(.message) ?? "")))

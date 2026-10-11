@@ -1,0 +1,17 @@
+# Couverture : 5 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  condition_1:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      if (to_float(.n) ?? 0.0) < 10 {
+        # mutate
+        .classe = "petit"
+      } else if (to_float(.n) ?? 0.0) < 100 {
+        # mutate
+        .classe = "moyen"
+      } else {
+        # mutate
+        .classe = "grand"
+      }

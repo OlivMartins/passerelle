@@ -1,0 +1,10 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      .jour = (format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: "%Y.%m.%d") ?? "")
+      .heure = (format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: "%H:%M:%S") ?? "")

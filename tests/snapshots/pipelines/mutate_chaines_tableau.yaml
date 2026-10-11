@@ -1,0 +1,12 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      .a = replace(.a, r'[0-9]+', "#") ?? .a
+      .b = upcase(.b) ?? .b
+      .c = downcase(.c) ?? .c
+      .d = strip_whitespace(.d) ?? .d

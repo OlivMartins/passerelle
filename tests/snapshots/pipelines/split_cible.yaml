@@ -1,0 +1,13 @@
+# Couverture : 3 directs, 1 à vérifier, 0 à reprendre
+# À vérifier : split target
+
+transforms:
+  split:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # split
+      if is_string(.articles) {
+        .articles = split(string!(.articles), "\n")
+      }
+      . = unnest(.articles) ?? [.]

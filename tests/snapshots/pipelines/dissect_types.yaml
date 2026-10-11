@@ -1,0 +1,18 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  dissect:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # dissect
+      parsed, err = parse_regex(.message, r'^(?P<n>.*?) (?P<f>.*?) (?P<s>.*)$$')
+      if err == null {
+        .n = parsed.n
+        .f = parsed.f
+        .s = parsed.s
+        .n = to_int(.n) ?? .n
+        .f = to_float(.f) ?? .f
+      } else {
+        .tags = compact(flatten([.tags, "_dissectfailure"]))
+      }

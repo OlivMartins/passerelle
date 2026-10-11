@@ -1,0 +1,16 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  translate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # translate
+      key = (to_string(.code) ?? "")
+      if key == "200" {
+        .libelle = "OK"
+      } else if key == "404" {
+        .libelle = "Introuvable"
+      } else {
+        .libelle = "inconnu"
+      }

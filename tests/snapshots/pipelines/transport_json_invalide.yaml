@@ -1,0 +1,44 @@
+# Couverture : 2 directs, 0 à vérifier, 0 à reprendre
+
+# Configuration Vector générée par Passerelle depuis un pipeline Logstash
+# Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+
+data_dir: /var/lib/vector
+api:
+  enabled: true
+  address: '127.0.0.1:8686'
+sources:
+  stdin_in:
+    type: stdin
+    decoding:
+      codec: json
+    log_namespace: true
+transforms:
+  stdin_in_init:
+    type: remap
+    inputs: [stdin_in]
+    source: |
+      # Garantit un objet à la racine (un JSON scalaire est rangé dans message)
+      . = object(.) ?? { "message": . }
+      # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
+      if !exists(."@timestamp") {
+        ."@timestamp" = now()
+      }
+      if !exists(."@version") {
+        ."@version" = "1"
+      }
+  logstash_finalize:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # Format de date identique à Logstash (millisecondes, UTC)
+      if is_timestamp(."@timestamp") {
+        ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")
+      }
+sinks:
+  file_out:
+    type: file
+    inputs: [logstash_finalize]
+    path: /work/out/transport_json_invalide.ndjson
+    encoding:
+      codec: json
