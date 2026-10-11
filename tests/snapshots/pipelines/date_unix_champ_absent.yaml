@@ -9,9 +9,8 @@ transforms:
       if .ts != null {
         ts = null
         if ts == null {
-          n = to_int(.ts) ?? null
-          if n != null {
-            ts = from_unix_timestamp!(n)
+          if match(to_string(.ts) ?? "", r'^-?\d+(\.\d+)?$$') {
+            ts = from_unix_timestamp(to_int(to_float!(.ts) * 1000), unit: "milliseconds") ?? null
           }
         }
         if ts != null {

@@ -1,4 +1,5 @@
-# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# Couverture : 3 directs, 1 à vérifier, 0 à reprendre
+# À vérifier : date locale
 
 transforms:
   date:

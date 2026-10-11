@@ -19,6 +19,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 - `split` : l’option `target` est appliquée (l’élément va dans le champ cible, le champ d’origine reste entier) ; un élément vide ou nul ne donne plus d’événement ; une chaîne qui ne donne qu’un élément n’est pas touchée, et une chaîne vide ne donne aucun événement ; un champ absent, nul ou d’un autre type reçoit `_split_type_failure`.
 - Options qui n’étaient pas appliquées : `target` de `grok` (les captures vont sous le champ cible), `all_fields` de `urldecode` (chaque chaîne de l’événement est décodée, à toute profondeur) et un `field_split` de `kv` à plusieurs caractères (chacun sépare les champs).
 - `kv` : un mot sans séparateur de valeur n’est plus rendu comme un champ à `true`. `translate` : une cible qui existe déjà est gardée, sauf avec `override` ; sans valeur de repli, `add_field` et `add_tag` ne sont appliqués que si la clé est trouvée.
+- `date` : le format `UNIX` garde les décimales, en nombre comme en chaîne, et refuse ce que Logstash refuse (notation scientifique, booléen) ; un champ cible autre que `@timestamp` s’écrit à la milliseconde, en UTC, comme `@timestamp`. Une option `locale` autre que l’anglais avec des noms de mois ou de jours est maintenant signalée « à vérifier ».
 - `remove_field` avec un nom calculé (`%{nom}`) : le champ désigné est retiré, que la valeur obtenue s’écrive `a` ou `[a][b]`. Le nom n’était pas résolu, et rien n’était retiré.
 
 ## [1.1.1] - 2026-10-22

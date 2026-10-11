@@ -18,7 +18,7 @@ transforms:
           ts = parse_timestamp(.ts, "%Y-%m-%d %H:%M:%S%.f") ?? null
         }
         if ts != null {
-          .quand = ts
+          .quand = format_timestamp!(ts, format: "%Y-%m-%dT%H:%M:%S%.3fZ")
         } else {
           .tags = compact(flatten([.tags, "_dateparsefailure"]))
         }

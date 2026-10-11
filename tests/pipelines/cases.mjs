@@ -172,7 +172,9 @@ export const CASES = [
   { id: 'date_champ_absent', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ n: 1 }, { ts: null }] },
   { id: 'date_unix_champ_absent', filter: 'date { match => ["ts", "UNIX"] }', events: [{ n: 1 }, { ts: null }] },
   { id: 'date_unix', filter: 'date { match => ["ts", "UNIX"] }', events: [{ ts: 1773130530 }, { ts: '1773130530' }] },
-  { id: 'date_unix_decimales', filter: 'date { match => ["ts", "UNIX"] }', events: [{ ts: 1773130530.123 }, { ts: '1773130530.123' }], known: 'les décimales d’un horodatage UNIX sont perdues, et la chaîne « 1773130530.123 » est refusée' },
+  { id: 'date_unix_decimales', filter: 'date { match => ["ts", "UNIX"] }', events: [{ ts: 1773130530.123 }, { ts: '1773130530.123' }, { ts: 1773130530.1237 }, { ts: -1.5 }] },
+  // Ce que le format UNIX refuse : une notation scientifique, un booléen, des espaces
+  { id: 'date_unix_refus', filter: 'date { match => ["ts", "UNIX"] }', events: [{ ts: '1e9' }, { ts: true }, { ts: ' 1773130530 ' }] },
   { id: 'date_unix_ms', filter: 'date { match => ["ts", "UNIX_MS"] }', events: [{ ts: 1773130530123 }, { ts: '1773130530123' }] },
   { id: 'date_format_apache', filter: 'date { match => ["ts", "dd/MMM/yyyy:HH:mm:ss Z"] }', events: [{ ts: '10/Mar/2026:08:15:30 +0000' }, { ts: '10/Mar/2026:09:15:30 +0100' }] },
   { id: 'date_plusieurs_formats', filter: 'date { match => ["ts", "yyyy-MM-dd HH:mm:ss", "dd/MM/yyyy HH:mm"] }', events: [{ ts: '2026-03-10 08:15:30' }, { ts: '10/03/2026 08:15' }, { ts: '10 mars 2026' }] },
@@ -181,7 +183,8 @@ export const CASES = [
   { id: 'date_sans_fuseau', filter: 'date { match => ["ts", "yyyy-MM-dd HH:mm:ss"] }', events: [{ ts: '2026-01-15 12:00:00' }] },
   { id: 'date_sans_annee', filter: 'date { match => ["ts", "MMM dd HH:mm:ss"] }', events: [{ ts: 'Mar 10 08:15:30' }], known: 'sans année dans le format, Logstash prend l’année courante ; la traduction refuse la date' },
   { id: 'date_target', filter: 'date { match => ["ts", "ISO8601"] target => "quand" }', events: [{ ts: '2026-03-10T08:15:30.123Z' }] },
-  { id: 'date_target_seconde_ronde', filter: 'date { match => ["ts", "ISO8601"] target => "quand" }', events: [{ ts: '2026-03-10T08:15:30Z' }], known: 'un champ cible autre que @timestamp perd ses millisecondes quand elles sont nulles ; Logstash écrit toujours « .000 »' },
+  // Une cible autre que @timestamp s’écrit elle aussi à la milliseconde : « .000 » quand elle est ronde, et pas plus de trois décimales
+  { id: 'date_target_seconde_ronde', filter: 'date { match => ["ts", "ISO8601"] target => "quand" }', events: [{ ts: '2026-03-10T08:15:30Z' }, { ts: '2026-03-10T08:15:30.123456Z' }] },
   { id: 'date_millisecondes', filter: 'date { match => ["ts", "yyyy-MM-dd HH:mm:ss.SSS"] }', events: [{ ts: '2026-03-10 08:15:30.123' }, { ts: '2026-03-10 08:15:30.100' }] },
   { id: 'date_mois_francais', filter: 'date { match => ["ts", "dd MMMM yyyy"] locale => "fr" }', events: [{ ts: '10 mars 2026' }, { ts: '15 août 2026' }], known: 'locale n’est pas traduit : les noms de mois français ne sont pas lus' },
   { id: 'date_etiquette_echec', filter: 'date { match => ["ts", "ISO8601"] tag_on_failure => ["date_illisible"] }', events: [{ ts: 'pas une date' }] },

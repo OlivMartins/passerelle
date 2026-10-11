@@ -387,15 +387,23 @@ class VrlGen {
     lines.forEach(l => {
       this.open('if ts == null');
       if (typeof l === 'string') this.emit(l);
-      else { this.emit(`n = to_int(${src}) ?? null`); this.open('if n != null'); this.emit(l.unix === 'UNIX' ? 'ts = from_unix_timestamp!(n)' : 'ts = from_unix_timestamp!(n, unit: "milliseconds")'); this.close(); }
+      else if (l.unix === 'UNIX') {
+        // Des secondes, avec ou sans décimales, en nombre ou en chaîne : comme Logstash, rien d’autre (ni « 1e9 », ni un booléen)
+        this.open(`if match(${this.tget(src) === 'str' ? src : `to_string(${src}) ?? ""`}, r'^-?\\d+(\\.\\d+)?$')`);
+        this.emit(`ts = from_unix_timestamp(to_int(to_float!(${src}) * 1000), unit: "milliseconds") ?? null`);
+        this.close();
+      }
+      else { this.emit(`n = to_int(${src}) ?? null`); this.open('if n != null'); this.emit('ts = from_unix_timestamp!(n, unit: "milliseconds")'); this.close(); }
       this.close();
     });
-    this.open('if ts != null'); this.assign(tgt, 'ts'); this.common(s);
+    // Hors @timestamp, que la finalisation met en forme, la cible est écrite comme le fait Logstash : en UTC, à la milliseconde
+    const stamp = this.v.compat && tgt !== this.path('@timestamp') ? 'format_timestamp!(ts, format: "%Y-%m-%dT%H:%M:%S%.3fZ")' : 'ts';
+    this.open('if ts != null'); this.assign(tgt, stamp); this.common(s);
     const tags = s.tag_on_failure !== undefined ? lsList(s.tag_on_failure) : ['_dateparsefailure'];
     if (tags.length) { this.close('} else {'); this.ind++; this.failTags(tags); }
     this.close();
     if (guarded) this.close();
-    if (m.slice(1).some(f => f === 'UNIX')) this.v.note('info', 'Date UNIX', 'Les secondes décimales (1700000000.123) ne sont pas reconnues par to_int : utilisez to_float puis from_unix_timestamp en millisecondes si besoin.');
+    if (s.locale && !/^en/i.test(String(s.locale)) && m.slice(1).some(f => /MMM|EEE/.test(f))) this.approx('date locale', `Les noms de mois et de jours en « ${s.locale} » ne sont pas reconnus : parse_timestamp ne lit que l’anglais.`);
     this.ok();
   }
   f_mutate(s, p) {
@@ -809,7 +817,7 @@ function flatOutputs(stmts, conds, out) {
 }
 function translateLogstash(src, cfg) {
   const notes = makeNotes();
-  const v = { ns: cfg.vector.log_namespace !== false, stats: { ok: 0, approx: 0, ko: 0 }, enrich: {}, env: new Set(), note: (l, t, d, c) => notes.add(l, t, d, c) };
+  const v = { ns: cfg.vector.log_namespace !== false, compat: !!cfg.vector.logstash_compat, stats: { ok: 0, approx: 0, ko: 0 }, enrich: {}, env: new Set(), note: (l, t, d, c) => notes.add(l, t, d, c) };
   let ast;
   try { ast = parseLogstash(src); }
   catch (e) { return { error: e.message }; }
