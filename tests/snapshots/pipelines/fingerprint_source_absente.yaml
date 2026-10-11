@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # fingerprint
-      .empreinte = sha2((to_string(.absent) ?? ""), variant: "SHA-256")
+      if exists(.s) { .empreinte = sha2((to_string(.s) ?? ""), variant: "SHA-256") }

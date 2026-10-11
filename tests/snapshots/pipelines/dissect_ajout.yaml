@@ -11,6 +11,6 @@ transforms:
       if err == null {
         .quand = parsed.quand
         .texte = parsed.texte
-      } else {
+      } else if exists(.message) {
         .tags = compact(flatten([.tags, "_dissectfailure"]))
       }

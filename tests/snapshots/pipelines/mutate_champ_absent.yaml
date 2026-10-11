@@ -6,11 +6,11 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .a = replace(.a, r'x', "y") ?? .a
-      .b = upcase(.b) ?? .b
-      .d = (upcase(slice(.d, 0, 1) ?? "") ?? "") + (downcase(slice(.d, 1) ?? "") ?? "")
-      .c = downcase(.c) ?? .c
-      .e = strip_whitespace(.e) ?? .e
-      .f = split(.f, ",") ?? .f
-      .g = join(.g, ",") ?? .g
-      .i = .h
+      if is_string(.a) { .a = replace!(.a, r'x', "y") }
+      if is_string(.b) { .b = upcase!(.b) }
+      if is_string(.d) { .d = (upcase(slice(.d, 0, 1) ?? "") ?? "") + (downcase(slice(.d, 1) ?? "") ?? "") }
+      if is_string(.c) { .c = downcase!(.c) }
+      if is_string(.e) { .e = strip_whitespace!(.e) }
+      if is_string(.f) { .f = split!(.f, ",") }
+      if is_array(.g) { .g = join(.g, ",") ?? .g }
+      if .h != null { .i = .h }

@@ -63,24 +63,26 @@ transforms:
     inputs: [kv]
     source: |
       # translate
-      key = (to_string(.data.country) ?? "")
-      if key == "FR" {
-        .data.region = "EMEA"
-      } else if key == "DE" {
-        .data.region = "EMEA"
-      } else if key == "US" {
-        .data.region = "AMER"
-      } else if key == "JP" {
-        .data.region = "APAC"
-      } else {
-        .data.region = "AUTRE"
+      if exists(.data.country) {
+        key = (to_string(.data.country) ?? "")
+        if key == "FR" {
+          .data.region = "EMEA"
+        } else if key == "DE" {
+          .data.region = "EMEA"
+        } else if key == "US" {
+          .data.region = "AMER"
+        } else if key == "JP" {
+          .data.region = "APAC"
+        } else {
+          .data.region = "AUTRE"
+        }
       }
   fingerprint:
     type: remap
     inputs: [translate]
     source: |
       # fingerprint
-      .data.user_hash = sha2((to_string(.data.user_id) ?? ""), variant: "SHA-256")
+      if exists(.data.user_id) { .data.user_hash = sha2((to_string(.data.user_id) ?? ""), variant: "SHA-256") }
   condition_5:
     type: remap
     inputs: [fingerprint]

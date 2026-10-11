@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .tags = filter((array(.tags) ?? [])) -> |_index, tag| { !includes(["t1"], tag) }
+      if .tags != null { .tags = filter(flatten([.tags])) -> |_index, tag| { !includes(["t1"], tag) } }

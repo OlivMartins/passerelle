@@ -185,6 +185,8 @@ class VrlGen {
   hasCode() { return this.lines.some(l => l.trim() && !l.trim().startsWith('#')); }
   path(ref) { return vPathOf(fieldSegs(ref), this.v.ns); }
   tget(p) { return this.types.get(p) || 'any'; }
+  // Champ dont le type est connu : il est présent et non nul, une garde d’existence serait inutile
+  present(p) { const t = this.tget(p); return t !== 'any' && t !== 'null'; }
   tset(p, t) { for (const k of [...this.types.keys()]) if (k !== '.' && (k === p || k.startsWith(p + '.'))) this.types.delete(k); if (t && t !== 'any') this.types.set(p, t); }
   treset() { const r = this.types.get('.'); this.types.clear(); if (r) this.types.set('.', r); }
   asStr(p) { const t = this.tget(p); if (t === 'str') return p; if (t === 'null') return '""'; if (t === 'arr') return `(join(${p}, ",") ?? "")`; return `(to_string(${p}) ?? "")`; }
@@ -204,10 +206,14 @@ class VrlGen {
   }
   sprintfValue(v) { return Array.isArray(v) ? `[${v.map(x => this.sprintf(x)).join(', ')}]` : typeof v === 'number' || typeof v === 'boolean' ? String(v) : this.sprintf(v); }
   assign(p, expr, t) { this.emit(`${p} = ${expr}`); this.tset(p, t || 'any'); }
+  // Affectation sous garde, sur une ligne : après elle, le type du champ n’est plus connu
+  assignIf(c, p, expr) { this.emit(`if ${c} { ${p} = ${expr} }`); this.tset(p, 'any'); }
   addTags(tags) { if (!tags.length) return; this.emit(`.tags = compact(flatten([.tags, ${tags.map(t => this.sprintf(t)).join(', ')}]))`); this.tset('.tags', 'arr'); }
   removeTags(tags) {
-    const src = this.tget('.tags') === 'arr' ? '.tags' : '(array(.tags) ?? [])';
-    this.emit(`.tags = filter(${src}) -> |_index, tag| { !includes([${tags.map(vq).join(', ')}], tag) }`); this.tset('.tags', 'arr');
+    const keep = `-> |_index, tag| { !includes([${tags.map(vq).join(', ')}], tag) }`;
+    if (this.tget('.tags') === 'arr') return this.emit(`.tags = filter(.tags) ${keep}`);
+    // Sans champ tags, Logstash ne fait rien ; une étiquette seule, écrite en chaîne, devient un tableau
+    this.assignIf('.tags != null', '.tags', `filter(flatten([.tags])) ${keep}`);
   }
   delField(f) { const p = this.path(f); this.emit(`del(${p})`); this.tset(p, 'null'); }
   common(s) {
@@ -351,6 +357,9 @@ class VrlGen {
         lines.push(`ts = parse_timestamp(${src}, ${vq(sf)}${tz}) ?? null`);
       }
     }
+    // Champ absent ou nul : Logstash ne fait rien, pas même signaler un échec
+    const guarded = !this.present(src);
+    if (guarded) this.open(`if ${src} != null`);
     this.emit('ts = null');
     lines.forEach(l => {
       this.open('if ts == null');
@@ -362,16 +371,20 @@ class VrlGen {
     const tags = s.tag_on_failure !== undefined ? lsList(s.tag_on_failure) : ['_dateparsefailure'];
     if (tags.length) { this.close('} else {'); this.ind++; this.failTags(tags); }
     this.close();
+    if (guarded) this.close();
     if (m.slice(1).some(f => f === 'UNIX')) this.v.note('info', 'Date UNIX', 'Les secondes décimales (1700000000.123) ne sont pas reconnues par to_int : utilisez to_float puis from_unix_timestamp en millisecondes si besoin.');
     this.ok();
   }
   f_mutate(s, p) {
     const order = ['coerce', 'rename', 'update', 'replace', 'convert', 'gsub', 'uppercase', 'capitalize', 'lowercase', 'strip', 'remove', 'split', 'join', 'merge', 'copy'];
-    const unary = (fields, fn) => lsList(fields).forEach(f => { const x = this.path(f); const t = this.tget(x); if (t === 'null') return; this.assign(x, t === 'str' ? `${fn}(${x})` : `${fn}(${x}) ?? ${x}`, t === 'str' ? 'str' : 'any'); });
+    // Une opération de chaîne ne touche qu’une chaîne : Logstash laisse tel quel un champ absent, nul ou d’un autre type
+    const onString = (x, call, type) => { const t = this.tget(x); if (t === 'null') return; if (t === 'str') this.assign(x, call(''), type); else this.assignIf(`is_string(${x})`, x, call('!')); };
+    const unary = (fields, fn) => lsList(fields).forEach(f => { const x = this.path(f); onString(x, bang => `${fn}${bang}(${x})`, 'str'); });
     for (const op of order) {
       const v = s[op]; if (v === undefined) continue;
       switch (op) {
-        case 'coerce': lsPairs(v).forEach(([f, d]) => { const x = this.path(f); this.open(`if ${x} == null`); this.assign(x, this.sprintf(d), 'str'); this.close(); this.tset(x, 'any'); }); break;
+        // coerce ne remplace qu’un champ présent et nul
+        case 'coerce': lsPairs(v).forEach(([f, d]) => { const x = this.path(f); if (this.tget(x) === 'null') return; this.open(`if exists(${x}) && ${x} == null`); this.assign(x, this.sprintf(d), 'str'); this.close(); this.tset(x, 'any'); }); break;
         case 'rename': lsPairs(v).forEach(([a, b]) => { const pa = this.path(a), pb = this.path(b); this.open(`if exists(${pa})`); this.assign(pb, `del(${pa})`); this.close(); this.tset(pa, 'any'); this.tset(pb, 'any'); }); break;
         case 'update': lsPairs(v).forEach(([f, val]) => { const x = this.path(f); this.open(`if exists(${x})`); this.assign(x, this.sprintfValue(val)); this.close(); this.tset(x, 'any'); }); break;
         case 'replace': lsPairs(v).forEach(([f, val]) => this.assign(this.path(f), this.sprintfValue(val), 'str')); break;
@@ -381,32 +394,35 @@ class VrlGen {
           if (!fn) return this.v.note('warn', 'convert', `Type « ${ty} » inconnu pour ${f}.`);
           if (/_eu$/.test(ty)) this.v.note('warn', `convert ${ty}`, 'Le format numérique européen (virgule décimale) n’est pas géré : remplacez la virgule avant la conversion.');
           if (fn === 'to_string' && this.tget(x) === 'str') return;
-          this.assign(x, `${fn}(${x}) ?? ${x}`);
+          // Un champ absent ou nul n’est pas converti : to_int(null) vaudrait 0
+          if (this.present(x)) this.assign(x, `${fn}(${x}) ?? ${x}`); else this.assignIf(`${x} != null`, x, `${fn}(${x}) ?? ${x}`);
         }); break;
-        case 'gsub': { const a = lsList(v); for (let i = 0; i + 2 < a.length; i += 3) { const x = this.path(a[i]); const t = this.tget(x); if (t === 'null') continue; const rep = String(a[i + 2]).replace(/\$/g, '$$$$').replace(/\\(\d)/g, '$${$1}'); this.assign(x, t === 'str' ? `replace(${x}, ${vraw(a[i + 1], 'r')}, ${vq(rep)})` : `replace(${x}, ${vraw(a[i + 1], 'r')}, ${vq(rep)}) ?? ${x}`, t === 'str' ? 'str' : 'any'); } break; }
+        case 'gsub': { const a = lsList(v); for (let i = 0; i + 2 < a.length; i += 3) { const x = this.path(a[i]); const rep = String(a[i + 2]).replace(/\$/g, '$$$$').replace(/\\(\d)/g, '$${$1}'); onString(x, bang => `replace${bang}(${x}, ${vraw(a[i + 1], 'r')}, ${vq(rep)})`, 'str'); } break; }
         case 'uppercase': unary(v, 'upcase'); break;
         case 'lowercase': unary(v, 'downcase'); break;
         case 'strip': unary(v, 'strip_whitespace'); break;
-        case 'capitalize': lsList(v).forEach(f => { const x = this.path(f); const t = this.tget(x); if (t === 'null') return; this.assign(x, t === 'str' ? `upcase(slice(${x}, 0, 1) ?? "") + downcase(slice(${x}, 1) ?? "")` : `(upcase(slice(${x}, 0, 1) ?? "") ?? "") + (downcase(slice(${x}, 1) ?? "") ?? "")`, 'str'); }); break;
+        case 'capitalize': lsList(v).forEach(f => { const x = this.path(f); onString(x, bang => (bang ? `(upcase(slice(${x}, 0, 1) ?? "") ?? "") + (downcase(slice(${x}, 1) ?? "") ?? "")` : `upcase(slice(${x}, 0, 1) ?? "") + downcase(slice(${x}, 1) ?? "")`), 'str'); }); break;
         case 'remove': lsList(v).forEach(f => this.delField(f)); break;
-        case 'split': lsPairs(v).forEach(([f, sep]) => { const x = this.path(f); const t = this.tget(x); if (t === 'null') return; this.assign(x, t === 'str' ? `split(${x}, ${vq(sep)})` : `split(${x}, ${vq(sep)}) ?? ${x}`, t === 'str' ? 'arr' : 'any'); }); break;
-        case 'join': lsPairs(v).forEach(([f, sep]) => { const x = this.path(f); this.assign(x, `join(${x}, ${vq(sep)}) ?? ${x}`); }); break;
+        case 'split': lsPairs(v).forEach(([f, sep]) => { const x = this.path(f); onString(x, bang => `split${bang}(${x}, ${vq(sep)})`, 'arr'); }); break;
+        case 'join': lsPairs(v).forEach(([f, sep]) => { const x = this.path(f); if (this.tget(x) !== 'null') this.assignIf(`is_array(${x})`, x, `join(${x}, ${vq(sep)}) ?? ${x}`); }); break;
         case 'merge': lsPairs(v).forEach(([dst, src]) => { const d = this.path(dst), sp = this.path(src); this.assign(d, `compact(flatten([${d}, ${sp}]))`, 'arr'); }); break;
-        case 'copy': lsPairs(v).forEach(([src, dst]) => this.assign(this.path(dst), this.path(src), this.tget(this.path(src)))); break;
+        // Un champ absent ou nul n’est pas copié
+        case 'copy': lsPairs(v).forEach(([src, dst]) => { const a = this.path(src), b = this.path(dst); if (this.tget(a) === 'null') return; if (this.present(a)) this.assign(b, a, this.tget(a)); else this.assignIf(`${a} != null`, b, a); }); break;
       }
     }
     this.common(s);
     this.ok();
   }
   f_json(s) {
-    const src = this.path(s.source || 'message');
+    const src = this.path(s.source || 'message'); const there = this.present(src);
     this.emit(`parsed, err = parse_json(${src})`);
     this.open('if err == null');
     if (s.target) this.assign(this.path(s.target), 'parsed');
     else { this.open('if is_object(parsed)'); this.mergeRoot('object!(parsed)'); this.close(); this.treset(); }
     this.common(s);
     const tags = s.skip_on_invalid_json ? [] : s.tag_on_failure !== undefined ? lsList(s.tag_on_failure) : ['_jsonparsefailure'];
-    if (tags.length) { this.close('} else {'); this.ind++; this.failTags(tags); }
+    // Champ source absent ou nul : Logstash ne signale pas d’échec
+    if (tags.length) { this.close(there ? '} else {' : `} else if ${src} != null {`); this.ind++; this.failTags(tags); }
     this.close(); this.ok();
   }
   f_kv(s) {
@@ -430,13 +446,15 @@ class VrlGen {
     for (const [field, pattern] of maps) {
       const d = dissectRegex(pattern, null, true);
       d.warnings.forEach(w => this.approx('dissect', w));
-      this.emit(`parsed, err = parse_regex(${this.path(field)}, ${vraw(d.regex, 'r')})`);
+      const src = this.path(field); const there = this.present(src);
+      this.emit(`parsed, err = parse_regex(${src}, ${vraw(d.regex, 'r')})`);
       this.open('if err == null');
       d.fields.forEach(f => this.assign(this.path(f.field), `parsed.${f.group}`));
       for (const [f, t] of lsPairs(s.convert_datatype)) { const x = this.path(f); this.assign(x, `${t === 'int' ? 'to_int' : 'to_float'}(${x}) ?? ${x}`); }
       this.common(s);
       const tags = s.tag_on_failure !== undefined ? lsList(s.tag_on_failure) : ['_dissectfailure'];
-      if (tags.length) { this.close('} else {'); this.ind++; this.failTags(tags); }
+      // Sans champ source, Logstash ne signale pas d’échec
+      if (tags.length) { this.close(there ? '} else {' : `} else if exists(${src}) {`); this.ind++; this.failTags(tags); }
       this.close();
     }
     this.v.note('info', 'dissect → parse_regex', 'Le motif dissect est converti en expression régulière ancrée avec groupes nommés.');
@@ -467,6 +485,11 @@ class VrlGen {
   f_translate(s, p) {
     const src = this.path(s.source || s.field || 'message'); const tgt = this.path(s.target || s.destination || 'translation');
     if (s.regex) this.approx('translate regex', 'Les clés regex ne sont pas reprises : correspondance exacte uniquement.');
+    const entries = lsPairs(s.dictionary);
+    if (!s.dictionary_path && !entries.length) return this.ko(p, 'translate sans dictionnaire.');
+    // Sans champ source, Logstash ne traduit rien : ni valeur de repli, ni add_field, ni add_tag
+    const guarded = !this.present(src);
+    if (guarded) this.open(`if exists(${src})`);
     this.emit(`key = ${this.asStr(src)}`);
     if (s.dictionary_path) {
       const name = compName('dict_' + String(s.dictionary_path).split('/').pop().replace(/\.\w+$/, ''));
@@ -478,15 +501,15 @@ class VrlGen {
       this.close(); this.tset(tgt, 'any');
       this.v.note('warn', 'Dictionnaire externe', `${s.dictionary_path} doit être converti en ${csvPath}, un CSV avec l’en-tête key,value, pour la table d’enrichissement « ${name} ».`);
     } else {
-      const entries = lsPairs(s.dictionary);
-      if (!entries.length) return this.ko(p, 'translate sans dictionnaire.');
       entries.forEach(([k, v], i) => { this.emit(`${i === 0 ? 'if' : '} else if'} key == ${vq(k)} {`); this.ind++; this.emit(`${tgt} = ${this.sprintfValue(v)}`); this.ind--; });
       if (s.fallback !== undefined) { this.emit('} else {'); this.ind++; this.emit(`${tgt} = ${this.sprintf(s.fallback)}`); this.ind--; }
       this.emit('}');
       this.tset(tgt, s.fallback !== undefined ? 'str' : 'any');
       if (entries.length > 50) this.v.note('opt', 'Grand dictionnaire', 'Au-delà de quelques dizaines d’entrées, une table d’enrichissement CSV est plus lisible et plus rapide qu’une cascade de if.');
     }
-    this.common(s); this.ok();
+    this.common(s);
+    if (guarded) { this.close(); this.tset(tgt, 'any'); }
+    this.ok();
   }
   f_fingerprint(s) {
     const srcs = lsList(s.source || 'message'); const tgt = this.path(s.target || 'fingerprint');
@@ -500,7 +523,10 @@ class VrlGen {
       this.v.env.add('FINGERPRINT_KEY');
     } else e = { SHA1: `sha1(${val})`, SHA256: `sha2(${val}, variant: "SHA-256")`, SHA384: `sha2(${val}, variant: "SHA-384")`, SHA512: `sha2(${val}, variant: "SHA-512")`, MD5: `md5(${val})`, UUID: 'uuid_v4()', MURMUR3: `to_string(seahash(${val}))` }[method];
     if (method === 'MURMUR3') this.approx('fingerprint MURMUR3', 'MurmurHash3 n’existe pas en VRL : seahash le remplace, les valeurs diffèrent.');
-    this.assign(tgt, e || `sha1(${val})`, 'str');
+    // Un seul champ source : quand il est absent, Logstash n’écrit pas d’empreinte
+    const one = srcs.length === 1 && !s.concatenate_sources && method !== 'UUID' ? this.path(srcs[0]) : null;
+    if (!one || this.present(one)) this.assign(tgt, e || `sha1(${val})`, 'str');
+    else if (this.tget(one) !== 'null') this.assignIf(`exists(${one})`, tgt, e || `sha1(${val})`);
     this.common(s); this.ok();
   }
   f_uuid(s) {
@@ -528,7 +554,8 @@ class VrlGen {
   }
   f_truncate(s) {
     const n = s.length_bytes || 1000;
-    lsList(s.fields).forEach(f => { const x = this.path(f); if (this.tget(x) !== 'null') this.assign(x, this.tget(x) === 'str' ? `truncate(${x}, ${n})` : `truncate(${x}, ${n}) ?? ${x}`); });
+    // Seule une chaîne est tronquée : un champ absent n’est pas créé
+    lsList(s.fields).forEach(f => { const x = this.path(f); const t = this.tget(x); if (t === 'str') this.assign(x, `truncate(${x}, ${n})`); else if (t !== 'null') this.assignIf(`is_string(${x})`, x, `truncate!(${x}, ${n})`); });
     this.v.note('info', 'truncate', 'Vector tronque en caractères, Logstash en octets : léger écart possible sur les textes non ASCII.');
     this.common(s); this.ok();
   }
@@ -549,10 +576,12 @@ class VrlGen {
     this.open(`if ${c}`); this.common(s); if (!(s.add_field || s.add_tag || s.remove_field || s.remove_tag)) this.emit('noop = true'); this.close(); this.ok();
   }
   f_xml(s) {
-    const src = this.path(s.source || 'message');
+    const src = this.path(s.source || 'message'); const t = this.tget(src);
     this.emit(`parsed, err = parse_xml(${src})`);
     this.open('if err == null'); this.assign(this.path(s.target || 'xml'), 'parsed'); this.common(s);
-    this.close('} else {'); this.ind++; this.failTags(['_xmlparsefailure']); this.close(); this.ok();
+    // Champ source absent, nul ou vide : Logstash ne signale pas d’échec
+    this.close(t === 'str' ? `} else if strip_whitespace(${src}) != "" {` : this.present(src) ? '} else {' : `} else if ${src} != null && strip_whitespace(string(${src}) ?? "-") != "" {`);
+    this.ind++; this.failTags(['_xmlparsefailure']); this.close(); this.ok();
     if (s.xpath) this.approx('xml xpath', 'Les expressions XPath ne sont pas reprises : naviguez dans l’objet parsé.');
   }
 }

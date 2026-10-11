@@ -6,9 +6,11 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # translate
-      key = (to_string(.code) ?? "")
-      if key == "200" {
-        .translation = "OK"
-      } else if key == "404" {
-        .translation = "Introuvable"
+      if exists(.code) {
+        key = (to_string(.code) ?? "")
+        if key == "200" {
+          .translation = "OK"
+        } else if key == "404" {
+          .translation = "Introuvable"
+        }
       }

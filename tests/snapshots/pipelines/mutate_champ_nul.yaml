@@ -1,0 +1,16 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      if is_string(.a) { .a = replace!(.a, r'x', "y") }
+      if is_string(.b) { .b = upcase!(.b) }
+      if is_string(.d) { .d = (upcase(slice(.d, 0, 1) ?? "") ?? "") + (downcase(slice(.d, 1) ?? "") ?? "") }
+      if is_string(.c) { .c = downcase!(.c) }
+      if is_string(.e) { .e = strip_whitespace!(.e) }
+      if is_string(.f) { .f = split!(.f, ",") }
+      if is_array(.g) { .g = join(.g, ",") ?? .g }
+      if .h != null { .i = .h }

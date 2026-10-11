@@ -1,0 +1,9 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  truncate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # truncate
+      if is_string(.a) { .a = truncate!(.a, 5) }

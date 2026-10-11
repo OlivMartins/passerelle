@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .n = to_string(.n) ?? .n
+      if .n != null { .n = to_string(.n) ?? .n }

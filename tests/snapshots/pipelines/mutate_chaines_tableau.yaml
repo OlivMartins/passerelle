@@ -6,7 +6,7 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .a = replace(.a, r'[0-9]+', "#") ?? .a
-      .b = upcase(.b) ?? .b
-      .c = downcase(.c) ?? .c
-      .d = strip_whitespace(.d) ?? .d
+      if is_string(.a) { .a = replace!(.a, r'[0-9]+', "#") }
+      if is_string(.b) { .b = upcase!(.b) }
+      if is_string(.c) { .c = downcase!(.c) }
+      if is_string(.d) { .d = strip_whitespace!(.d) }

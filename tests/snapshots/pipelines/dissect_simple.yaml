@@ -12,6 +12,6 @@ transforms:
         .niveau = parsed.niveau
         .service = parsed.service
         .texte = parsed.texte
-      } else {
+      } else if exists(.message) {
         .tags = compact(flatten([.tags, "_dissectfailure"]))
       }

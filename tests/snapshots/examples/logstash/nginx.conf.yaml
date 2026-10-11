@@ -61,15 +61,17 @@ transforms:
     inputs: [parse_access]
     source: |
       # date
-      ts = null
-      if ts == null {
-        ts = parse_timestamp(.ts, "%d/%b/%Y:%H:%M:%S %z") ?? null
-      }
-      if ts != null {
-        ."@timestamp" = ts
-        del(.ts)
-      } else {
-        .tags = compact(flatten([.tags, "_dateparsefailure"]))
+      if .ts != null {
+        ts = null
+        if ts == null {
+          ts = parse_timestamp(.ts, "%d/%b/%Y:%H:%M:%S %z") ?? null
+        }
+        if ts != null {
+          ."@timestamp" = ts
+          del(.ts)
+        } else {
+          .tags = compact(flatten([.tags, "_dateparsefailure"]))
+        }
       }
   useragent:
     type: remap
@@ -99,7 +101,7 @@ transforms:
       if exists(.referrer) {
         .http.referrer = del(.referrer)
       }
-      .http.method = downcase(.http.method) ?? .http.method
+      if is_string(.http.method) { .http.method = downcase!(.http.method) }
       .event.dataset = "nginx.access"
       .kafka.source_topic = (to_string(%kafka.topic) ?? "")
       del(.message)

@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # fingerprint
-      .empreinte = sha1((to_string(.message) ?? ""))
+      if exists(.message) { .empreinte = sha1((to_string(.message) ?? "")) }

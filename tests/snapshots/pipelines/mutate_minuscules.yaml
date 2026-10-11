@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .a = downcase(.a) ?? .a
+      if is_string(.a) { .a = downcase!(.a) }

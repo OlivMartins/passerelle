@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .a = (upcase(slice(.a, 0, 1) ?? "") ?? "") + (downcase(slice(.a, 1) ?? "") ?? "")
+      if is_string(.a) { .a = (upcase(slice(.a, 0, 1) ?? "") ?? "") + (downcase(slice(.a, 1) ?? "") ?? "") }

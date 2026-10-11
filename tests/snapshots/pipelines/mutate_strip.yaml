@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .a = strip_whitespace(.a) ?? .a
+      if is_string(.a) { .a = strip_whitespace!(.a) }

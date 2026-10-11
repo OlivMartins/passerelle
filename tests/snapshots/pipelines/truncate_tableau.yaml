@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # truncate
-      .a = truncate(.a, 5) ?? .a
+      if is_string(.a) { .a = truncate!(.a, 5) }

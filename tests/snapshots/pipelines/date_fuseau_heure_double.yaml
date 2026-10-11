@@ -6,12 +6,14 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # date
-      ts = null
-      if ts == null {
-        ts = parse_timestamp(.ts, "%Y-%m-%d %H:%M:%S", timezone: "Europe/Paris") ?? null
-      }
-      if ts != null {
-        ."@timestamp" = ts
-      } else {
-        .tags = compact(flatten([.tags, "_dateparsefailure"]))
+      if .ts != null {
+        ts = null
+        if ts == null {
+          ts = parse_timestamp(.ts, "%Y-%m-%d %H:%M:%S", timezone: "Europe/Paris") ?? null
+        }
+        if ts != null {
+          ."@timestamp" = ts
+        } else {
+          .tags = compact(flatten([.tags, "_dateparsefailure"]))
+        }
       }

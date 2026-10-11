@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .a = replace(.a, r'(\w+)@(\w+)', "$${2} at $${1}") ?? .a
+      if is_string(.a) { .a = replace!(.a, r'(\w+)@(\w+)', "$${2} at $${1}") }

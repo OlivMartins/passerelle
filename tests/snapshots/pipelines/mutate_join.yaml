@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .a = join(.a, "-") ?? .a
+      if is_array(.a) { .a = join(.a, "-") ?? .a }

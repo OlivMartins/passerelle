@@ -7,4 +7,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # fingerprint
-      .empreinte = to_string(seahash((to_string(.message) ?? "")))
+      if exists(.message) { .empreinte = to_string(seahash((to_string(.message) ?? ""))) }

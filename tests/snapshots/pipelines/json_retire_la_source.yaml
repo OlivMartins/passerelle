@@ -12,6 +12,6 @@ transforms:
           . = merge(object!(.), object!(parsed))
         }
         del(.message)
-      } else {
+      } else if .message != null {
         .tags = compact(flatten([.tags, "_jsonparsefailure"]))
       }

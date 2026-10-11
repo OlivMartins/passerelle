@@ -10,6 +10,6 @@ transforms:
       parsed, err = parse_xml(.message)
       if err == null {
         .xml = parsed
-      } else {
+      } else if .message != null && strip_whitespace(string(.message) ?? "-") != "" {
         .tags = compact(flatten([.tags, "_xmlparsefailure"]))
       }

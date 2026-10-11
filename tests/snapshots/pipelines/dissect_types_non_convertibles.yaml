@@ -13,6 +13,6 @@ transforms:
         .s = parsed.s
         .n = to_int(.n) ?? .n
         .f = to_float(.f) ?? .f
-      } else {
+      } else if exists(.message) {
         .tags = compact(flatten([.tags, "_dissectfailure"]))
       }

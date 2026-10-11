@@ -43,7 +43,7 @@ transforms:
         .level = parsed.level
         .service = parsed.service
         .payload = parsed.payload
-      } else {
+      } else if exists(.message) {
         .tags = compact(flatten([.tags, "_dissectfailure"]))
       }
   mutate:
@@ -57,26 +57,28 @@ transforms:
     inputs: [mutate]
     source: |
       # date
-      ts = null
-      if ts == null {
-        ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S,%3f", timezone: "Europe/Paris") ?? null
-      }
-      if ts == null {
-        ts = parse_timestamp(.date_time, "%+", timezone: "Europe/Paris") ?? null
-      }
-      if ts == null {
-        ts = parse_timestamp(.date_time, "%Y-%m-%dT%H:%M:%S%.f", timezone: "Europe/Paris") ?? null
-      }
-      if ts == null {
-        ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S%.f", timezone: "Europe/Paris") ?? null
-      }
-      if ts != null {
-        ."@timestamp" = ts
-        del(.date)
-        del(.time)
-        del(.date_time)
-      } else {
-        .tags = compact(flatten([.tags, "_dateparsefailure"]))
+      if .date_time != null {
+        ts = null
+        if ts == null {
+          ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S,%3f", timezone: "Europe/Paris") ?? null
+        }
+        if ts == null {
+          ts = parse_timestamp(.date_time, "%+", timezone: "Europe/Paris") ?? null
+        }
+        if ts == null {
+          ts = parse_timestamp(.date_time, "%Y-%m-%dT%H:%M:%S%.f", timezone: "Europe/Paris") ?? null
+        }
+        if ts == null {
+          ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S%.f", timezone: "Europe/Paris") ?? null
+        }
+        if ts != null {
+          ."@timestamp" = ts
+          del(.date)
+          del(.time)
+          del(.date_time)
+        } else {
+          .tags = compact(flatten([.tags, "_dateparsefailure"]))
+        }
       }
   json:
     type: remap
@@ -87,7 +89,7 @@ transforms:
       if err == null {
         .body = parsed
         del(.payload)
-      } else {
+      } else if .payload != null {
         .tags = compact(flatten([.tags, "_jsonparsefailure"]))
       }
   split:
@@ -104,8 +106,8 @@ transforms:
     inputs: [split]
     source: |
       # mutate
-      .body.items.qty = to_int(.body.items.qty) ?? .body.items.qty
-      .service = replace(.service, r'[^a-z0-9]+', "_") ?? .service
+      if .body.items.qty != null { .body.items.qty = to_int(.body.items.qty) ?? .body.items.qty }
+      if is_string(.service) { .service = replace!(.service, r'[^a-z0-9]+', "_") }
   logstash_finalize:
     type: remap
     inputs: [mutate_2]

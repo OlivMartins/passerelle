@@ -11,6 +11,6 @@ transforms:
         if is_object(parsed) {
           . = merge(object!(.), object!(parsed))
         }
-      } else {
+      } else if .message != null {
         .tags = compact(flatten([.tags, "_jsonparsefailure"]))
       }

@@ -25,6 +25,8 @@ const convert = type => `mutate { convert => { "n" => "${type}" } }`;
 // Marque l’événement selon le résultat d’une condition
 const si = condition => `if ${condition} { mutate { add_tag => ["oui"] } } else { mutate { add_tag => ["non"] } }`;
 const DICTIONNAIRE = 'dictionary => { "200" => "OK" "404" => "Introuvable" }';
+// Une opération de mutate par champ, de a à h
+const SUR_CHAQUE_CHAMP = 'mutate { gsub => ["a", "x", "y"] uppercase => ["b"] lowercase => ["c"] capitalize => ["d"] strip => ["e"] split => { "f" => "," } join => { "g" => "," } copy => { "h" => "i" } }';
 
 export const CASES = [
   // Sans filtre : ce que chaque moteur fait d’un événement qu’il ne transforme pas
@@ -41,13 +43,14 @@ export const CASES = [
   { id: 'mutate_replace', filter: 'mutate { replace => { "a" => "v-%{b}" } }', events: [{ a: 1, b: 2 }, { b: 'x' }] },
   { id: 'mutate_copy', filter: 'mutate { copy => { "a" => "b" } }', events: [{ a: 1 }, { a: { x: 1 } }, { a: 1, b: 2 }] },
   { id: 'mutate_coerce', filter: 'mutate { coerce => { "a" => "défaut" } }', events: [{ a: null }, { a: 1 }] },
-  { id: 'mutate_coerce_champ_absent', filter: 'mutate { coerce => { "a" => "défaut" } }', events: [{ b: 2 }], known: 'coerce crée le champ absent ; Logstash ne remplace qu’un champ présent et nul' },
+  { id: 'mutate_coerce_champ_absent', filter: 'mutate { coerce => { "a" => "défaut" } }', events: [{ b: 2 }] },
 
   // mutate : convertir
   { id: 'mutate_convert_entier', filter: convert('integer'), events: [{ n: '42' }, { n: '-7' }, { n: 4.7 }, { n: true }] },
   { id: 'mutate_convert_entier_formes', filter: convert('integer'), events: [{ n: ' 42 ' }, { n: '42.9' }, { n: '1,000' }, { n: '0x1A' }], known: 'Logstash lit aussi « 42 » entouré d’espaces, « 42.9 », « 1,000 » et « 0x1A » ; la traduction les laisse en chaînes' },
   { id: 'mutate_convert_non_convertible', filter: convert('integer'), events: [{ n: 'x' }, { n: '' }], known: 'la valeur reste telle quelle des deux côtés, mais Logstash pose _mutate_error' },
-  { id: 'mutate_convert_champ_absent', filter: convert('integer'), events: [{ m: 1 }], known: 'convert crée le champ absent, à 0 ; Logstash ne fait rien' },
+  { id: 'mutate_convert_champ_absent', filter: convert('integer'), events: [{ m: 1 }] },
+  { id: 'mutate_convert_champ_nul', filter: convert('integer'), events: [{ n: null }] },
   { id: 'mutate_convert_tableau', filter: convert('integer'), events: [{ n: ['1', '2', 3.9] }], known: 'un tableau n’est pas converti élément par élément' },
   { id: 'mutate_convert_flottant', filter: convert('float'), events: [{ n: '1.5' }, { n: 3 }, { n: '1e3' }, { n: true }] },
   { id: 'mutate_convert_chaine', filter: convert('string'), events: [{ n: 42 }, { n: 1.5 }, { n: true }] },
@@ -60,11 +63,12 @@ export const CASES = [
   { id: 'mutate_gsub_groupes', filter: 'mutate { gsub => ["a", "(\\w+)@(\\w+)", "\\2 at \\1"] }', events: [{ a: 'alice@example' }], known: 'les groupes \\1 et \\2 du remplacement ne sont pas repris : le texte « ${2} at ${1} » est écrit tel quel' },
   { id: 'mutate_majuscules', filter: 'mutate { uppercase => ["a"] }', events: [{ a: 'été Abc ß' }, { a: 42 }] },
   { id: 'mutate_minuscules', filter: 'mutate { lowercase => ["a"] }', events: [{ a: 'ÉTÉ Abc' }, { a: 42 }] },
-  { id: 'mutate_capitalize', filter: 'mutate { capitalize => ["a"] }', events: [{ a: 'abc DEF' }, { a: 'x' }] },
+  { id: 'mutate_capitalize', filter: 'mutate { capitalize => ["a"] }', events: [{ a: 'abc DEF' }, { a: 'x' }, { a: 42 }] },
   { id: 'mutate_capitalize_accent', filter: 'mutate { capitalize => ["a"] }', events: [{ a: 'élan VITAL' }], known: 'une première lettre accentuée est coupée en deux octets : la valeur produite n’est plus de l’UTF-8 valide' },
   { id: 'mutate_strip', filter: 'mutate { strip => ["a"] }', events: [{ a: '  x  ' }, { a: '\tx\n' }, { a: 5 }] },
   { id: 'mutate_chaines_tableau', filter: 'mutate { gsub => ["a", "[0-9]+", "#"] uppercase => ["b"] lowercase => ["c"] strip => ["d"] }', events: [{ a: ['x1', 'y22'], b: ['x', 'y'], c: ['X', 'Y'], d: ['  x ', ' y'] }], known: 'gsub, uppercase, lowercase et strip ne traitent pas un tableau élément par élément' },
-  { id: 'mutate_champ_absent', filter: 'mutate { gsub => ["a", "x", "y"] uppercase => ["b"] lowercase => ["c"] capitalize => ["d"] strip => ["e"] split => { "f" => "," } join => { "g" => "," } copy => { "h" => "i" } }', events: [{ n: 1 }], known: 'une opération sur un champ absent crée ce champ, nul ou vide ; Logstash ne fait rien' },
+  { id: 'mutate_champ_absent', filter: SUR_CHAQUE_CHAMP, events: [{ n: 1 }] },
+  { id: 'mutate_champ_nul', filter: SUR_CHAQUE_CHAMP, events: [{ a: null, b: null, c: null, d: null, e: null, f: null, g: null, h: null }] },
 
   // mutate : tableaux
   { id: 'mutate_split', filter: 'mutate { split => { "a" => "," } }', events: [{ a: 'x,y,,z' }, { a: 'seul' }, { a: ['déjà', 'tableau'] }, { a: 42 }] },
@@ -85,8 +89,8 @@ export const CASES = [
   { id: 'commun_remove_field', filter: 'mutate { remove_field => ["a", "[x][y]"] }', events: [{ a: 1, b: 2 }, { x: { y: 1, z: 2 } }, { x: { y: 1 } }, { b: 2 }] },
   { id: 'commun_remove_field_dynamique', filter: 'mutate { remove_field => ["%{nom}"] }', events: [{ nom: 'a', a: 1 }], known: 'un nom de champ écrit avec %{…} n’est pas résolu : le champ désigné reste' },
   { id: 'commun_add_tag', filter: 'mutate { add_tag => ["t1", "t-%{n}"] }', events: [{ n: 1 }, { n: 2, tags: ['t0'] }, { n: 3, tags: ['t1'] }, { n: 4, tags: 'chaine' }] },
-  { id: 'commun_remove_tag', filter: 'mutate { remove_tag => ["t1"] }', events: [{ tags: ['t0', 't1'] }, { tags: ['t1'] }, { tags: 't1' }] },
-  { id: 'commun_remove_tag_sans_tags', filter: 'mutate { remove_tag => ["t1"] }', events: [{ n: 1 }], known: 'remove_tag crée un champ tags vide quand l’événement n’en a pas' },
+  { id: 'commun_remove_tag', filter: 'mutate { remove_tag => ["t1"] }', events: [{ tags: ['t0', 't1'] }, { tags: ['t1'] }, { tags: 't1' }, { tags: 't0' }] },
+  { id: 'commun_remove_tag_sans_tags', filter: 'mutate { remove_tag => ["t1"] }', events: [{ n: 1 }] },
 
   // %{champ} dans une valeur
   { id: 'sprintf_types', filter: 'mutate { add_field => { "k" => "%{n}" } }', events: [{ n: 'a' }, { n: 1 }, { n: 1.5 }, { n: true }] },
@@ -141,7 +145,8 @@ export const CASES = [
   { id: 'dissect_champ_ignore', filter: 'dissect { mapping => { "message" => "%{} %{niveau->} %{texte}" } }', lines: ['x INFO    le reste', 'x WARN le reste'] },
   { id: 'dissect_types', filter: 'dissect { mapping => { "message" => "%{n} %{f} %{s}" } convert_datatype => { "n" => "int" "f" => "float" } }', lines: ['12 3.5 texte'] },
   { id: 'dissect_types_non_convertibles', filter: 'dissect { mapping => { "message" => "%{n} %{f} %{s}" } convert_datatype => { "n" => "int" "f" => "float" } }', lines: ['x y texte'], known: 'Logstash pose _dataconversionuncoercible_<champ>_<type> ; la traduction ne pose rien' },
-  { id: 'dissect_source_absente', filter: 'dissect { mapping => { "message" => "%{a} %{b}" } }', events: [{ n: 1 }], known: 'la traduction pose _dissectfailure quand le champ source est absent ; Logstash ne fait rien' },
+  // Seule l’absence du champ est passée sous silence : un champ nul est un échec
+  { id: 'dissect_source_absente', filter: 'dissect { mapping => { "message" => "%{a} %{b}" } }', events: [{ n: 1 }, { message: null }] },
   { id: 'dissect_etiquette_echec', filter: 'dissect { mapping => { "message" => "%{a}|%{b}" } tag_on_failure => ["echec_decoupe"] }', lines: ['x|y', 'sans séparateur'] },
 
   // date
@@ -149,7 +154,8 @@ export const CASES = [
   { id: 'date_iso8601_formes', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ ts: '2026-03-10 08:15:30' }, { ts: '2026-03-10T08:15:30' }, { ts: '2026-03-10T08:15:30.123456Z' }] },
   { id: 'date_iso8601_jour_seul', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ ts: '2026-03-10' }], known: 'une date sans heure est lue par Logstash, à minuit ; la traduction la refuse' },
   { id: 'date_echec', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ ts: 'pas une date' }, { ts: '' }] },
-  { id: 'date_champ_absent', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ n: 1 }, { ts: null }], known: 'la traduction pose _dateparsefailure quand le champ est absent ou nul ; Logstash ne fait rien' },
+  { id: 'date_champ_absent', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ n: 1 }, { ts: null }] },
+  { id: 'date_unix_champ_absent', filter: 'date { match => ["ts", "UNIX"] }', events: [{ n: 1 }, { ts: null }] },
   { id: 'date_unix', filter: 'date { match => ["ts", "UNIX"] }', events: [{ ts: 1773130530 }, { ts: '1773130530' }] },
   { id: 'date_unix_decimales', filter: 'date { match => ["ts", "UNIX"] }', events: [{ ts: 1773130530.123 }, { ts: '1773130530.123' }], known: 'les décimales d’un horodatage UNIX sont perdues, et la chaîne « 1773130530.123 » est refusée' },
   { id: 'date_unix_ms', filter: 'date { match => ["ts", "UNIX_MS"] }', events: [{ ts: 1773130530123 }, { ts: '1773130530123' }] },
@@ -174,7 +180,7 @@ export const CASES = [
   { id: 'json_retire_la_source', filter: 'json { source => "message" remove_field => ["message"] }', lines: ['{"a":1}', 'pas du json'] },
   { id: 'json_invalide_ignore', filter: 'json { source => "message" skip_on_invalid_json => true }', lines: ['{"a":1}', 'pas du json'] },
   { id: 'json_source_non_chaine', filter: 'json { source => "charge" }', events: [{ charge: 42 }, { charge: { deja: 'objet' } }] },
-  { id: 'json_source_absente', filter: 'json { source => "charge" }', events: [{ n: 1 }, { charge: null }], known: 'la traduction pose _jsonparsefailure quand le champ source est absent ou nul ; Logstash ne fait rien' },
+  { id: 'json_source_absente', filter: 'json { source => "charge" }', events: [{ n: 1 }, { charge: null }] },
   { id: 'json_horodatage', filter: 'json { source => "message" }', lines: ['{"@timestamp":"2026-03-10T08:15:30.123Z","a":1}'] },
   { id: 'json_horodatage_invalide', filter: 'json { source => "message" }', lines: ['{"@timestamp":"pas une date","a":2}'], known: 'Logstash garde l’horodatage d’ingestion, range la valeur dans _@timestamp et pose _timestampparsefailure ; la traduction écrit la chaîne dans @timestamp' },
   { id: 'json_etiquette_echec', filter: 'json { source => "message" tag_on_failure => ["json_illisible"] }', lines: ['pas du json'] },
@@ -206,6 +212,7 @@ export const CASES = [
   { id: 'xml_sans_tableaux', filter: 'xml { source => "message" target => "doc" force_array => false }', lines: ['<a><b>1</b><c x="2">3</c></a>'], known: 'même sans tableaux forcés, la racine, les attributs, le texte et les nombres ne sont pas rendus comme par Logstash' },
   { id: 'xml_invalide', filter: 'xml { source => "message" target => "doc" }', lines: ['<a><b>1</a>', 'pas du xml'] },
   { id: 'xml_xpath', filter: 'xml { source => "message" store_xml => false xpath => { "/a/b/text()" => "b" } }', lines: ['<a><b>1</b><b>2</b></a>'], known: 'xpath n’est pas appliqué : le document entier est rangé sous xml' },
+  { id: 'xml_source_absente', filter: 'xml { source => "message" target => "doc" }', events: [{ n: 1 }, { message: null }, { message: '' }, { message: '  ' }] },
 
   // split
   { id: 'split_tableau', filter: 'split { field => "articles" }', events: [{ commande: 1, articles: ['a', 'b', 'c'] }, { commande: 2, articles: ['seul'] }] },
@@ -226,7 +233,8 @@ export const CASES = [
   // translate
   { id: 'translate_dictionnaire', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} }`, events: [{ code: '200' }, { code: '404' }, { code: '500' }, { n: 1 }] },
   { id: 'translate_valeur_de_repli', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} fallback => "inconnu" }`, events: [{ code: '200' }, { code: '500' }] },
-  { id: 'translate_repli_source_absente', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} fallback => "inconnu" }`, events: [{ n: 1 }], known: 'la valeur de repli est posée même quand le champ source est absent ; Logstash ne fait rien' },
+  // Seule l’absence du champ arrête la traduction : un champ nul reçoit la valeur de repli
+  { id: 'translate_repli_source_absente', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} fallback => "inconnu" add_tag => ["traduit"] }`, events: [{ n: 1 }, { code: null }] },
   { id: 'translate_nombre', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} }`, events: [{ code: 200 }] },
   { id: 'translate_cible_existante', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} }`, events: [{ code: '200', libelle: 'déjà' }], known: 'la cible qui existe déjà est écrasée ; Logstash la garde, sauf avec override' },
   { id: 'translate_override', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} override => true }`, events: [{ code: '200', libelle: 'déjà' }] },
@@ -239,7 +247,8 @@ export const CASES = [
   { id: 'fingerprint_murmur3', filter: 'fingerprint { source => "message" target => "empreinte" method => "MURMUR3" }', lines: ['abc'], known: 'MURMUR3 : Logstash donne un entier sur 32 bits, la traduction une chaîne tirée d’un autre hachage' },
   { id: 'fingerprint_sans_cible', filter: 'fingerprint { source => "message" method => "SHA256" }', lines: ['abc'], known: { v8: 'sans target, Logstash en mode ECS écrit dans [event][hash] ; la traduction écrit dans fingerprint, comme le mode historique' } },
   { id: 'fingerprint_nombre', filter: 'fingerprint { source => "n" target => "empreinte" method => "SHA256" }', events: [{ n: 42 }, { n: 1.5 }] },
-  { id: 'fingerprint_source_absente', filter: 'fingerprint { source => "absent" target => "empreinte" method => "SHA256" }', events: [{ n: 1 }], known: 'quand le champ source est absent, la traduction écrit l’empreinte d’une chaîne vide ; Logstash ne fait rien' },
+  // Seule l’absence du champ retient l’empreinte : un champ nul donne celle d’une chaîne vide
+  { id: 'fingerprint_source_absente', filter: 'fingerprint { source => "s" target => "empreinte" method => "SHA256" }', events: [{ n: 1 }, { s: null }] },
   { id: 'fingerprint_champs_concatenes', filter: 'fingerprint { source => ["a", "b"] target => "empreinte" method => "SHA256" concatenate_sources => true }', events: [{ a: 'x', b: 'y' }], known: 'avec concatenate_sources, la chaîne hachée n’est pas celle que compose Logstash' },
   { id: 'fingerprint_champs_separes', filter: 'fingerprint { source => ["a", "b"] target => "empreinte" method => "SHA256" }', events: [{ a: 'x', b: 'y' }], known: 'sans concatenate_sources, Logstash garde l’empreinte du dernier champ ; la traduction hache les champs réunis' },
 
@@ -255,6 +264,7 @@ export const CASES = [
 
   // truncate
   { id: 'truncate_octets', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: 'abcdefgh' }, { a: 'abc' }, { a: 12345678 }] },
+  { id: 'truncate_champ_absent', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ n: 1 }, { a: null }] },
   { id: 'truncate_accents', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: 'éééé' }], known: 'length_bytes compte des octets : Logstash coupe « éééé » en « éé », la traduction laisse la valeur entière' },
   { id: 'truncate_tableau', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: ['abcdefgh', 'x'] }], known: 'un tableau n’est pas tronqué élément par élément' },
 

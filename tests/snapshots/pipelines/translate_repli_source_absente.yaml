@@ -6,11 +6,14 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # translate
-      key = (to_string(.code) ?? "")
-      if key == "200" {
-        .libelle = "OK"
-      } else if key == "404" {
-        .libelle = "Introuvable"
-      } else {
-        .libelle = "inconnu"
+      if exists(.code) {
+        key = (to_string(.code) ?? "")
+        if key == "200" {
+          .libelle = "OK"
+        } else if key == "404" {
+          .libelle = "Introuvable"
+        } else {
+          .libelle = "inconnu"
+        }
+        .tags = compact(flatten([.tags, "traduit"]))
       }

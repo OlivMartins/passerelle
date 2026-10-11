@@ -9,6 +9,6 @@ transforms:
       parsed, err = parse_json(.message)
       if err == null {
         .doc = parsed
-      } else {
+      } else if .message != null {
         .tags = compact(flatten([.tags, "_jsonparsefailure"]))
       }
