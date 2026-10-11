@@ -11,13 +11,15 @@ export const ECS_MODES = ['v8', 'disabled'];
 
 // Lignes d’entrée d’un cas : un objet JSON par ligne (events), ou des lignes brutes (lines)
 export const inputOf = c => (c.lines || c.events.map(e => JSON.stringify(e))).map(l => l + '\n').join('');
+// Les événements sont décodés par le codec JSON ; les lignes brutes aussi quand le cas le demande
+const isJson = c => !c.lines || c.codec === 'json';
 
 const filterBlock = c => `filter {\n${c.filter}\n}\n`;
 const output = name => `output { file { path => "/work/out/${name}.ndjson" codec => json_lines } }\n`;
 
 // Pipeline que traduit Passerelle et que joue Vector
 export function translatedPipeline(c) {
-  return `input { stdin {${c.lines ? '' : ' codec => json_lines'} } }\n` + filterBlock(c) + output(c.id);
+  return `input { stdin {${isJson(c) ? ' codec => json_lines' : ''} } }\n` + filterBlock(c) + output(c.id);
 }
 
 /*
@@ -45,7 +47,7 @@ const UNDECORATE = {
 // Pipeline que joue Logstash : mêmes filtres, même codec
 export function logstashPipeline(c, mode) {
   const file = `path => "/work/in/${c.id}.ndjson" mode => "read" exit_after_read => true sincedb_path => "/dev/null" file_completed_action => "log" file_completed_log_path => "/work/out/.lus"`;
-  return `input { file { ${file} codec => ${c.lines ? 'plain' : 'json'} } }\n`
+  return `input { file { ${file} codec => ${isJson(c) ? 'json' : 'plain'} } }\n`
     + `filter {\n  ruby { code => '${UNDECORATE[mode]}\n  ' }\n}\n`
     + filterBlock(c) + output(`${c.id}.${mode}`);
 }

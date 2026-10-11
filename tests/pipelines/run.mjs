@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 /*
  * Banc d’équivalence Logstash / Vector : chaque cas est joué dans Logstash, sa traduction dans Vector,
- * et les événements produits sont mis côte à côte.
+ * et les événements produits sont comparés champ par champ.
  *
  *   node tests/pipelines/run.mjs [--only=regex] [--ecs=v8|disabled] [--verbose] [--yaml]
  *
  *   LOGSTASH_VERSION, VECTOR_VERSION   versions des images Docker (voir logstash.sh et vector.sh)
  *   PASSERELLE_PIPELINES_WORK          dossier de travail, sur un système de fichiers Linux
+ *
+ * Code de sortie : 0 si chaque cas se comporte comme annoncé dans cases.mjs, 1 sinon
+ * (écart non déclaré, ou écart connu qui a disparu sans que cases.mjs soit mis à jour).
  */
 import { readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, existsSync, openSync, closeSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -92,8 +95,82 @@ function vectorResult(id, t, codes) {
   return { events: eventsOf(join(VEC, 'out', `${id}.ndjson`)) };
 }
 
+/* ---------- Comparaison ---------- */
+/*
+ * Les événements sont comparés champ par champ, types compris : 42 n’est pas "42". Deux tolérances seulement,
+ * chacune désactivée par le champ « exact » d’un cas qui en fait l’inventaire :
+ *   original     en mode v8, les codecs de Logstash ajoutent [event][original] ; la traduction ne le pose pas
+ *   horodatage   un @timestamp posé à l’ingestion ne peut pas être égal des deux côtés : il est reconnu à ce
+ *                qu’il tombe pendant l’exécution du banc, et sa précision n’est pas comparée non plus
+ */
+const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+const canon = v => JSON.stringify(v, (k, x) => (isObj(x) ? Object.fromEntries(Object.keys(x).sort().map(key => [key, x[key]])) : x));
+
+function normalize(event, c, window) {
+  const e = structuredClone(event);
+  const exact = c.exact || [];
+  if (!exact.includes('original') && isObj(e.event)) {
+    delete e.event.original;
+    if (!Object.keys(e.event).length) delete e.event;
+  }
+  const ts = e['@timestamp'];
+  if (typeof ts === 'string' && Date.parse(ts) >= window[0] && Date.parse(ts) <= window[1]) {
+    const digits = (/\.(\d+)Z$/.exec(ts) || ['', ''])[1].length;
+    e['@timestamp'] = exact.includes('horodatage') ? `<ingestion, ${digits} décimales>` : '<ingestion>';
+  }
+  return e;
+}
+
+// Aligne les deux suites sur leurs événements identiques : un événement perdu ne décale pas les suivants
+function align(a, b) {
+  const n = a.length; const m = b.length;
+  const L = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+  const gaps = []; let gap = { a: [], b: [] }; let i = 0; let j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && a[i] === b[j]) { gaps.push(gap); gap = { a: [], b: [] }; i++; j++; }
+    else if (j >= m || (i < n && L[i + 1][j] >= L[i][j + 1])) gap.a.push(i++);
+    else gap.b.push(j++);
+  }
+  gaps.push(gap);
+  return gaps.filter(g => g.a.length || g.b.length);
+}
+
+function leaves(v, path, out) {
+  if (isObj(v) && Object.keys(v).length) for (const k of Object.keys(v)) leaves(v[k], path ? `${path}.${k}` : k, out);
+  else out.set(path, canon(v));
+  return out;
+}
+const short = s => (s.length > 120 ? s.slice(0, 117) + '…' : s);
+
+function compare(c, l, v, window) {
+  if (l.error) return { verdict: 'L✗', detail: l.error };
+  if (v.error) return { verdict: 'V✗', detail: v.error };
+  const ln = l.events.map(e => normalize(e, c, window)); const vn = v.events.map(e => normalize(e, c, window));
+  const diffs = [];
+  if (ln.length !== vn.length) diffs.push(`${ln.length} événement(s) côté Logstash, ${vn.length} côté Vector`);
+  for (const gap of align(ln.map(canon), vn.map(canon))) {
+    gap.a.forEach((i, k) => {
+      if (k >= gap.b.length) { diffs.push(`[événement ${i + 1}] sans équivalent côté Vector : ${short(canon(ln[i]))}`); return; }
+      const a = leaves(ln[i], '', new Map()); const b = leaves(vn[gap.b[k]], '', new Map());
+      for (const key of [...new Set([...a.keys(), ...b.keys()])].sort()) {
+        if (a.get(key) !== b.get(key)) diffs.push(`[événement ${i + 1}] ${key} : Logstash ${a.has(key) ? short(a.get(key)) : 'absent'} / Vector ${b.has(key) ? short(b.get(key)) : 'absent'}`);
+      }
+    });
+    for (const j of gap.b.slice(gap.a.length)) diffs.push(`[Vector seul] ${short(canon(vn[j]))}`);
+  }
+  return { verdict: diffs.length ? '≠' : '=', detail: diffs.join(' || ') };
+}
+
+function knownFor(c, mode) {
+  const k = c.known;
+  if (!k) return null;
+  return typeof k === 'string' ? k : k[mode] || null;
+}
+
 /* ---------- Principal ---------- */
 const cases = CASES.filter(c => !ONLY || ONLY.test(c.id));
+const started = Date.now();
 const translations = prepare(cases);
 const logstash = launch('logstash.sh', LS);
 const vector = launch('vector.sh', VEC);
@@ -102,22 +179,35 @@ for (const [name, run, dir] of [['Logstash', logstash, LS], ['Vector', vector, V
   console.error(`${name} n’a pas pu être lancé par Docker : voir ${dir}.log`);
   process.exit(1);
 }
+// Une minute de marge de part et d’autre : les horloges des conteneurs sont celles de la machine
+const window = [started - 60000, Date.now() + 60000];
 const codes = new Map(existsSync(join(VEC, 'codes')) ? readFileSync(join(VEC, 'codes'), 'utf8').split('\n').filter(Boolean).map(l => [l.split(' ')[0], Number(l.split(' ')[1])]) : []);
 console.log(`${logstash.version} / ${vector.version.replace(/^vector (\S+).*/, 'Vector $1')} / Node.js ${process.versions.node}`);
-console.log(`${cases.length * modes.length} pipelines joués par Logstash en ${logstash.seconds} s, ${cases.length} configurations par Vector en ${vector.seconds} s\n`);
+console.log(`${cases.length * modes.length} pipelines joués par Logstash en ${logstash.seconds} s, ${cases.length} configurations par Vector en ${vector.seconds} s (${WORK})\n`);
 
-const describe = r => r.error || `${r.events.length} événement(s)`;
-const dump = r => { if (args.verbose && r.events) for (const e of r.events) console.log(`          ${JSON.stringify(e)}`); };
-for (const c of cases) {
-  const t = translations.get(c.id);
-  console.log(c.id);
-  for (const mode of modes) {
-    const l = logstashResult(c.id, mode, logstash.text);
-    console.log(`    Logstash ${mode.padEnd(8)} : ${describe(l)}`);
-    dump(l);
+const totals = { same: 0, known: 0, failed: 0 };
+const failures = [];
+for (const mode of modes) {
+  console.log(`--- Logstash en ecs_compatibility ${mode}`);
+  for (const c of cases) {
+    const t = translations.get(c.id);
+    const res = compare(c, logstashResult(c.id, mode, logstash.text), vectorResult(c.id, t, codes), window);
+    const known = knownFor(c, mode);
+    const flagged = !!((t.stats && (t.stats.approx || t.stats.ko)) || (t.notes || []).some(n => n.level === 'warn' || n.level === 'err'));
+    let status;
+    // Un pipeline que Logstash refuse est un cas mal écrit, jamais un écart connu
+    if (res.verdict === '=' && !known) { status = 'ok   '; totals.same++; }
+    else if (res.verdict !== '=' && res.verdict !== 'L✗' && known) { status = 'connu'; totals.known++; }
+    else { status = 'ÉCHEC'; totals.failed++; failures.push(`${c.id} [${mode}]`); }
+    const why = res.verdict === '=' ? (known ? ' — écart connu disparu : retirez « known » dans cases.mjs' : '')
+      : res.verdict === 'L✗' ? ' — CAS À CORRIGER'
+      : known ? ` — ${known}${flagged ? '' : ' (non signalé par la traduction)'}` : ' — ÉCART NON DÉCLARÉ';
+    console.log(`${status} ${res.verdict.padEnd(3)} ${c.id}${why}`);
+    if (res.detail && (status === 'ÉCHEC' || args.verbose)) console.log(res.detail.split(' || ').map(d => `          ${d}`).join('\n'));
+    if (args.yaml && t.yaml) console.log(t.yaml.split('\n').map(l => `          | ${l}`).join('\n'));
   }
-  const v = vectorResult(c.id, t, codes);
-  console.log(`    Vector            : ${describe(v)}`);
-  dump(v);
-  if (args.yaml && t.yaml) console.log(t.yaml.split('\n').map(l => `          | ${l}`).join('\n'));
+  console.log('');
 }
+console.log(`Bilan : ${totals.same} identiques, ${totals.known} écarts connus, ${totals.failed} échecs.`);
+if (failures.length) console.log(`Échecs : ${failures.join(', ')}`);
+process.exit(totals.failed ? 1 : 0);
