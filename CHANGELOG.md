@@ -4,6 +4,15 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Non publié]
 
+### Ajouté
+
+- Banc d’équivalence Logstash / Vector (`npm run test:pipelines`) : chaque cas est joué dans Logstash, sa traduction dans Vector, et les événements produits sont comparés champ par champ, dans les deux modes de compatibilité ECS de Logstash. Les écarts connus sont inventoriés dans `tests/pipelines/cases.mjs`. Il demande Docker ; la CI épingle Logstash 9.5.5 et Vector 0.59.0.
+- Instantanés de la traduction de chaque cas de ce banc (`tests/snapshots/pipelines`), comparés par `npm test`.
+
+### Corrigé
+
+- Pipelines dont l’entrée n’est pas Kafka (`stdin`, `file`, `tcp`, `udp`, `http`, `beats`, `generator`) : la source Vector déclare désormais `log_namespace: true`, que suppose le VRL généré. Sans ce réglage, Vector refusait la configuration d’une entrée `stdin` en JSON, et rangeait sinon l’événement entier dans `message`.
+
 ## [1.1.1] - 2026-10-22
 
 Correctifs de sécurité du service et de la ligne de commande, et écarts de traduction DSL → SQL résolus : 578 cas du banc différentiel donnent le même résultat qu’Elasticsearch, contre 494 en 1.1.0. Mise à jour recommandée pour tout service exposé.

@@ -378,10 +378,11 @@ Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc diffé
 
 ```bash
 npm ci
-npm test            # traduit chaque exemple et vérifie le résultat
-npm run test:diff   # compare les résultats de ClickHouse à ceux d’Elasticsearch (voir tests/README.md)
-npm run build:ui    # dist/passerelle.html : l’interface autonome
-npm run build       # interface, binaire Linux x86_64 et archive de release
+npm test                 # traduit chaque exemple et vérifie le résultat
+npm run test:diff        # compare les résultats de ClickHouse à ceux d’Elasticsearch (voir tests/README.md)
+npm run test:pipelines   # compare les événements de Vector à ceux de Logstash (voir tests/README.md)
+npm run build:ui         # dist/passerelle.html : l’interface autonome
+npm run build            # interface, binaire Linux x86_64 et archive de release
 ```
 
 Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction, `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur.

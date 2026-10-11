@@ -54,3 +54,17 @@ jobs:
         env:
           CLICKHOUSE_LOCAL: ${{ github.workspace }}/clickhouse local
         run: npm run test:diff
+
+  pipelines:
+    name: Banc d'équivalence Logstash / Vector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Comparer les événements
+        env:
+          LOGSTASH_VERSION: 9.5.5
+          VECTOR_VERSION: 0.59.0
+        run: npm run test:pipelines
