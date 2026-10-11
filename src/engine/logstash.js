@@ -349,11 +349,14 @@ class VrlGen {
         return x;
       });
       const src = this.path(field);
-      if (pats.length === 1) { this.emit(`parsed, err = parse_grok(${src}, ${vraw(pats[0], 's')})`); this.open('if err == null'); this.mergeRoot('parsed'); }
-      else { this.emit(`parsed = ${pats.map(x => `parse_grok(${src}, ${vraw(x, 's')})`).join(' ?? ')} ?? null`); this.open('if parsed != null'); this.mergeRoot('object!(parsed)'); }
-      for (const [tmp, f] of moves) this.assign(this.path(f), `del(.${tmp})`);
-      for (const [f, t] of conv) { const fp = this.path(f); this.assign(fp, `${t === 'int' ? 'to_int' : 'to_float'}(${fp}) ?? ${fp}`); }
-      if (s.target) this.v.note('info', 'grok target', 'Les captures sont fusionnées à la racine ; déplacez-les si vous utilisiez target.');
+      // Avec target, les captures sont posées sous ce champ plutôt qu’à la racine
+      const tgt = s.target ? this.path(s.target) : '';
+      const under = f => (tgt ? `${tgt}.${fieldSegs(f).map(segName).join('.')}` : this.path(f));
+      const land = x => (tgt ? this.assign(tgt, `merge(object(${tgt}) ?? {}, ${x})`) : this.mergeRoot(x));
+      if (pats.length === 1) { this.emit(`parsed, err = parse_grok(${src}, ${vraw(pats[0], 's')})`); this.open('if err == null'); land('parsed'); }
+      else { this.emit(`parsed = ${pats.map(x => `parse_grok(${src}, ${vraw(x, 's')})`).join(' ?? ')} ?? null`); this.open('if parsed != null'); land('object!(parsed)'); }
+      for (const [tmp, f] of moves) this.assign(under(f), `del(${tgt}.${tmp})`);
+      for (const [f, t] of conv) { const fp = under(f); this.assign(fp, `${t === 'int' ? 'to_int' : 'to_float'}(${fp}) ?? ${fp}`); }
       this.common(s);
       if (failTags.length) { this.close('} else {'); this.ind++; this.failTags(failTags); }
       this.close();
@@ -468,9 +471,15 @@ class VrlGen {
   f_kv(s) {
     const src = this.path(s.source || 'message');
     const vd = String(s.value_split !== undefined ? s.value_split : '='); const fd = String(s.field_split !== undefined ? s.field_split : ' ');
-    if (fd.length > 1 || vd.length > 1) this.v.note('warn', 'kv : séparateurs multiples', `Logstash traite « ${fd.length > 1 ? fd : vd} » comme un ensemble de caractères ; seul le premier est utilisé par parse_key_value.`);
+    // Logstash lit field_split comme un ensemble de caractères, parse_key_value comme un seul séparateur :
+    // les caractères de l’ensemble sont ramenés au premier avant l’analyse
+    const many = fd.length > 1 && !fd.includes('\\');
+    if (vd.length > 1 || (fd.length > 1 && !many)) this.v.note('warn', 'kv : séparateurs multiples', `Logstash traite « ${vd.length > 1 ? vd : fd} » comme un ensemble de caractères ; seul le premier est utilisé par parse_key_value.`);
+    if (many) this.v.note('info', 'kv : plusieurs séparateurs de champs', `Chaque caractère de « ${fd} » sépare les champs, comme dans Logstash : ils sont ramenés au premier avant l’analyse. Une valeur entre guillemets qui contiendrait l’un d’eux le verrait remplacé.`);
     if (s.field_split_pattern || s.value_split_pattern) this.v.note('warn', 'kv : séparateurs regex', 'field_split_pattern / value_split_pattern ne sont pas repris.');
-    this.emit(`kv, err = parse_key_value(${src}, key_value_delimiter: ${vq(vd[0] || '=')}, field_delimiter: ${vq(fd[0] || ' ')})`);
+    const set = vraw(`[${[...new Set(fd)].map(ch => (/[\][^&~-]/.test(ch) ? '\\' + ch : ch === '$' ? '\\x24' : ch)).join('')}]`, 'r');
+    const text = !many ? src : `replace(${src}, ${set}, ${vq(fd[0])})${this.tget(src) === 'str' ? '' : ` ?? ${src}`}`;
+    this.emit(`kv, err = parse_key_value(${text}, key_value_delimiter: ${vq(vd[0] || '=')}, field_delimiter: ${vq(fd[0] || ' ')})`);
     this.open('if err == null');
     if (s.include_keys) this.emit(`kv = filter(kv) -> |key, _value| { includes([${lsList(s.include_keys).map(vq).join(', ')}], key) }`);
     if (s.exclude_keys) this.emit(`kv = filter(kv) -> |key, _value| { !includes([${lsList(s.exclude_keys).map(vq).join(', ')}], key) }`);
@@ -576,8 +585,9 @@ class VrlGen {
   }
   f_urldecode(s) {
     const x = this.path(s.field || 'message'); const t = this.tget(x);
-    if (s.all_fields) this.approx('urldecode all_fields', 'Seul le champ indiqué est décodé.');
-    if (t !== 'null') this.assign(x, t === 'str' ? `decode_percent(${x})` : `decode_percent(${x}) ?? ${x}`, t === 'str' ? 'str' : 'any');
+    // all_fields : chaque chaîne de l’événement est décodée, à toute profondeur
+    if (s.all_fields) { this.emit(`. = map_values(${this.root()}, recursive: true) -> |value| { if is_string(value) { decode_percent!(value) } else { value } }`); this.treset(); this.types.set('.', 'obj'); }
+    else if (t !== 'null') this.assign(x, t === 'str' ? `decode_percent(${x})` : `decode_percent(${x}) ?? ${x}`, t === 'str' ? 'str' : 'any');
     this.common(s); this.ok();
   }
   f_split(s) {

@@ -1,5 +1,4 @@
 # Couverture : 3 directs, 0 à vérifier, 0 à reprendre
-# À vérifier : kv : séparateurs multiples
 
 transforms:
   kv:
@@ -7,7 +6,7 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # kv
-      kv, err = parse_key_value(.message, key_value_delimiter: "=", field_delimiter: "&")
+      kv, err = parse_key_value(replace(.message, r'[\&?]', "&") ?? .message, key_value_delimiter: "=", field_delimiter: "&")
       if err == null {
         . = merge(object!(.), kv)
       }

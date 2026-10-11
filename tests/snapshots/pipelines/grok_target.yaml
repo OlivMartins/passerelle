@@ -8,7 +8,7 @@ transforms:
       # grok
       parsed, err = parse_grok(.message, s'%{WORD:verb} %{URIPATH:chemin}')
       if err == null {
-        . = merge(object!(.), parsed)
+        .http = merge(object(.http) ?? {}, parsed)
       } else {
         .tags = compact(flatten([.tags, "_grokparsefailure"]))
       }

@@ -1,5 +1,4 @@
-# Couverture : 3 directs, 1 à vérifier, 0 à reprendre
-# À vérifier : urldecode all_fields
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
 
 transforms:
   urldecode:
@@ -7,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # urldecode
-      .message = decode_percent(.message) ?? .message
+      . = map_values(object!(.), recursive: true) -> |value| { if is_string(value) { decode_percent!(value) } else { value } }

@@ -149,7 +149,8 @@ export const CASES = [
   { id: 'grok_source_nombre', filter: 'grok { match => { "message" => "%{WORD:verb}" } }', events: [{ message: 42 }], known: 'Logstash lit un nombre comme du texte ; la traduction pose _grokparsefailure' },
   { id: 'grok_etiquette_echec', filter: 'grok { match => { "message" => "%{IP:ip}" } tag_on_failure => ["echec_ip"] }', lines: ['10.0.0.1', 'pas une adresse'] },
   { id: 'grok_succes_seulement', filter: 'grok { match => { "message" => "%{IP:ip}" } add_tag => ["analyse"] add_field => { "source" => "grok" } }', lines: ['10.0.0.1', 'pas une adresse'] },
-  { id: 'grok_target', filter: 'grok { match => { "message" => "%{WORD:verb} %{URIPATH:chemin}" } target => "http" }', lines: ['GET /a'], known: 'target n’est pas appliqué : les captures sont posées à la racine' },
+  { id: 'grok_target', filter: 'grok { match => { "message" => "%{WORD:verb} %{URIPATH:chemin}" } target => "http" }', lines: ['GET /a'] },
+  { id: 'grok_target_imbrique', filter: 'grok { match => { "message" => "%{WORD:verb} %{NUMBER:[n][v]:int}" } target => "http" }', events: [{ message: 'GET 5' }, { message: 'GET 5', http: { x: 1 } }, { message: 'rien' }] },
   { id: 'grok_journal_apache', filter: 'grok { match => { "message" => "%{COMBINEDAPACHELOG}" } }', lines: ['192.168.1.10 - alice [10/Mar/2026:08:15:30 +0000] "GET /index.html?x=1 HTTP/1.1" 200 5123 "https://exemple.fr/" "Mozilla/5.0 (X11; Linux x86_64)"'], known: { v8: 'en mode ECS, COMBINEDAPACHELOG capture sous les noms ECS ([source][address], [http][request][method]…) et type les nombres ; la traduction garde les noms historiques (clientip, verb…)' } },
   { id: 'grok_ligne_syslog', filter: 'grok { match => { "message" => "%{SYSLOGLINE}" } }', lines: ['Mar 10 08:15:30 web-1 sshd[1234]: Accepted publickey for alice'], known: { v8: 'en mode ECS, SYSLOGLINE capture sous les noms ECS ; la traduction garde les noms historiques', disabled: 'le motif capture message, qui existe déjà : Logstash en fait un tableau, la traduction écrase' } },
 
@@ -205,7 +206,7 @@ export const CASES = [
   { id: 'kv_simple', filter: 'kv { }', lines: ['a=1 b=deux c="trois quatre"', 'a=1 a=2'] },
   { id: 'kv_mot_sans_valeur', filter: 'kv { }', lines: ['sans paire', 'espace=a b'], known: 'un mot sans « = » devient un champ à true ; Logstash l’ignore' },
   { id: 'kv_separateurs', filter: 'kv { field_split => "&" value_split => ":" }', lines: ['a:1&b:deux&c:3'] },
-  { id: 'kv_separateurs_multiples', filter: 'kv { field_split => "&?" }', lines: ['a=1&b=2?c=3'], known: 'field_split est réduit à son premier caractère' },
+  { id: 'kv_separateurs_multiples', filter: 'kv { field_split => "&?" }', lines: ['a=1&b=2?c=3', 'a=1?b=deux mots&c=3'] },
   { id: 'kv_prefixe_cible', filter: 'kv { prefix => "p_" target => "paires" }', lines: ['a=1 b=2'] },
   { id: 'kv_cles_choisies', filter: 'kv { include_keys => ["a", "b"] }', lines: ['a=1 b=2 c=3'] },
   { id: 'kv_cles_exclues', filter: 'kv { exclude_keys => ["b"] }', lines: ['a=1 b=2 c=3'] },
@@ -280,7 +281,7 @@ export const CASES = [
   // urldecode
   { id: 'urldecode_champ', filter: 'urldecode { field => "url" }', events: [{ url: 'a%20b%2Fc%C3%A9' }, { url: 'a+b' }, { url: '100%' }, { n: 1 }] },
   { id: 'urldecode_octet_invalide', filter: 'urldecode { field => "url" }', events: [{ url: '%E9' }], known: 'un octet qui n’est pas de l’UTF-8 est écrit « \\xE9 » par Logstash, « � » par la traduction' },
-  { id: 'urldecode_tous_les_champs', filter: 'urldecode { all_fields => true }', events: [{ a: 'x%20y', b: 'z%21' }], known: 'all_fields n’est pas appliqué : aucun champ n’est décodé, et message est créé à null' },
+  { id: 'urldecode_tous_les_champs', filter: 'urldecode { all_fields => true }', events: [{ a: 'x%20y', b: 'z%21' }, { n: 1, o: { p: 'z%21', q: ['t%22', 5] } }] },
 
   // truncate
   { id: 'truncate_octets', filter: 'truncate { fields => ["a"] length_bytes => 5 }', events: [{ a: 'abcdefgh' }, { a: 'abc' }, { a: 12345678 }] },
