@@ -376,8 +376,8 @@ class VrlGen {
       else if (f === 'TAI64N') { this.approx('Format TAI64N', 'Non pris en charge par parse_timestamp : format ignoré.'); }
       else {
         const sf = joda2strf(f);
-        if (!/%[Yy]/.test(sf)) this.v.note('warn', 'Date sans année', `Le format « ${f} » n’a pas d’année : Logstash la devine, parse_timestamp échouera. Ajoutez l’année (par ex. via format_timestamp(now(), "%Y")) avant l’analyse.`);
-        lines.push(`ts = parse_timestamp(${src}, ${vq(sf)}${tz}) ?? null`);
+        if (!/%[Yy]/.test(sf)) { lines.push({ yearless: sf }); this.v.note('info', 'Date sans année', `Le format « ${f} » n’a pas d’année : comme Logstash, la traduction prend l’année en cours, celle d’avant pour un événement de décembre lu en janvier, celle d’après pour un événement de janvier lu en décembre.`); }
+        else lines.push(`ts = parse_timestamp(${src}, ${vq(sf)}${tz}) ?? null`);
       }
     }
     // Champ absent ou nul : Logstash ne fait rien, pas même signaler un échec
@@ -387,6 +387,19 @@ class VrlGen {
     lines.forEach(l => {
       this.open('if ts == null');
       if (typeof l === 'string') this.emit(l);
+      else if (l.yearless) {
+        // Format sans année : l’année en cours, corrigée d’un an quand décembre et janvier se croisent
+        const zone = s.timezone ? tz : ', timezone: "local"';
+        const parse = year => `parse_timestamp(to_string(${year}) + " " + text, ${vq('%Y ' + l.yearless)}${tz}) ?? null`;
+        this.emit(`text = ${this.tget(src) === 'str' ? src : `to_string(${src}) ?? ""`}`);
+        this.emit(`year = to_int!(format_timestamp!(now(), format: "%Y"${zone}))`);
+        this.emit(`ts = ${parse('year')}`);
+        this.open('if ts != null');
+        this.emit(`months = format_timestamp!(ts, format: "%m"${zone}) + format_timestamp!(now(), format: "%m"${zone})`);
+        this.emit(`if months == "1201" { ts = ${parse('year - 1')} }`);
+        this.emit(`if months == "0112" { ts = ${parse('year + 1')} }`);
+        this.close();
+      }
       else if (l.unix === 'UNIX') {
         // Des secondes, avec ou sans décimales, en nombre ou en chaîne : comme Logstash, rien d’autre (ni « 1e9 », ni un booléen)
         this.open(`if match(${this.tget(src) === 'str' ? src : `to_string(${src}) ?? ""`}, r'^-?\\d+(\\.\\d+)?$')`);

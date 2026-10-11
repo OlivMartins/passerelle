@@ -181,7 +181,11 @@ export const CASES = [
   { id: 'date_fuseau', filter: 'date { match => ["ts", "yyyy-MM-dd HH:mm:ss"] timezone => "Europe/Paris" }', events: [{ ts: '2026-01-15 12:00:00' }, { ts: '2026-07-15 12:00:00' }, { ts: '2026-03-29 02:30:00' }] },
   { id: 'date_fuseau_heure_double', filter: 'date { match => ["ts", "yyyy-MM-dd HH:mm:ss"] timezone => "Europe/Paris" }', events: [{ ts: '2026-10-25 02:30:00' }], known: 'à la fin de l’heure d’été, 02:30 existe deux fois : Logstash prend la première, la traduction refuse la date' },
   { id: 'date_sans_fuseau', filter: 'date { match => ["ts", "yyyy-MM-dd HH:mm:ss"] }', events: [{ ts: '2026-01-15 12:00:00' }] },
-  { id: 'date_sans_annee', filter: 'date { match => ["ts", "MMM dd HH:mm:ss"] }', events: [{ ts: 'Mar 10 08:15:30' }], known: 'sans année dans le format, Logstash prend l’année courante ; la traduction refuse la date' },
+  // Sans année dans le format, les deux moteurs prennent l’année en cours, corrigée d’un an quand décembre et janvier se croisent :
+  // le résultat dépend donc du jour où le banc tourne, mais de la même façon des deux côtés
+  { id: 'date_sans_annee', filter: 'date { match => ["ts", "MMM dd HH:mm:ss"] }', events: [{ ts: 'Mar 10 08:15:30' }, { ts: 'Dec 31 23:59:59' }, { ts: 'Jan 01 00:00:01' }, { ts: 'pas une date' }] },
+  { id: 'date_sans_annee_fuseau', filter: 'date { match => ["ts", "MMM dd HH:mm:ss"] timezone => "Europe/Paris" }', events: [{ ts: 'Mar 10 08:15:30' }, { ts: 'Jul 14 08:15:30' }] },
+  { id: 'date_syslog', filter: 'date { match => ["ts", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss"] }', events: [{ ts: 'Mar  9 08:15:30' }, { ts: 'Mar 10 08:15:30' }] },
   { id: 'date_target', filter: 'date { match => ["ts", "ISO8601"] target => "quand" }', events: [{ ts: '2026-03-10T08:15:30.123Z' }] },
   // Une cible autre que @timestamp s’écrit elle aussi à la milliseconde : « .000 » quand elle est ronde, et pas plus de trois décimales
   { id: 'date_target_seconde_ronde', filter: 'date { match => ["ts", "ISO8601"] target => "quand" }', events: [{ ts: '2026-03-10T08:15:30Z' }, { ts: '2026-03-10T08:15:30.123456Z' }] },

@@ -1,5 +1,4 @@
 # Couverture : 3 directs, 0 à vérifier, 0 à reprendre
-# À vérifier : Date sans année
 
 transforms:
   date:
@@ -10,7 +9,14 @@ transforms:
       if .ts != null {
         ts = null
         if ts == null {
-          ts = parse_timestamp(.ts, "%b %d %H:%M:%S") ?? null
+          text = to_string(.ts) ?? ""
+          year = to_int!(format_timestamp!(now(), format: "%Y", timezone: "local"))
+          ts = parse_timestamp(to_string(year) + " " + text, "%Y %b %d %H:%M:%S") ?? null
+          if ts != null {
+            months = format_timestamp!(ts, format: "%m", timezone: "local") + format_timestamp!(now(), format: "%m", timezone: "local")
+            if months == "1201" { ts = parse_timestamp(to_string(year - 1) + " " + text, "%Y %b %d %H:%M:%S") ?? null }
+            if months == "0112" { ts = parse_timestamp(to_string(year + 1) + " " + text, "%Y %b %d %H:%M:%S") ?? null }
+          }
         }
         if ts != null {
           ."@timestamp" = ts
