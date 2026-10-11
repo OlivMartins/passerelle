@@ -9,7 +9,8 @@
     "build:ui": "node scripts/build.mjs --ui-only",
     "test": "node scripts/test.mjs && node tests/server/run.mjs",
     "test:update": "node scripts/test.mjs --update",
-    "test:diff": "node tests/differential/run.mjs"
+    "test:diff": "node tests/differential/run.mjs",
+    "test:pipelines": "node tests/pipelines/run.mjs"
   },
   "engines": {
     "node": ">=24"
