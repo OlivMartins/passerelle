@@ -204,7 +204,7 @@ export const CASES = [
 
   // kv
   { id: 'kv_simple', filter: 'kv { }', lines: ['a=1 b=deux c="trois quatre"', 'a=1 a=2'] },
-  { id: 'kv_mot_sans_valeur', filter: 'kv { }', lines: ['sans paire', 'espace=a b'], known: 'un mot sans « = » devient un champ à true ; Logstash l’ignore' },
+  { id: 'kv_mot_sans_valeur', filter: 'kv { }', lines: ['sans paire', 'espace=a b', 'a=1 mot b=2', '=x c=3'] },
   { id: 'kv_separateurs', filter: 'kv { field_split => "&" value_split => ":" }', lines: ['a:1&b:deux&c:3'] },
   { id: 'kv_separateurs_multiples', filter: 'kv { field_split => "&?" }', lines: ['a=1&b=2?c=3', 'a=1?b=deux mots&c=3'] },
   { id: 'kv_prefixe_cible', filter: 'kv { prefix => "p_" target => "paires" }', lines: ['a=1 b=2'] },
@@ -257,7 +257,10 @@ export const CASES = [
   // Seule l’absence du champ arrête la traduction : un champ nul reçoit la valeur de repli
   { id: 'translate_repli_source_absente', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} fallback => "inconnu" add_tag => ["traduit"] }`, events: [{ n: 1 }, { code: null }] },
   { id: 'translate_nombre', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} }`, events: [{ code: 200 }] },
-  { id: 'translate_cible_existante', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} }`, events: [{ code: '200', libelle: 'déjà' }], known: 'la cible qui existe déjà est écrasée ; Logstash la garde, sauf avec override' },
+  // Une cible qui existe déjà, même nulle, est gardée : rien n’est traduit
+  { id: 'translate_cible_existante', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} fallback => "inconnu" add_tag => ["traduit"] }`, events: [{ code: '200', libelle: 'déjà' }, { code: '500', libelle: null }] },
+  // Sans valeur de repli, add_tag ne vaut que si la clé est trouvée
+  { id: 'translate_sans_correspondance', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} add_tag => ["traduit"] }`, events: [{ code: '200' }, { code: '500' }] },
   { id: 'translate_override', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} override => true }`, events: [{ code: '200', libelle: 'déjà' }] },
   { id: 'translate_sans_cible', filter: `translate { source => "code" ${DICTIONNAIRE} }`, events: [{ code: '200' }], known: { v8: 'sans target, Logstash en mode ECS écrit sur place, dans le champ source ; la traduction écrit dans translation, comme le mode historique' } },
 

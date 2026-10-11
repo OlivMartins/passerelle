@@ -6,7 +6,7 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # translate
-      if exists(.code) {
+      if exists(.code) && !exists(.libelle) {
         key = (to_string(.code) ?? "")
         if key == "200" {
           .libelle = "OK"

@@ -56,6 +56,7 @@ transforms:
       # kv
       kv, err = parse_key_value(.data.extra, key_value_delimiter: "=", field_delimiter: "&")
       if err == null {
+        kv = filter(kv) -> |_key, value| { value != true }
         .extra = kv
       }
   translate:
@@ -63,7 +64,7 @@ transforms:
     inputs: [kv]
     source: |
       # translate
-      if exists(.data.country) {
+      if exists(.data.country) && !exists(.data.region) {
         key = (to_string(.data.country) ?? "")
         if key == "FR" {
           .data.region = "EMEA"

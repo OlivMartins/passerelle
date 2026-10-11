@@ -481,6 +481,8 @@ class VrlGen {
     const text = !many ? src : `replace(${src}, ${set}, ${vq(fd[0])})${this.tget(src) === 'str' ? '' : ` ?? ${src}`}`;
     this.emit(`kv, err = parse_key_value(${text}, key_value_delimiter: ${vq(vd[0] || '=')}, field_delimiter: ${vq(fd[0] || ' ')})`);
     this.open('if err == null');
+    // Un mot sans séparateur de valeur, que parse_key_value rend avec la valeur true, n’est pas une paire pour Logstash
+    this.emit('kv = filter(kv) -> |_key, value| { value != true }');
     if (s.include_keys) this.emit(`kv = filter(kv) -> |key, _value| { includes([${lsList(s.include_keys).map(vq).join(', ')}], key) }`);
     if (s.exclude_keys) this.emit(`kv = filter(kv) -> |key, _value| { !includes([${lsList(s.exclude_keys).map(vq).join(', ')}], key) }`);
     if (s.prefix) this.emit(`kv = map_keys(kv) -> |key| { ${vq(s.prefix)} + key }`);
@@ -536,28 +538,37 @@ class VrlGen {
     if (s.regex) this.approx('translate regex', 'Les clés regex ne sont pas reprises : correspondance exacte uniquement.');
     const entries = lsPairs(s.dictionary);
     if (!s.dictionary_path && !entries.length) return this.ko(p, 'translate sans dictionnaire.');
-    // Sans champ source, Logstash ne traduit rien : ni valeur de repli, ni add_field, ni add_tag
-    const guarded = !this.present(src);
-    if (guarded) this.open(`if exists(${src})`);
+    // Logstash ne traduit que si le champ source est présent et si la cible n’existe pas encore, sauf avec override.
+    // Sinon rien ne se passe : ni valeur de repli, ni add_field, ni add_tag.
+    const when = [];
+    if (!this.present(src)) when.push(`exists(${src})`);
+    if (!s.override) when.push(`!exists(${tgt})`);
+    if (when.length) this.open(`if ${when.join(' && ')}`);
     this.emit(`key = ${this.asStr(src)}`);
+    // Sans valeur de repli, add_field, add_tag et remove_field ne valent que si la clé est trouvée
+    const extras = s.fallback === undefined && (s.add_field || s.add_tag || s.remove_field || s.remove_tag);
     if (s.dictionary_path) {
       const name = compName('dict_' + String(s.dictionary_path).split('/').pop().replace(/\.\w+$/, ''));
       const csvPath = String(s.dictionary_path).replace(/\.(ya?ml|json)$/i, '.csv');
       this.v.enrich[name] = { type: 'file', file: { path: csvPath, encoding: { type: 'csv', include_headers: true } }, schema: { key: 'string', value: 'string' } };
       this.emit(`row, err = get_enrichment_table_record(${vq(name)}, { "key": key })`);
       this.open('if err == null'); this.assign(tgt, 'row.value');
+      if (extras) this.common(s);
       if (s.fallback !== undefined) { this.close('} else {'); this.ind++; this.assign(tgt, this.sprintf(s.fallback), 'str'); }
       this.close(); this.tset(tgt, 'any');
       this.v.note('warn', 'Dictionnaire externe', `${s.dictionary_path} doit être converti en ${csvPath}, un CSV avec l’en-tête key,value, pour la table d’enrichissement « ${name} ».`);
     } else {
+      if (extras) this.emit('found = true');
       entries.forEach(([k, v], i) => { this.emit(`${i === 0 ? 'if' : '} else if'} key == ${vq(k)} {`); this.ind++; this.emit(`${tgt} = ${this.sprintfValue(v)}`); this.ind--; });
       if (s.fallback !== undefined) { this.emit('} else {'); this.ind++; this.emit(`${tgt} = ${this.sprintf(s.fallback)}`); this.ind--; }
+      else if (extras) { this.emit('} else {'); this.ind++; this.emit('found = false'); this.ind--; }
       this.emit('}');
       this.tset(tgt, s.fallback !== undefined ? 'str' : 'any');
+      if (extras) { this.open('if found'); this.common(s); this.close(); }
       if (entries.length > 50) this.v.note('opt', 'Grand dictionnaire', 'Au-delà de quelques dizaines d’entrées, une table d’enrichissement CSV est plus lisible et plus rapide qu’une cascade de if.');
     }
-    this.common(s);
-    if (guarded) { this.close(); this.tset(tgt, 'any'); }
+    if (!extras) this.common(s);
+    if (when.length) { this.close(); this.tset(tgt, 'any'); }
     this.ok();
   }
   f_fingerprint(s) {

@@ -8,5 +8,6 @@ transforms:
       # kv
       kv, err = parse_key_value(.requete, key_value_delimiter: "=", field_delimiter: " ")
       if err == null {
+        kv = filter(kv) -> |_key, value| { value != true }
         . = merge(object!(.), kv)
       }

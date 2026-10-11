@@ -8,6 +8,7 @@ transforms:
       # kv
       kv, err = parse_key_value(.message, key_value_delimiter: "=", field_delimiter: " ")
       if err == null {
+        kv = filter(kv) -> |_key, value| { value != true }
         kv = map_keys(kv) -> |key| { "p_" + key }
         .paires = kv
       }

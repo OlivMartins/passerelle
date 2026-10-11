@@ -18,6 +18,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 - `json` sans `target` : un JSON valide qui n’est pas un objet (tableau, nombre, chaîne, `null`) reçoit l’étiquette d’échec, comme dans Logstash, y compris avec `skip_on_invalid_json` ; les options `add_field`, `add_tag` et `remove_field` ne lui sont plus appliquées.
 - `split` : l’option `target` est appliquée (l’élément va dans le champ cible, le champ d’origine reste entier) ; un élément vide ou nul ne donne plus d’événement ; une chaîne qui ne donne qu’un élément n’est pas touchée, et une chaîne vide ne donne aucun événement ; un champ absent, nul ou d’un autre type reçoit `_split_type_failure`.
 - Options qui n’étaient pas appliquées : `target` de `grok` (les captures vont sous le champ cible), `all_fields` de `urldecode` (chaque chaîne de l’événement est décodée, à toute profondeur) et un `field_split` de `kv` à plusieurs caractères (chacun sépare les champs).
+- `kv` : un mot sans séparateur de valeur n’est plus rendu comme un champ à `true`. `translate` : une cible qui existe déjà est gardée, sauf avec `override` ; sans valeur de repli, `add_field` et `add_tag` ne sont appliqués que si la clé est trouvée.
 - `remove_field` avec un nom calculé (`%{nom}`) : le champ désigné est retiré, que la valeur obtenue s’écrive `a` ou `[a][b]`. Le nom n’était pas résolu, et rien n’était retiré.
 
 ## [1.1.1] - 2026-10-22
