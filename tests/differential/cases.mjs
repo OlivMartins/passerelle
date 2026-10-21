@@ -16,7 +16,7 @@
  *   tol        tolérance relative pour les mesures approchées (cardinality, percentiles)
  *   config     options de configuration propres au cas, fusionnées avec celles du banc
  */
-import { BASE, DAY } from './dataset.mjs';
+import { BASE, DAY, dataset } from './dataset.mjs';
 
 const TS = '@timestamp';
 const T10 = BASE + 2 * DAY; // 2026-03-10T00:00:00Z
@@ -24,7 +24,8 @@ const PARIS = ['UTC', 'Europe/Paris'];
 const STRICT = { clickhouse: { text_match: 'strict' } };
 const total = query => ({ size: 0, track_total_hits: true, query });
 const perDay = aggs => ({ size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day' }, aggs } } });
-const CLASSE = "if (doc['latency_ms'].value < 100) { emit('rapide'); } else if (doc['latency_ms'].value < 1000) { emit('normal'); } else { emit('lent'); }";
+const EPOCH = k => Date.parse(dataset()[k]['@timestamp']); // horodatage exact du document k
+const CLASSE ="if (doc['latency_ms'].value < 100) { emit('rapide'); } else if (doc['latency_ms'].value < 1000) { emit('normal'); } else { emit('lent'); }";
 
 export const CASES = [
   /* ---------- Regroupements ---------- */
@@ -287,5 +288,27 @@ export const CASES = [
   { id: 'composite_page_simple', dsl: { size: 0, aggs: { c: { composite: { size: 10, after: { svc: 'cart', h: 'web-3' }, sources: [{ svc: { terms: { field: 'service' } } }, { h: { terms: { field: 'host' } } }] } } } } },
   { id: 'composite_histogramme', composite: 'c', dsl: { size: 0, aggs: { c: { composite: { size: 9, sources: [{ tranche: { histogram: { field: 'latency_ms', interval: 500 } } }, { svc: { terms: { field: 'service', order: 'desc' } } }] } } } } },
   { id: 'composite_export_complet', composite: 'c', config: { clickhouse: { composite_mode: 'stream' } }, dsl: { size: 0, aggs: { c: { composite: { size: 400, sources: [{ svc: { terms: { field: 'service' } } }, { h: { terms: { field: 'host' } } }, { lvl: { terms: { field: 'level' } } }, { st: { terms: { field: 'status' } } }, { m: { terms: { field: 'http.method' } } }] }, aggs: { lat: { avg: { field: 'latency_ms' } } } } } } },
-  { id: 'composite_multivalue', composite: 'c', dsl: { size: 0, aggs: { c: { composite: { size: 10, sources: [{ t: { terms: { field: 'tags' } } }, { svc: { terms: { field: 'service' } } }] } } } } }
+  { id: 'composite_multivalue', composite: 'c', dsl: { size: 0, aggs: { c: { composite: { size: 10, sources: [{ t: { terms: { field: 'tags' } } }, { svc: { terms: { field: 'service' } } }] } } } } },
+
+  /* ---------- Écarts relevés par l’audit du 2026-10-21 : filtres et texte ---------- */
+  // term, prefix et regexp sur un champ texte portent sur les mots analysés, pas sur la valeur entière
+  { id: 'audit_term_champ_texte', known: 'term sur un champ texte : la valeur entière est comparée, pas les mots', dsl: total({ term: { message: 'timeout' } }) },
+  { id: 'audit_prefix_champ_texte', known: 'prefix sur un champ texte : le début de la valeur entière est comparé, pas celui des mots', dsl: total({ prefix: { message: 'time' } }) },
+  { id: 'audit_regexp_champ_texte', known: 'regexp sur un champ texte : l’expression porte sur la valeur entière, pas sur les mots', dsl: total({ regexp: { message: 'time.*' } }) },
+  // best_fields (défaut) avec operator and : tous les mots dans un même champ
+  { id: 'audit_multi_match_et_deux_champs', known: 'multi_match best_fields avec and : un mot dans un champ et l’autre dans un autre champ suffisent (logique cross_fields)', dsl: total({ multi_match: { query: 'timeout payment', fields: ['message', 'title'], operator: 'and' } }) },
+  // bool_prefix : le dernier mot est un préfixe, « upstr » doit trouver « upstream » dans title
+  { id: 'audit_multi_match_bool_prefix', known: 'multi_match bool_prefix : le dernier mot est cherché en entier, pas comme un préfixe', dsl: total({ multi_match: { query: 'connection upstr', type: 'bool_prefix', fields: ['message', 'title'] } }) },
+  // « Connection reset by peer » : peer est à deux positions de l’endroit attendu
+  { id: 'audit_phrase_slop', known: 'slop ignoré : les mots doivent être adjacents', dsl: total({ match_phrase: { message: { query: 'connection peer', slop: 2 } } }) },
+  { id: 'audit_query_string_proximite', known: 'proximité ~N ignorée : les mots doivent être adjacents', dsl: total({ query_string: { query: 'message:"connection peer"~2' } }) },
+  // Aucun mot après analyse : zero_terms_query vaut none par défaut, aucun document
+  { id: 'audit_match_sans_mot', known: 'match sans mot exploitable : aucune condition, donc tous les documents', dsl: total({ match: { message: '!!!' } }) },
+  // Deux lettres inversées comptent pour une seule modification (transpositions: true par défaut)
+  { id: 'audit_flou_transposition', known: 'fuzzy : une transposition compte pour deux modifications (editDistance)', dsl: total({ fuzzy: { message: { value: 'tiemout', fuzziness: 1 } } }) },
+  { id: 'audit_term_epoch', known: 'term sur une date avec un epoch en millisecondes : comparé tel quel à la colonne, sans conversion en date', dsl: total({ term: { [TS]: EPOCH(5) } }) },
+  { id: 'audit_terms_epoch', known: 'terms sur une date avec des epoch en millisecondes : comparés tels quels à la colonne, sans conversion en date', dsl: total({ terms: { [TS]: [EPOCH(5), EPOCH(6)] } }) },
+  { id: 'audit_plage_format', known: 'range avec un format de date personnalisé : la valeur est recopiée, ClickHouse ne sait pas la lire', dsl: total({ range: { [TS]: { gte: '09/03/2026', lt: '10/03/2026', format: 'dd/MM/yyyy' } } }) },
+  { id: 'audit_ids', dsl: { size: 5, sort: [{ [TS]: 'asc' }], query: { ids: { values: ['3', '10', '2999', 'abc'] } } } },
+  { id: 'audit_ids_vide', dsl: total({ ids: { values: [] } }) }
 ];
