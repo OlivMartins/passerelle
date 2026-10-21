@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE timestamp IN (1772928576192, 1772928691910);
+WHERE timestamp IN (fromUnixTimestamp64Milli(toInt64(1772928576192)), fromUnixTimestamp64Milli(toInt64(1772928691910)));

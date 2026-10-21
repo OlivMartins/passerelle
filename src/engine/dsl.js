@@ -644,7 +644,8 @@ function matchClause(ctx, field, o, type) {
   }
   textIndexNote(ctx, f);
   const words = esTokens(q);
-  if (!words.length) { ctx.stats.ok++; return null; }
+  // Aucun mot après analyse : aucun document, sauf zero_terms_query: all
+  if (!words.length) { ctx.stats.ok++; return o.zero_terms_query === 'all' ? null : 'false'; }
   if (!strictText(ctx)) ctx.notes.add('info', 'Recherche plein texte par tokens', 'Chaque mot est cherché par hasToken() dans la colonne mise en minuscules, ce qu’un index text sait exploiter. Un mot simple trouve aussi ses occurrences collées à un autre par « _ », « . » ou une apostrophe (user dans user_id), ce qu’Elasticsearch ne fait pas. Pour une équivalence stricte, clickhouse.text_match: strict ajoute à chaque mot une vérification par expression régulière.');
   if (type === 'match') {
     if (o.fuzziness !== undefined && String(o.fuzziness) !== '0') {
@@ -691,7 +692,11 @@ function clauseSQL(ctx, q) {
       const sources = ci ? undefined : runtimeFilter(ctx, field, [v]);
       if (sources !== undefined) { ctx.stats.ok++; return sources; }
       const f = mapField(ctx, field); ctx.stats.ok++;
+      // Champ texte : term compare la valeur, sans l’analyser, à chacun des mots (en minuscules) du champ
+      if (isTextField(ctx, field) && !ci) { textIndexNote(ctx, f); const t = esTokens(String(v)); return t.length === 1 && t[0] === String(v) ? wordCond(ctx, f, t[0]) : 'false'; }
       if (ci) return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(v))}`);
+      // Date donnée en epoch millis, comme dans range
+      if (typeof v === 'number' && isDateField(ctx, field)) return `${f} = ${epochMillisSQL(v)}`;
       return isArrayField(ctx, field) ? `has(${f}, ${chVal(v)})` : `${f} = ${chVal(v)}`;
     }
     case 'terms': {
@@ -702,7 +707,7 @@ function clauseSQL(ctx, q) {
       if (sources !== undefined) { ctx.stats.ok++; return sources; }
       const f = mapField(ctx, field); ctx.stats.ok++;
       if (isArrayField(ctx, field)) return vals.length === 1 ? `has(${f}, ${chVal(vals[0])})` : `hasAny(${f}, [${vals.map(chVal).join(', ')}])`;
-      return inList(ctx, f, vals.map(chVal));
+      return inList(ctx, f, vals.map(v => (typeof v === 'number' && isDateField(ctx, field) ? epochMillisSQL(v) : chVal(v))));
     }
     case 'range': { const [field, spec] = fieldEntry(body); return rangeClause(ctx, field, spec); }
     case 'exists': {
@@ -725,6 +730,8 @@ function clauseSQL(ctx, q) {
       const v = isObj(raw) ? raw.value : raw; const ci = isObj(raw) && raw.case_insensitive;
       ctx.stats.ok++;
       H(ctx, 'filters', `${field} commence par « ${v} »`);
+      // Champ texte : l’un des mots commence par la valeur, comme pour fuzzy
+      if (isTextField(ctx, field)) { const f = mapField(ctx, field); return `arrayExists(t -> startsWith(t, ${chStr(ci ? asciiLower(v) : v)}), tokens(lowerUTF8(${f})))`; }
       return onValues(ctx, field, x => (ci ? `startsWith(lower(${x}), ${chStr(asciiLower(v))})` : `startsWith(${x}, ${chStr(v)})`));
     }
     case 'wildcard': {
@@ -761,7 +768,10 @@ function clauseSQL(ctx, q) {
       else if (ci && /[^\x00-\x7f]/.test(v)) { ctx.stats.approx++; ctx.notes.add('warn', 'regexp insensible à la casse', 'ClickHouse replie la casse des lettres accentuées du motif. Elasticsearch le fait selon sa version : oui en 9.5, non en 7.17 et 8.19, où « É » ne trouve pas « é ».'); }
       else ctx.stats.ok++;
       H(ctx, 'filters', `${field} correspond à /${v}/`);
-      return onValues(ctx, field, x => `match(${x}, ${chStr('^(?:' + (ci ? regexFoldCase(v) : v) + ')$')})`);
+      const re = chStr('^(?:' + (ci ? regexFoldCase(v) : v) + ')$');
+      // Champ texte : l’expression porte sur chacun des mots, comme pour fuzzy
+      if (isTextField(ctx, field)) return `arrayExists(t -> match(t, ${re}), tokens(lowerUTF8(${f})))`;
+      return onValues(ctx, field, x => `match(${x}, ${re})`);
     }
     case 'fuzzy': {
       const [field, raw] = fieldEntry(body);
@@ -789,7 +799,11 @@ function clauseSQL(ctx, q) {
       const mtype = body.type || 'best_fields';
       const op = String(body.operator || 'or').toLowerCase();
       if (/phrase/.test(mtype)) return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query }, mtype === 'phrase' ? 'match_phrase' : 'match_phrase_prefix')));
-      if (op === 'and' || type === 'combined_fields') {
+      // bool_prefix : chaque mot peut suffire, dans n’importe quel champ, le dernier n’étant qu’un début de mot
+      if (mtype === 'bool_prefix') return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query }, 'match_bool_prefix')));
+      // cross_fields et combined_fields : les mots peuvent se répartir entre les champs.
+      // best_fields et most_fields avec and : tous les mots dans un même champ (branche finale).
+      if (type === 'combined_fields' || (op === 'and' && mtype === 'cross_fields')) {
         const toks = [...new Set(esTokens(body.query))];
         const tf = fields.filter(f => isTextField(ctx, f)); const kf = fields.filter(f => !isTextField(ctx, f));
         ctx.stats.ok++;
@@ -798,7 +812,7 @@ function clauseSQL(ctx, q) {
         const tokConds = tf.length ? andJoin(toks.map(t => orJoin(tf.map(f => wordCond(ctx, mapField(ctx, f), t))))) : null;
         return orJoin([tokConds].concat(kf.map(f => `${mapField(ctx, f)} = ${chVal(body.query)}`)).filter(x => x !== null));
       }
-      return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query, minimum_should_match: body.minimum_should_match, fuzziness: body.fuzziness }, 'match')));
+      return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query, operator: body.operator, minimum_should_match: body.minimum_should_match, fuzziness: body.fuzziness, zero_terms_query: body.zero_terms_query }, 'match')));
     }
     case 'query_string': case 'simple_query_string': {
       const defFields = body.default_field ? (body.default_field === '*' ? textFieldsOr(ctx) : [body.default_field]) : body.fields ? body.fields.map(f => String(f).replace(/\^[\d.]+$/, '')) : textFieldsOr(ctx);
@@ -1115,7 +1129,12 @@ function buildLevel(ctx, name, def) {
       break;
     }
     case 'multi_terms': {
-      (body.terms || []).forEach((t, i) => { const k = mapField(ctx, t.field); ctx.groupCols.add(k); L.keys.push({ sql: k, alias: aliasOf(`${name}_${t.field}`) }); });
+      (body.terms || []).forEach(t => {
+        const k = mapField(ctx, t.field); const ct = fieldType(ctx, t.field); ctx.groupCols.add(k); L.keys.push({ sql: k, alias: aliasOf(`${name}_${t.field}`) });
+        // Comme terms : un document sans l’un des champs ne forme pas de groupe
+        if (ct && ct.nullable) L.where.push(`isNotNull(${k})`);
+        else if (emptyIsMissing(ctx, ct)) L.where.push(`${k} != ''`);
+      });
       L.size = body.size !== undefined ? chInt(body.size, 'multi_terms.size') : 10; L.limitable = true; L.order = withKeyTiebreak(parseOrder(body.order, L.order));
       ctx.stats.ok++; H(ctx, 'groups', `par ${(body.terms || []).map(t => t.field).join(' + ')} (${L.size} premiers)`);
       break;

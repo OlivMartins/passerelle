@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE message = 'timeout';
+WHERE hasToken(lowerUTF8(message), 'timeout');

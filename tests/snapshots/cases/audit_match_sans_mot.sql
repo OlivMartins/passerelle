@@ -3,4 +3,5 @@
 -- Total (track_total_hits)
 SELECT
     count() AS total
-FROM logs.events;
+FROM logs.events
+WHERE false;

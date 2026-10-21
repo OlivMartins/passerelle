@@ -293,22 +293,25 @@ export const CASES = [
 
   /* ---------- Écarts relevés par l’audit du 2026-10-21 : filtres et texte ---------- */
   // term, prefix et regexp sur un champ texte portent sur les mots analysés, pas sur la valeur entière
-  { id: 'audit_term_champ_texte', known: 'term sur un champ texte : la valeur entière est comparée, pas les mots', dsl: total({ term: { message: 'timeout' } }) },
-  { id: 'audit_prefix_champ_texte', known: 'prefix sur un champ texte : le début de la valeur entière est comparé, pas celui des mots', dsl: total({ prefix: { message: 'time' } }) },
-  { id: 'audit_regexp_champ_texte', known: 'regexp sur un champ texte : l’expression porte sur la valeur entière, pas sur les mots', dsl: total({ regexp: { message: 'time.*' } }) },
+  { id: 'audit_term_champ_texte', dsl: total({ term: { message: 'timeout' } }) },
+  { id: 'audit_prefix_champ_texte', dsl: total({ prefix: { message: 'time' } }) },
+  // Valeur non analysée : les mots du champ sont en minuscules, une majuscule ne trouve rien
+  { id: 'audit_term_champ_texte_majuscule', dsl: total({ term: { message: 'Timeout' } }) },
+  { id: 'audit_prefix_champ_texte_majuscule', dsl: total({ prefix: { message: 'Time' } }) },
+  { id: 'audit_regexp_champ_texte', dsl: total({ regexp: { message: 'time.*' } }) },
   // best_fields (défaut) avec operator and : tous les mots dans un même champ
-  { id: 'audit_multi_match_et_deux_champs', known: 'multi_match best_fields avec and : un mot dans un champ et l’autre dans un autre champ suffisent (logique cross_fields)', dsl: total({ multi_match: { query: 'timeout payment', fields: ['message', 'title'], operator: 'and' } }) },
+  { id: 'audit_multi_match_et_deux_champs', dsl: total({ multi_match: { query: 'timeout payment', fields: ['message', 'title'], operator: 'and' } }) },
   // bool_prefix : le dernier mot est un préfixe, « upstr » doit trouver « upstream » dans title
-  { id: 'audit_multi_match_bool_prefix', known: 'multi_match bool_prefix : le dernier mot est cherché en entier, pas comme un préfixe', dsl: total({ multi_match: { query: 'connection upstr', type: 'bool_prefix', fields: ['message', 'title'] } }) },
+  { id: 'audit_multi_match_bool_prefix', dsl: total({ multi_match: { query: 'connection upstr', type: 'bool_prefix', fields: ['message', 'title'] } }) },
   // « Connection reset by peer » : peer est à deux positions de l’endroit attendu
   { id: 'audit_phrase_slop', known: 'slop ignoré : les mots doivent être adjacents', dsl: total({ match_phrase: { message: { query: 'connection peer', slop: 2 } } }) },
   { id: 'audit_query_string_proximite', known: 'proximité ~N ignorée : les mots doivent être adjacents', dsl: total({ query_string: { query: 'message:"connection peer"~2' } }) },
   // Aucun mot après analyse : zero_terms_query vaut none par défaut, aucun document
-  { id: 'audit_match_sans_mot', known: 'match sans mot exploitable : aucune condition, donc tous les documents', dsl: total({ match: { message: '!!!' } }) },
+  { id: 'audit_match_sans_mot', dsl: total({ match: { message: '!!!' } }) },
   // Deux lettres inversées comptent pour une seule modification (transpositions: true par défaut)
   { id: 'audit_flou_transposition', known: 'fuzzy : une transposition compte pour deux modifications (editDistance)', dsl: total({ fuzzy: { message: { value: 'tiemout', fuzziness: 1 } } }) },
-  { id: 'audit_term_epoch', known: 'term sur une date avec un epoch en millisecondes : comparé tel quel à la colonne, sans conversion en date', dsl: total({ term: { [TS]: EPOCH(5) } }) },
-  { id: 'audit_terms_epoch', known: 'terms sur une date avec des epoch en millisecondes : comparés tels quels à la colonne, sans conversion en date', dsl: total({ terms: { [TS]: [EPOCH(5), EPOCH(6)] } }) },
+  { id: 'audit_term_epoch', dsl: total({ term: { [TS]: EPOCH(5) } }) },
+  { id: 'audit_terms_epoch', dsl: total({ terms: { [TS]: [EPOCH(5), EPOCH(6)] } }) },
   { id: 'audit_plage_format', known: 'range avec un format de date personnalisé : la valeur est recopiée, ClickHouse ne sait pas la lire', dsl: total({ range: { [TS]: { gte: '09/03/2026', lt: '10/03/2026', format: 'dd/MM/yyyy' } } }) },
   { id: 'audit_ids', dsl: { size: 5, sort: [{ [TS]: 'asc' }], query: { ids: { values: ['3', '10', '2999', 'abc'] } } } },
   { id: 'audit_ids_vide', dsl: total({ ids: { values: [] } }) },
@@ -330,7 +333,7 @@ export const CASES = [
   { id: 'audit_percentiles_tableau', tol: 0.05, dsl: { size: 0, aggs: { p: { percentiles: { field: 'nums', percents: [50, 90] } } } } },
   { id: 'audit_histogramme_tableau', dsl: { size: 0, aggs: { h: { histogram: { field: 'nums', interval: 5 } } } } },
   { id: 'audit_percentiles_sans_document', known: 'percentiles sans document : nan au lieu de null (forme à arbitrer)', dsl: { size: 0, query: { term: { service: 'inconnu' } }, aggs: { p: { percentiles: { field: 'latency_ms', percents: [50] } } } } },
-  { id: 'audit_multi_terms_absent', known: 'multi_terms : les groupes où un champ est absent sont gardés', dsl: { size: 0, aggs: { m: { multi_terms: { terms: [{ field: 'service' }, { field: 'env' }], size: 30 } } } } },
+  { id: 'audit_multi_terms_absent', dsl: { size: 0, aggs: { m: { multi_terms: { terms: [{ field: 'service' }, { field: 'env' }], size: 30 } } } } },
   /* ---------- Écarts relevés par l’audit du 2026-10-21 : tri et pagination ---------- */
   { id: 'audit_search_after_deux_cles', dsl: { size: 10, sort: [{ status: 'asc' }, { [TS]: 'asc' }], search_after: [404, T10] } },
   { id: 'audit_search_after_sens_mixtes', known: 'search_after avec des sens de tri mélangés : le curseur est abandonné, la première page revient', dsl: { size: 10, sort: [{ [TS]: 'desc' }, { host: 'asc' }], search_after: [T10, 'web-3'] } },

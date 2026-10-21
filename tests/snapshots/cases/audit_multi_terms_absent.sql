@@ -6,6 +6,7 @@ SELECT
     env AS m_env,
     count() AS doc_count
 FROM logs.events
+WHERE isNotNull(env)
 GROUP BY m_service, m_env
 ORDER BY doc_count DESC, m_service ASC, m_env ASC
 LIMIT 30;

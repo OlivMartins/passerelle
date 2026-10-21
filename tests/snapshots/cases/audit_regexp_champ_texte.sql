@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE match(message, '^(?:time.*)$');
+WHERE arrayExists(t -> match(t, '^(?:time.*)$'), tokens(lowerUTF8(message)));
