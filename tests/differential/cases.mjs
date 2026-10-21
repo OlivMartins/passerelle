@@ -15,6 +15,7 @@
  *   composite  nom de l’agrégation composite à paginer jusqu’au bout des deux côtés
  *   tol        tolérance relative pour les mesures approchées (cardinality, percentiles)
  *   config     options de configuration propres au cas, fusionnées avec celles du banc
+ *   pit        requête jouée sous un point-in-time côté Elasticsearch (tri sur _shard_doc)
  */
 import { BASE, DAY, dataset } from './dataset.mjs';
 
@@ -327,5 +328,12 @@ export const CASES = [
   { id: 'audit_histogramme_tableau', known: 'histogram sur un tableau : SQL refusé', dsl: { size: 0, aggs: { h: { histogram: { field: 'nums', interval: 5 } } } } },
   { id: 'audit_percentiles_sans_document', known: 'percentiles sans document : nan au lieu de null', dsl: { size: 0, query: { term: { service: 'inconnu' } }, aggs: { p: { percentiles: { field: 'latency_ms', percents: [50] } } } } },
   { id: 'audit_multi_terms_absent', known: 'multi_terms : les groupes où un champ est absent sont gardés', dsl: { size: 0, aggs: { m: { multi_terms: { terms: [{ field: 'service' }, { field: 'env' }], size: 30 } } } } },
-  { id: 'audit_top_metrics_size', known: 'top_metrics : size ignoré, une seule valeur (argMax)', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { [TS]: 'desc' }, size: 3 } } } } }
+  /* ---------- Écarts relevés par l’audit du 2026-10-21 : tri et pagination ---------- */
+  { id: 'audit_search_after_deux_cles', dsl: { size: 10, sort: [{ status: 'asc' }, { [TS]: 'asc' }], search_after: [404, T10] } },
+  { id: 'audit_search_after_sens_mixtes', known: 'search_after avec des sens de tri mélangés : le curseur est abandonné, la première page revient', dsl: { size: 10, sort: [{ [TS]: 'desc' }, { host: 'asc' }], search_after: [T10, 'web-3'] } },
+  // Forme recommandée par Elasticsearch : point-in-time et départage par _shard_doc
+  { id: 'audit_search_after_shard_doc', pit: true, known: 'search_after avec _shard_doc : la valeur de _shard_doc reste dans le curseur, SQL refusé', dsl: { size: 10, sort: [{ [TS]: 'desc' }, { _shard_doc: 'asc' }], search_after: [T10, 100] } },
+  // Tri sur un champ multivalué : Elasticsearch prend le minimum en croissant ; un document sans valeur va à la fin
+  { id: 'audit_tri_tableau', known: 'tri sur un tableau : ordre lexicographique des tableaux, au lieu du minimum (croissant) avec les documents sans valeur à la fin', dsl: { size: 10, sort: [{ nums: 'asc' }, { [TS]: 'asc' }] } },
+  { id: 'audit_top_metrics_size',known: 'top_metrics : size ignoré, une seule valeur (argMax)', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { [TS]: 'desc' }, size: 3 } } } } }
 ];

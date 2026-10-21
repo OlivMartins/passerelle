@@ -45,6 +45,13 @@ async function es(path, body, method) {
   });
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }
+// Requête jouée sous un point-in-time, comme l’exige un tri sur _shard_doc ; la traduction reçoit la requête sans « pit »
+async function esWithPit(dsl) {
+  const open = await es(`/${INDEX}/_pit?keep_alive=1m`);
+  if (open.status !== 200) return open;
+  try { return await es('/_search', Object.assign({}, dsl, { pit: { id: open.body.id, keep_alive: '1m' } })); }
+  finally { await es('/_pit', { id: open.body.id }, 'DELETE'); }
+}
 function esError(r) {
   const e = r.body.error || {};
   const cause = (e.root_cause && e.root_cause[0]) || e;
@@ -278,7 +285,7 @@ async function runCase(c, ctx) {
     try { clickhouse(ctx.dir, ['--multiquery', '--query', list.sql]); }
     catch (e) { return { verdict: 'CH✗', detail: `liste ${list.name} : ${String(e.stderr || e.message).slice(0, 200)}`, t }; }
   }
-  const r = await es(`/${INDEX}/_search`, c.dsl);
+  const r = c.pit ? await esWithPit(c.dsl) : await es(`/${INDEX}/_search`, c.dsl);
   if (t.error) return { verdict: r.status === 200 ? 'TR✗' : '=', detail: `traducteur : ${t.error}${r.status === 200 ? '' : ` ; Elasticsearch refuse aussi (${esError(r)})`}` };
   if (r.status !== 200) {
     // Elasticsearch refuse la requête : la traduction doit le signaler (« à reprendre »), pas produire un SQL silencieux
