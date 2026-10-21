@@ -167,8 +167,10 @@ function serve(opts) {
 
   const server = http.createServer(async (req, res) => {
     const t0 = process.hrtime.bigint();
-    const url = new URL(req.url, 'http://localhost');
-    res.on('finish', () => log('info', 'requête', { method: req.method, path: url.pathname, status: res.statusCode, ms: Number((process.hrtime.bigint() - t0) / 1000000n), ip: req.socket.remoteAddress }));
+    let url = null;
+    res.on('finish', () => log('info', 'requête', { method: req.method, path: url ? url.pathname : String(req.url).slice(0, 200), status: res.statusCode, ms: Number((process.hrtime.bigint() - t0) / 1000000n), ip: req.socket.remoteAddress }));
+    // Une adresse comme « // » ne s’analyse pas : sans cette garde, l’exception arrêterait le processus
+    try { url = new URL(req.url, 'http://localhost'); } catch (e) { return json(res, 400, { error: 'adresse de requête invalide' }); }
     try {
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return send(res, 200, ui.html, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': ui.csp });
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { status: 'ok', version: VERSION });
