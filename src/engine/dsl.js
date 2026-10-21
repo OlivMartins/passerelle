@@ -947,7 +947,7 @@ const HM = { avg: 'moyenne', sum: 'somme', min: 'minimum', max: 'maximum', value
  */
 const NULL_WHEN_EMPTY = new Set(['min', 'max', 'avg', 'varPop', 'stddevPop', 'avgWeighted']);
 function aggCall(fn, args, cond, mayBeEmpty) {
-  const orNull = mayBeEmpty && NULL_WHEN_EMPTY.has(fn) ? 'OrNull' : '';
+  const orNull = mayBeEmpty && NULL_WHEN_EMPTY.has(fn.replace(/Array$/, '')) ? 'OrNull' : '';
   return cond ? `${fn}If${orNull}(${args}, ${cond})` : `${fn}${orNull}(${args})`;
 }
 /* Renvoie [{alias, render(cond, mayBeEmpty)}] */
@@ -975,18 +975,22 @@ function metricDef(ctx, name, type, body) {
       return simple('uniq', valueExpr(ctx, body));
     case 'stats': case 'extended_stats': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
+      // Champ multivalué : chaque valeur compte (combinateur -Array), count est le nombre de valeurs
+      const arr = !!(colType && colType.array);
       const cols = [['count', 'count'], ['min', 'min'], ['max', 'max'], ['avg', 'avg'], ['sum', 'sum']];
       if (type === 'extended_stats') cols.push(['varPop', 'variance'], ['stddevPop', 'std_deviation']);
-      const out = cols.map(([fn, suf]) => ({ alias: aliasOf(`${name}_${suf}`), render: (c, e) => aggCall(fn, x, c, e) }));
+      const out = cols.map(([fn, suf]) => ({ alias: aliasOf(`${name}_${suf}`), render: (c, e) => (arr && fn === 'count' ? aggCall('sum', `length(${x})`, c) : aggCall(arr ? `${fn}Array` : fn, x, c, e)) }));
       // Sans document, Elasticsearch renvoie 0 pour sum mais null pour sum_of_squares
-      if (type === 'extended_stats') out.push({ alias: aliasOf(`${name}_sum_of_squares`), render: (c, e) => aggCall(e ? 'sumOrNull' : 'sum', `${pArg(x)} * ${pArg(x)}`, c, false) });
+      const square = arr ? `arrayMap(v -> v * v, ${x})` : `${pArg(x)} * ${pArg(x)}`;
+      if (type === 'extended_stats') out.push({ alias: aliasOf(`${name}_sum_of_squares`), render: (c, e) => aggCall(`${arr ? 'sumArray' : 'sum'}${e ? 'OrNull' : ''}`, square, c, false) });
       return out;
     }
     case 'percentiles': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
       const ps = (body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => +(chNum(p, 'percentiles.percents') / 100).toFixed(4));
       ctx.notes.add('info', 'percentiles → quantilesTDigest()', 'Même algorithme (t-digest) qu’Elasticsearch : résultats comparables. Le résultat est un tableau dans l’ordre des percentiles demandés.');
-      return [{ alias: A, render: c => (c ? `quantilesTDigestIf(${ps.join(', ')})(${x}, ${c})` : `quantilesTDigest(${ps.join(', ')})(${x})`) }];
+      const fnq = colType && colType.array ? 'quantilesTDigestArray' : 'quantilesTDigest';
+      return [{ alias: A, render: c => (c ? `${fnq}If(${ps.join(', ')})(${x}, ${c})` : `${fnq}(${ps.join(', ')})(${x})`) }];
     }
     case 'percentile_ranks': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
@@ -1164,7 +1168,9 @@ function buildLevel(ctx, name, def) {
     case 'histogram': {
       const f = mapField(ctx, body.field); const iv = chNum(body.interval || 1, 'histogram.interval'); const off = chNum(body.offset || 0, 'histogram.offset');
       const bucket = x => (off ? `floor((${x} - ${off}) / ${iv}) * ${iv} + ${off}` : `floor(${x} / ${iv}) * ${iv}`);
-      const key = bucket(f);
+      // Champ multivalué : le document compte une fois dans chaque tranche où tombe au moins une de ses valeurs
+      const ft = typeof body.field === 'string' && !body.script ? fieldType(ctx, body.field) : null;
+      const key = ft && ft.array ? `arrayJoin(arrayDistinct(arrayMap(v -> ${bucket('v')}, ${f})))` : bucket(f);
       L.keys.push({ sql: key, alias: A }); L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) {
         L.fill = String(iv);

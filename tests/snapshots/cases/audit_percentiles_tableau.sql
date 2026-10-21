@@ -2,5 +2,5 @@
 
 -- Mesures globales
 SELECT
-    quantilesTDigest(0.5, 0.9)(nums) AS p
+    quantilesTDigestArray(0.5, 0.9)(nums) AS p
 FROM logs.events;

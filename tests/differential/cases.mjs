@@ -324,10 +324,12 @@ export const CASES = [
   { id: 'audit_plage_fuseau_decalage', tz: PARIS, dsl: { size: 3, sort: [{ [TS]: 'asc' }], query: { range: { [TS]: { gte: '2026-03-10||/d', lt: '2026-03-10||+1d/d', time_zone: '+09:00' } } } } },
   // Elasticsearch refuse un intervalle calendaire multiple : la traduction doit le refuser aussi
   { id: 'audit_date_intervalle_invalide', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: '2d' } } } } },
-  { id: 'audit_mesures_tableau', known: 'stats sur un tableau : SQL refusé (le combinateur -Array ne couvre que avg, sum, min et max isolés)', dsl: { size: 0, aggs: { s: { stats: { field: 'nums' } } } } },
-  { id: 'audit_percentiles_tableau', tol: 0.05, known: 'percentiles sur un tableau : SQL refusé', dsl: { size: 0, aggs: { p: { percentiles: { field: 'nums', percents: [50, 90] } } } } },
-  { id: 'audit_histogramme_tableau', known: 'histogram sur un tableau : SQL refusé', dsl: { size: 0, aggs: { h: { histogram: { field: 'nums', interval: 5 } } } } },
-  { id: 'audit_percentiles_sans_document', known: 'percentiles sans document : nan au lieu de null', dsl: { size: 0, query: { term: { service: 'inconnu' } }, aggs: { p: { percentiles: { field: 'latency_ms', percents: [50] } } } } },
+  { id: 'audit_mesures_tableau', dsl: { size: 0, aggs: { s: { stats: { field: 'nums' } } } } },
+  { id: 'audit_extended_stats_tableau', dsl: { size: 0, query: { range: { status: { gte: 500 } } }, aggs: { s: { extended_stats: { field: 'nums' } } } } },
+  { id: 'audit_mesures_tableau_par_groupe', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { s: { stats: { field: 'nums' } }, p: { percentiles: { field: 'nums', percents: [50] } } } } } }, tol: 0.05 },
+  { id: 'audit_percentiles_tableau', tol: 0.05, dsl: { size: 0, aggs: { p: { percentiles: { field: 'nums', percents: [50, 90] } } } } },
+  { id: 'audit_histogramme_tableau', dsl: { size: 0, aggs: { h: { histogram: { field: 'nums', interval: 5 } } } } },
+  { id: 'audit_percentiles_sans_document', known: 'percentiles sans document : nan au lieu de null (forme à arbitrer)', dsl: { size: 0, query: { term: { service: 'inconnu' } }, aggs: { p: { percentiles: { field: 'latency_ms', percents: [50] } } } } },
   { id: 'audit_multi_terms_absent', known: 'multi_terms : les groupes où un champ est absent sont gardés', dsl: { size: 0, aggs: { m: { multi_terms: { terms: [{ field: 'service' }, { field: 'env' }], size: 30 } } } } },
   /* ---------- Écarts relevés par l’audit du 2026-10-21 : tri et pagination ---------- */
   { id: 'audit_search_after_deux_cles', dsl: { size: 10, sort: [{ status: 'asc' }, { [TS]: 'asc' }], search_after: [404, T10] } },

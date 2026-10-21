@@ -2,7 +2,7 @@
 
 -- Agrégation h
 SELECT
-    floor(nums / 5) * 5 AS h,
+    arrayJoin(arrayDistinct(arrayMap(v -> floor(v / 5) * 5, nums))) AS h,
     count() AS doc_count
 FROM logs.events
 GROUP BY h
