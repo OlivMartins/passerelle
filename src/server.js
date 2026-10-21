@@ -39,7 +39,7 @@ function unknownKeys(src, ref, prefix) {
   }
   return out;
 }
-const ENV_REF =/^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
+const ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 function expand(s) { return String(s || '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, v) => process.env[v] || ''); }
 function configWarnings(cfg) {
   const w = [];
@@ -267,8 +267,6 @@ Variables d’environnement :
   PASSERELLE_TOKEN       jeton exigé sur /v1/* (Authorization: Bearer …)
   PASSERELLE_VECTOR_BIN  binaire Vector pour /v1/validate/vector (vector par défaut)
   CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, KAFKA_USERNAME, KAFKA_PASSWORD : secrets référencés par la configuration
-
---verbose affiche les remarques de chaque traduction.
 
 Codes de sortie : 0 succès, 1 erreur, 2 éléments à reprendre (avec --fail-on todo).`;
 // Options déclarées : une option mal écrite ou une valeur inconnue est une erreur, pas une option ignorée
