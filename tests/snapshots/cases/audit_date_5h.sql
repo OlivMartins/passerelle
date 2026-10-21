@@ -2,8 +2,8 @@
 
 -- Agrégation d
 SELECT
-    toStartOfInterval(timestamp, INTERVAL 5 HOUR, 'UTC') AS d,
+    toStartOfInterval(timestamp, INTERVAL 300 MINUTE, 'UTC') AS d,
     count() AS doc_count
 FROM logs.events
 GROUP BY d
-ORDER BY d ASC WITH FILL STEP INTERVAL 5 HOUR;
+ORDER BY d ASC WITH FILL STEP INTERVAL 300 MINUTE;

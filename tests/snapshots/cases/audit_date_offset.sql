@@ -1,9 +1,8 @@
 -- Couverture : 1 directs, 0 à vérifier, 0 à reprendre
--- À vérifier : offset de date_histogram
 
 -- Agrégation d
 SELECT
-    toStartOfDay(timestamp, 'UTC') AS d,
+    toStartOfDay(timestamp - INTERVAL 6 HOUR, 'UTC') + INTERVAL 6 HOUR AS d,
     count() AS doc_count
 FROM logs.events
 GROUP BY d

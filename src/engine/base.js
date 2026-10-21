@@ -57,7 +57,14 @@ function mergeConfig(base, over) {
  * clickhouse.timezone: UTC (serveur et colonnes en UTC) : le SQL reste alors sans argument de fuseau.
  */
 function zoneOf(cfg, tz) {
-  if (tz) return String(tz);
+  if (tz) {
+    // Elasticsearch accepte un décalage (+01:00) ; ClickHouse veut un nom de fuseau. Etc/GMT inverse le signe.
+    const m = /^([+-])(\d{1,2}):?(\d{2})$/.exec(String(tz).trim());
+    if (!m) return String(tz);
+    if (m[3] !== '00') throw new Error(`fuseau ${tz} : ClickHouse ne connaît que les décalages en heures entières (Etc/GMT±H)`);
+    const h = parseInt(m[2], 10);
+    return h === 0 ? 'UTC' : `Etc/GMT${m[1] === '+' ? '-' : '+'}${h}`;
+  }
   return String(cfg.clickhouse.timezone || '').toUpperCase() === 'UTC' ? null : 'UTC';
 }
 function tzArg(cfg, tz) {

@@ -1,9 +1,7 @@
--- Couverture : 1 directs, 0 à vérifier, 0 à reprendre
+-- Couverture : 1 directs, 0 à vérifier, 1 à reprendre
+-- À reprendre : agrégation d non traduit
 
--- Agrégation d
+-- Comptage
 SELECT
-    toStartOfInterval(timestamp, INTERVAL 1 HOUR, 'UTC') AS d,
-    count() AS doc_count
-FROM logs.events
-GROUP BY d
-ORDER BY d ASC WITH FILL STEP INTERVAL 1 HOUR;
+    count() AS count
+FROM logs.events;

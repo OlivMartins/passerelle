@@ -2,7 +2,7 @@
 
 -- Agrégation d
 SELECT
-    toStartOfDay(timestamp, '+01:00') AS d,
+    toStartOfDay(timestamp, 'Etc/GMT-1') AS d,
     count() AS doc_count
 FROM logs.events
 GROUP BY d

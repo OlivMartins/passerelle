@@ -318,11 +318,12 @@ export const CASES = [
   { id: 'audit_terms_ordre_explicite_egalites', known: { D: 'valeur par défaut : 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } } } } } },
   { id: 'audit_terms_imbrique_egalites', known: { D: 'valeur par défaut : 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } }, aggs: { lvl: { terms: { field: 'level', size: 2 } } } } } } },
   // 5 h ne divise pas 24 : Elasticsearch aligne les tranches sur l’epoch, pas sur minuit
-  { id: 'audit_date_5h', known: 'intervalle fixe qui ne divise pas 24 h : toStartOfInterval repart de minuit chaque jour, Elasticsearch aligne sur l’epoch', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, fixed_interval: '5h' } } } } },
-  { id: 'audit_date_offset', known: 'offset non appliqué (signalé « à vérifier »)', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day', offset: '+6h' } } } } },
-  { id: 'audit_date_fuseau_decalage', known: 'time_zone écrit en décalage (+01:00) : recopié tel quel, ClickHouse ne le connaît pas', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day', time_zone: '+01:00' } } } } },
-  // Elasticsearch refuse un intervalle calendaire multiple
-  { id: 'audit_date_intervalle_invalide', known: 'intervalle refusé par Elasticsearch : la traduction produit une tranche d’une heure sans rien signaler', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: '2d' } } } } },
+  { id: 'audit_date_5h', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, fixed_interval: '5h' } } } } },
+  { id: 'audit_date_offset', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day', offset: '+6h' } } } } },
+  { id: 'audit_date_fuseau_decalage', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day', time_zone: '+01:00' } } } } },
+  { id: 'audit_plage_fuseau_decalage', tz: PARIS, dsl: { size: 3, sort: [{ [TS]: 'asc' }], query: { range: { [TS]: { gte: '2026-03-10||/d', lt: '2026-03-10||+1d/d', time_zone: '+09:00' } } } } },
+  // Elasticsearch refuse un intervalle calendaire multiple : la traduction doit le refuser aussi
+  { id: 'audit_date_intervalle_invalide', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: '2d' } } } } },
   { id: 'audit_mesures_tableau', known: 'stats sur un tableau : SQL refusé (le combinateur -Array ne couvre que avg, sum, min et max isolés)', dsl: { size: 0, aggs: { s: { stats: { field: 'nums' } } } } },
   { id: 'audit_percentiles_tableau', tol: 0.05, known: 'percentiles sur un tableau : SQL refusé', dsl: { size: 0, aggs: { p: { percentiles: { field: 'nums', percents: [50, 90] } } } } },
   { id: 'audit_histogramme_tableau', known: 'histogram sur un tableau : SQL refusé', dsl: { size: 0, aggs: { h: { histogram: { field: 'nums', interval: 5 } } } } },

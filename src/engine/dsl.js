@@ -1123,20 +1123,33 @@ function buildLevel(ctx, name, def) {
       if (type === 'auto_date_histogram') { ci = 'hour'; ctx.stats.approx++; ctx.notes.add('warn', 'auto_date_histogram', `L’intervalle automatique (${body.buckets || 10} tranches) est fixé à l’heure : ajustez selon la période.`); } else ctx.stats.ok++;
       // bucket(x) : début de la tranche qui contient x, pour la colonne comme pour les bornes de extended_bounds
       let bucket, step, hum;
+      // Un intervalle qu’Elasticsearch refuse ne devient pas une tranche d’une heure en silence
+      if (body.calendar_interval && !CAL[ci]) throw new Error(`intervalle calendaire inconnu : ${JSON.stringify(body.calendar_interval)} (minute, hour, day, week, month, quarter, year ou 1m, 1h, 1d, 1w, 1M, 1q, 1y)`);
       if (ci && CAL[ci]) { const [fn, unit, fr] = CAL[ci]; bucket = x => `${fn}(${x}${tzA})`; step = `INTERVAL 1 ${unit}`; hum = `par ${fr}`; }
       else {
         const m = /^(\d+)(ms|s|m|h|d)$/.exec(String(fi || '1h'));
-        const n = m ? m[1] : '1', u = m ? m[2] : 'h';
-        bucket = x => `toStartOfInterval(${x}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`; step = `INTERVAL ${n} ${FIXED_UNIT[u]}`; hum = `par tranche de ${n} ${FIXED_FR[u]}`;
+        if (!m) throw new Error(`intervalle fixe inconnu : ${JSON.stringify(fi)} (unités ms, s, m, h, d)`);
+        let n = +m[1], u = m[2];
+        hum = `par tranche de ${n} ${FIXED_FR[u]}`;
+        // toStartOfInterval repart de minuit pour les heures ; Elasticsearch aligne les tranches sur l’epoch.
+        // Un nombre d’heures qui ne divise pas 24 s’écrit donc en minutes, alignées sur l’epoch.
+        if (u === 'h' && 24 % n !== 0) { n *= 60; u = 'm'; }
+        bucket = x => `toStartOfInterval(${x}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`; step = `INTERVAL ${n} ${FIXED_UNIT[u]}`;
+      }
+      // offset : les tranches commencent plus tard (ou plus tôt) ; la clé est le début décalé de la tranche
+      const off = body.offset ? /^([+-]?)(\d+)(ms|s|m|h|d)$/.exec(String(body.offset)) : null;
+      if (body.offset && !off) throw new Error(`offset inconnu : ${JSON.stringify(body.offset)}`);
+      if (off) {
+        const base = bucket, by = `INTERVAL ${off[2]} ${FIXED_UNIT[off[3]]}`, [minus, plus] = off[1] === '-' ? ['+', '-'] : ['-', '+'];
+        bucket = x => `${base(`${x} ${minus} ${by}`)} ${plus} ${by}`;
       }
       const key = bucket(f);
-      if (body.offset) ctx.notes.add('warn', 'offset de date_histogram', `Le décalage « ${body.offset} » n’est pas appliqué : utilisez toStartOfInterval(…, origin) si besoin.`);
       if (body.hard_bounds) {
         if (body.hard_bounds.min !== undefined) L.where.push(`${f} >= ${dateBoundSQL(ctx, body.hard_bounds.min, tz)}`);
         if (body.hard_bounds.max !== undefined) L.where.push(`${f} <= ${dateBoundSQL(ctx, body.hard_bounds.max, tz)}`);
       }
       // Semaine, mois, trimestre et année donnent une clé de type Date ; les autres intervalles, un DateTime
-      L.keys.push({ sql: key, alias: A, date: { asDate: !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
+      L.keys.push({ sql: key, alias: A, date: { asDate: !off && !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
       L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) {
         L.fill = step;
