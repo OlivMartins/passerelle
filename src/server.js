@@ -23,10 +23,23 @@ function loadConfig(file) {
     try { text = fs.readFileSync(file, 'utf8'); } catch (e) { throw new Error(`configuration illisible (${file}) : ${e.code || e.message}`); }
     over = /\.json$/i.test(file) ? JSON.parse(text) : parseYAMLConfig(text);
     if (!isObj(over)) throw new Error(`configuration invalide (${file})`);
+    // Une clé mal écrite laisserait la valeur par défaut en place sans que personne ne le voie
+    const unknown = unknownKeys(over, Object.assign({ version: 1 }, DEFAULT_CONFIG), '');
+    if (unknown.length) throw new Error(`clé${unknown.length > 1 ? 's' : ''} inconnue${unknown.length > 1 ? 's' : ''} dans ${file} : ${unknown.join(', ')}`);
   }
   return mergeConfig(DEFAULT_CONFIG, { clickhouse: over.clickhouse, kafka: over.kafka, vector: over.vector });
 }
-const ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
+// Les tables de correspondance ont des clés libres, comme dans mergeConfig
+function unknownKeys(src, ref, prefix) {
+  const out = [];
+  for (const [k, v] of Object.entries(src)) {
+    const p = prefix + k;
+    if (!Object.hasOwn(ref, k)) out.push(p);
+    else if (isObj(v) && isObj(ref[k]) && !['index_mapping', 'field_mapping', 'columns', 'names'].includes(k)) out.push(...unknownKeys(v, ref[k], p + '.'));
+  }
+  return out;
+}
+const ENV_REF =/^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 function expand(s) { return String(s || '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, v) => process.env[v] || ''); }
 function configWarnings(cfg) {
   const w = [];
@@ -243,8 +256,8 @@ const HELP = `Passerelle ${VERSION} — traduction Elasticsearch/Logstash vers C
 
 Utilisation :
   passerelle serve       [--config FICHIER] [--listen HÔTE:PORT]
-  passerelle dsl2sql     <fichier|dossier>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo]
-  passerelle ls2vector   <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo]
+  passerelle dsl2sql     <fichier|dossier>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo] [--verbose]
+  passerelle ls2vector   <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo] [--verbose]
   passerelle check-config [--config FICHIER] [--quiet]
   passerelle version
 
@@ -255,19 +268,27 @@ Variables d’environnement :
   PASSERELLE_VECTOR_BIN  binaire Vector pour /v1/validate/vector (vector par défaut)
   CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, KAFKA_USERNAME, KAFKA_PASSWORD : secrets référencés par la configuration
 
+--verbose affiche les remarques de chaque traduction.
+
 Codes de sortie : 0 succès, 1 erreur, 2 éléments à reprendre (avec --fail-on todo).`;
+// Options déclarées : une option mal écrite ou une valeur inconnue est une erreur, pas une option ignorée
+// (« --fail-on todos » désactivait en silence le contrôle d’une intégration continue).
+const OPTIONS = {
+  config: { type: 'string' }, listen: { type: 'string' }, index: { type: 'string' }, out: { type: 'string' },
+  format: { type: 'string' }, 'fail-on': { type: 'string' }, quiet: { type: 'boolean' }, verbose: { type: 'boolean' },
+  help: { type: 'boolean', short: 'h' }
+};
 function parseArgs(argv) {
-  const o = { _: [] };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '-h' || a === '--help') o.help = true;
-    else if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      if (eq > 0) o[a.slice(2, eq)] = a.slice(eq + 1);
-      else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) o[a.slice(2)] = argv[++i];
-      else o[a.slice(2)] = true;
-    } else o._.push(a);
+  let r;
+  try { r = require('node:util').parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true }); }
+  catch (e) {
+    const opt = /'(-[^' ]+)/.exec(e.message);
+    if (!opt) fail(`option invalide : ${e.message}`);
+    fail(`${e.code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION' ? 'option inconnue' : 'option sans sa valeur, ou avec une valeur en trop'} : ${opt[1]} (passerelle --help)`);
   }
+  const o = Object.assign({ _: r.positionals }, r.values);
+  if (o['fail-on'] !== undefined && o['fail-on'] !== 'todo') fail(`--fail-on attend la valeur todo, pas « ${o['fail-on']} »`);
+  if (o.format !== undefined && o.format !== 'yaml' && o.format !== 'toml') fail(`--format attend yaml ou toml, pas « ${o.format} »`);
   return o;
 }
 function collect(inputs, exts) {
@@ -284,7 +305,7 @@ function batch(kind, o) {
   if (!o._.length) fail(`aucun fichier à traduire. Exemple : passerelle ${kind === 'dsl' ? 'dsl2sql requetes/' : 'ls2vector pipelines/'}`);
   let cfg;
   try { cfg = loadConfig(o.config || process.env.PASSERELLE_CONFIG || null); } catch (e) { fail(e.message); }
-  const fmt = o.format === 'toml' ? 'toml' : kind === 'ls' ? cfg.vector.format : 'sql';
+  const fmt = kind === 'ls' ? o.format || cfg.vector.format : 'sql';
   const files = collect(o._, kind === 'dsl' ? /\.(json|txt|es)$/i : /\.(conf|cfg|logstash)$/i);
   if (!files.length) fail('aucun fichier correspondant trouvé');
   if (o.out) fs.mkdirSync(o.out, { recursive: true });
