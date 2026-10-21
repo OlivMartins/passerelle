@@ -4,5 +4,5 @@
 SELECT
     *
 FROM logs.events
-ORDER BY nums ASC, timestamp ASC
+ORDER BY if(empty(nums), NULL, arrayMin(nums)) ASC, timestamp ASC
 LIMIT 10;

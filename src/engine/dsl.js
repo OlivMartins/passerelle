@@ -1645,7 +1645,7 @@ function selectList(ctx, dsl) {
 function sortList(ctx, sort) {
   if (!sort) return [];
   const arr = Array.isArray(sort) ? sort : [sort];
-  const out = [];
+  const out = []; out.keys = [];
   for (const s of arr) {
     let f, o = {};
     if (typeof s === 'string') { f = s; o = { order: s === '_score' ? 'desc' : 'asc' }; }
@@ -1656,14 +1656,24 @@ function sortList(ctx, sort) {
     const dir = String(o.order || 'asc').toLowerCase();
     if (dir !== 'asc' && dir !== 'desc') throw new Error(`sens de tri inconnu pour ${f} : ${JSON.stringify(o.order)}`);
     if (f === '_script') {
-      try { const sc = o.script; const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, { mode: 'expr', params: sc.params || {} }); out.push(`${r.sql} ${dir.toUpperCase()}`); ctx.stats.ok++; }
+      try { const sc = o.script; const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, { mode: 'expr', params: sc.params || {} }); out.push(`${r.sql} ${dir.toUpperCase()}`); out.keys.push({ expr: r.sql, desc: dir === 'desc', index: arr.indexOf(s), field: null }); ctx.stats.ok++; }
       catch (e) { todo(ctx, 'tri scripté', e.message); }
       continue;
     }
     if (f === '_geo_distance') { todo(ctx, 'tri _geo_distance', 'Utilisez ORDER BY geoDistance(lon, lat, x, y).'); continue; }
     let e = mapField(ctx, f);
+    // Champ multivalué : Elasticsearch trie sur le minimum en croissant, le maximum en décroissant (ou selon mode) ;
+    // un document sans valeur va à la fin
+    const ft = fieldType(ctx, f);
+    if (ft && ft.array) {
+      const mode = { min: 'arrayMin', max: 'arrayMax', avg: 'arrayAvg', sum: 'arraySum' }[o.mode || (dir === 'desc' ? 'max' : 'min')];
+      if (!mode) throw new Error(`mode de tri inconnu pour ${f} : ${JSON.stringify(o.mode)}`);
+      e = `if(empty(${e}), NULL, ${mode}(${e}))`;
+    }
     if (o.missing !== undefined && o.missing !== '_last' && o.missing !== '_first') e = `ifNull(${e}, ${chVal(o.missing)})`;
     out.push(`${e} ${dir.toUpperCase()}${o.missing === '_first' ? ' NULLS FIRST' : ''}`);
+    // Clé de tri et position de sa valeur dans search_after (_score, _doc et _shard_doc n’ont pas de colonne)
+    out.keys.push({ expr: e, desc: dir === 'desc', index: arr.indexOf(s), field: f });
   }
   return out;
 }
@@ -1677,15 +1687,17 @@ function hitsQuery(ctx, env, dsl, where) {
   if (!order.length && tf) { order = [`${tf} DESC`]; ctx.notes.add('info', 'Tri par défaut', `Sans tri explicite, Elasticsearch classe par pertinence. Ici : ${tf} décroissant, le plus proche d’un usage « logs récents ».`); }
   const w = where.slice(); let limitBy = null;
   if (dsl.search_after && dsl.sort) {
-    const arr = Array.isArray(dsl.sort) ? dsl.sort : [dsl.sort];
-    const dirs = order.map(o => /DESC/.test(o));
-    if (dirs.every(d => d === dirs[0])) {
-      const cols2 = order.map(o => o.replace(/\s+(ASC|DESC).*$/, ''));
-      // Elasticsearch renvoie la valeur de tri d’une date en epoch millis
-      const timeColumn = ctx.cfg.clickhouse.time_field ? chIdent(ctx.cfg.clickhouse.time_field) : null;
-      const vals = dsl.search_after.map((v, i) => (typeof v === 'number' && (cols2[i] === timeColumn || /time|date|timestamp/i.test(cols2[i] || '')) ? epochMillisSQL(v) : chVal(v)));
-      w.push(`(${cols2.join(', ')}) ${dirs[0] ? '<' : '>'} (${vals.join(', ')})`); ctx.stats.ok++;
-    } else todo(ctx, 'search_after à sens mixtes', 'Réécrivez la condition de curseur à la main pour des tris de sens différents.');
+    // Chaque valeur du curseur est rapportée à sa clé de tri : celles de _score, _doc et _shard_doc sont écartées avec leur clé
+    const keys = order.keys || [];
+    // Elasticsearch renvoie la valeur de tri d’une date en epoch millis
+    const val = k => { const v = dsl.search_after[k.index]; return typeof v === 'number' && k.field && isDateField(ctx, k.field) ? epochMillisSQL(v) : chVal(v); };
+    if (keys.length && keys.every(k => k.desc === keys[0].desc)) {
+      w.push(`(${keys.map(k => k.expr).join(', ')}) ${keys[0].desc ? '<' : '>'} (${keys.map(val).join(', ')})`);
+    } else if (keys.length) {
+      // Sens mélangés : la comparaison de tuples ne s’applique plus, on développe clé par clé
+      w.push(orJoin(keys.map((k, i) => andJoin(keys.slice(0, i).map(p => `${p.expr} = ${val(p)}`).concat([`${k.expr} ${k.desc ? '<' : '>'} ${val(k)}`])))));
+    }
+    ctx.stats.ok++;
   }
   if (dsl.collapse && dsl.collapse.field) {
     limitBy = { n: 1, by: [mapField(ctx, dsl.collapse.field)] }; ctx.stats.ok++;

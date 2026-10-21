@@ -336,10 +336,11 @@ export const CASES = [
   { id: 'audit_multi_terms_absent', dsl: { size: 0, aggs: { m: { multi_terms: { terms: [{ field: 'service' }, { field: 'env' }], size: 30 } } } } },
   /* ---------- Écarts relevés par l’audit du 2026-10-21 : tri et pagination ---------- */
   { id: 'audit_search_after_deux_cles', dsl: { size: 10, sort: [{ status: 'asc' }, { [TS]: 'asc' }], search_after: [404, T10] } },
-  { id: 'audit_search_after_sens_mixtes', known: 'search_after avec des sens de tri mélangés : le curseur est abandonné, la première page revient', dsl: { size: 10, sort: [{ [TS]: 'desc' }, { host: 'asc' }], search_after: [T10, 'web-3'] } },
+  { id: 'audit_search_after_sens_mixtes', dsl: { size: 10, sort: [{ [TS]: 'desc' }, { host: 'asc' }], search_after: [T10, 'web-3'] } },
   // Forme recommandée par Elasticsearch : point-in-time et départage par _shard_doc
-  { id: 'audit_search_after_shard_doc', pit: true, known: 'search_after avec _shard_doc : la valeur de _shard_doc reste dans le curseur, SQL refusé', dsl: { size: 10, sort: [{ [TS]: 'desc' }, { _shard_doc: 'asc' }], search_after: [T10, 100] } },
+  { id: 'audit_search_after_shard_doc', pit: true, dsl: { size: 10, sort: [{ [TS]: 'desc' }, { _shard_doc: 'asc' }], search_after: [T10, 100] } },
   // Tri sur un champ multivalué : Elasticsearch prend le minimum en croissant ; un document sans valeur va à la fin
-  { id: 'audit_tri_tableau', known: 'tri sur un tableau : ordre lexicographique des tableaux, au lieu du minimum (croissant) avec les documents sans valeur à la fin', dsl: { size: 10, sort: [{ nums: 'asc' }, { [TS]: 'asc' }] } },
+  { id: 'audit_tri_tableau', dsl: { size: 10, sort: [{ nums: 'asc' }, { [TS]: 'asc' }] } },
+  { id: 'audit_tri_tableau_desc', dsl: { size: 10, sort: [{ nums: 'desc' }, { [TS]: 'asc' }] } },
   { id: 'audit_top_metrics_size',known: 'top_metrics : size ignoré, une seule valeur (argMax)', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { [TS]: 'desc' }, size: 3 } } } } }
 ];
