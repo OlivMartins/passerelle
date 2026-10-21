@@ -94,6 +94,16 @@ function authorized(req) {
   return !!m && crypto.timingSafeEqual(sha(m[1]), sha(token));
 }
 function isLoopback(host) { return host === '127.0.0.1' || host === '::1' || host === 'localhost'; }
+// Une page web ouverte sur le poste ne doit pas pouvoir appeler l’API : requête intersite (CSRF),
+// ou nom de domaine qui pointe soudain vers 127.0.0.1 (DNS rebinding), ce que seul un jeton empêchait.
+function crossSiteRefusal(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site === 'cross-site' || site === 'same-site') return 'requête intersite refusée';
+  if (process.env.PASSERELLE_TOKEN) return '';
+  const m = /^(\[[^\]]*\]|[^:]*)(?::\d+)?$/.exec(req.headers.host || '');
+  const host = m ? m[1].replace(/^\[|\]$/g, '').toLowerCase() : '';
+  return isLoopback(host) ? '' : 'sans PASSERELLE_TOKEN, l’API ne répond qu’aux requêtes adressées à localhost, 127.0.0.1 ou [::1]';
+}
 
 /* ---------- Validation par les moteurs réels ---------- */
 // Validations Vector et SQL confondues : chacune occupe un processus ou une requête ClickHouse jusqu’à son délai
@@ -172,7 +182,7 @@ function serve(opts) {
   const { host, port } = parseListen(opts.listen || process.env.PASSERELLE_LISTEN || '127.0.0.1:8080');
   const LIMIT = 2 * 1024 * 1024;
   configWarnings(cfg).forEach(w => log('warn', w));
-  if (!process.env.PASSERELLE_TOKEN) log(isLoopback(host) ? 'info' : 'warn', 'PASSERELLE_TOKEN absent : l’API /v1 est accessible sans authentification', { listen: `${host}:${port}` });
+  if (!process.env.PASSERELLE_TOKEN) log(isLoopback(host) ? 'info' : 'warn', 'PASSERELLE_TOKEN absent : l’API /v1 est accessible sans authentification, pour les seules requêtes adressées à localhost', { listen: `${host}:${port}` });
 
   const server = http.createServer(async (req, res) => {
     const t0 = process.hrtime.bigint();
@@ -184,6 +194,8 @@ function serve(opts) {
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return send(res, 200, ui.html, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': ui.csp });
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { status: 'ok', version: VERSION });
       if (!url.pathname.startsWith('/v1/')) return json(res, 404, { error: 'ressource inconnue' });
+      const refusal = crossSiteRefusal(req);
+      if (refusal) return json(res, 403, { error: refusal });
       if (!authorized(req)) return json(res, 401, { error: 'jeton absent ou invalide (Authorization: Bearer …)' });
       if (req.method === 'GET' && url.pathname === '/v1/config') return json(res, 200, publicConfig(cfg));
       if (req.method !== 'POST') return json(res, 405, { error: 'méthode non autorisée' });
