@@ -96,7 +96,13 @@ function authorized(req) {
 function isLoopback(host) { return host === '127.0.0.1' || host === '::1' || host === 'localhost'; }
 
 /* ---------- Validation par les moteurs réels ---------- */
+// Validations Vector et SQL confondues : chacune occupe un processus ou une requête ClickHouse jusqu’à son délai
 let running = 0; const MAX_JOBS = 2;
+async function limited(job) {
+  if (running >= MAX_JOBS) throw new HttpError(429, 'trop de validations en cours, réessayez dans quelques secondes');
+  running++;
+  try { return await job(); } finally { running--; }
+}
 function runProcess(bin, args, env, timeout) {
   return new Promise((resolve, reject) => {
     execFile(bin, args, { env, timeout, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
@@ -107,8 +113,6 @@ function runProcess(bin, args, env, timeout) {
   });
 }
 async function validateVector(text, format) {
-  if (running >= MAX_JOBS) throw new HttpError(429, 'trop de validations en cours, réessayez dans quelques secondes');
-  running++;
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'passerelle-'));
   try {
     const dataDir = path.join(dir, 'data'); await fsp.mkdir(dataDir);
@@ -129,7 +133,7 @@ async function validateVector(text, format) {
     const output = (r.stdout + '\n' + r.stderr).replace(/\x1b\[[0-9;]*m/g, '').split('\n')
       .filter(l => l.trim() && !/librdkafka|rdkafka::|base_producer|Log level is enabled/.test(l)).join('\n').replaceAll(dir, '<tmp>');
     return { valid: r.code === 0, exit_code: r.code, output };
-  } finally { running--; await fsp.rm(dir, { recursive: true, force: true }); }
+  } finally { await fsp.rm(dir, { recursive: true, force: true }); }
 }
 function withoutStrings(s) { return s.replace(/'(?:[^'\\]|\\.)*'/g, "''").replace(/`(?:[^`\\]|\\.)*`/g, '``').replace(/--[^\n]*/g, ''); }
 async function validateSQL(cfg, sql) {
@@ -141,7 +145,9 @@ async function validateSQL(cfg, sql) {
   if (!/^\s*(WITH|SELECT)\b/i.test(bare.replace(/^(\s*--[^\n]*\n)*/, ''))) throw new HttpError(400, 'seules les requêtes SELECT (éventuellement précédées de WITH) sont acceptées');
   const url = new URL(ep + '/');
   url.searchParams.set('database', expand(cfg.clickhouse.database) || 'default');
-  url.searchParams.set('readonly', '2');
+  // readonly=1 et non 2 : en 2, la requête peut changer ses réglages (SETTINGS max_execution_time = 0)
+  // et appeler d’autres hôtes par url() ; vérifié sur ClickHouse 26.9
+  url.searchParams.set('readonly', '1');
   url.searchParams.set('max_execution_time', '15');
   const headers = { 'content-type': 'text/plain; charset=utf-8' };
   const user = expand(cfg.clickhouse.user);
@@ -196,8 +202,8 @@ function serve(opts) {
           if (r.error) return json(res, 422, { error: r.error });
           return json(res, 200, { format: fmt, config: r[fmt], notes: r.notes, coverage: coverage(r.stats), topology: r.graph, env: r.env, summary: r.sentence });
         }
-        case '/v1/validate/vector': return json(res, 200, await validateVector(body, url.searchParams.get('format') || 'yaml'));
-        case '/v1/validate/sql': return json(res, 200, await validateSQL(cfg, body));
+        case '/v1/validate/vector': return json(res, 200, await limited(() => validateVector(body, url.searchParams.get('format') || 'yaml')));
+        case '/v1/validate/sql': return json(res, 200, await limited(() => validateSQL(cfg, body)));
         default: return json(res, 404, { error: 'ressource inconnue' });
       }
     } catch (e) {
