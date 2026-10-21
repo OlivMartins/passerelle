@@ -345,5 +345,8 @@ export const CASES = [
   // Tri sur un champ multivalué : Elasticsearch prend le minimum en croissant ; un document sans valeur va à la fin
   { id: 'audit_tri_tableau', dsl: { size: 10, sort: [{ nums: 'asc' }, { [TS]: 'asc' }] } },
   { id: 'audit_tri_tableau_desc', dsl: { size: 10, sort: [{ nums: 'desc' }, { [TS]: 'asc' }] } },
-  { id: 'audit_top_metrics_size',known: 'top_metrics : size ignoré, une seule valeur (argMax)', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { [TS]: 'desc' }, size: 3 } } } } }
+  { id: 'audit_top_metrics_size_croissant', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { t: { top_metrics: { metrics: { field: 'bytes' }, sort: { latency_ms: 'asc' }, size: 2 } } } } } } },
+  // Elasticsearch refuse un tri de top_metrics sur un champ keyword : la traduction aussi
+  { id: 'audit_top_metrics_size_chaine', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { host: 'desc' }, size: 3 } } } } },
+  { id: 'audit_top_metrics_size', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { [TS]: 'desc' }, size: 3 } } } } }
 ];

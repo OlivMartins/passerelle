@@ -2,6 +2,6 @@
 
 -- Mesures globales
 SELECT
-    argMax(latency_ms, timestamp) AS t
+    arrayMap(t -> t.2, groupArraySorted(3)((-toUnixTimestamp64Milli(toDateTime64(timestamp, 3)), latency_ms))) AS t
 FROM logs.events
 WHERE service = 'Search';

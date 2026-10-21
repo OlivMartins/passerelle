@@ -1,0 +1,1 @@
+-- Erreur : Traduction impossible : top_metrics : tri sur host, qui n’est ni un nombre ni une date (Elasticsearch le refuse aussi)

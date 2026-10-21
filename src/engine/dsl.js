@@ -1047,7 +1047,18 @@ function metricDef(ctx, name, type, body) {
       const sf = isObj(sort) ? Object.keys(sort)[0] : String(sort);
       const dir = isObj(sort) ? String(isObj(sort[sf]) ? sort[sf].order : sort[sf]).toLowerCase() : 'asc';
       const s = mapField(ctx, sf); const fn = dir === 'desc' ? 'argMax' : 'argMin';
-      return ms.map(m => { const f = mapField(ctx, m.field); return { alias: aliasOf(ms.length > 1 ? `${name}_${m.field}` : name), render: c => (c ? `${fn}If(${f}, ${s}, ${c})` : `${fn}(${f}, ${s})`) }; });
+      const n = body.size !== undefined ? chInt(body.size, 'top_metrics.size') : 1;
+      // size > 1 : les n valeurs, dans l’ordre du tri. groupArraySorted garde les n plus petites clés sans charger
+      // le groupe ; pour un tri décroissant, la clé (nombre ou date) change de signe. Clé de type inconnu : groupArray trié.
+      const st = fieldType(ctx, sf); const kind = isDateField(ctx, sf) ? 'date' : st && (st.kind === 'int' || st.kind === 'float') ? 'num' : null;
+      if (st && !kind) throw new Error(`top_metrics : tri sur ${sf}, qui n’est ni un nombre ni une date (Elasticsearch le refuse aussi)`);
+      const key = kind === 'date' ? `toUnixTimestamp64Milli(toDateTime64(${s}, 3))` : s;
+      const topN = (f, c) => {
+        const tuple = `(${dir === 'desc' && kind ? `-${pArg(key)}` : s}, ${f})`;
+        if (kind) return `arrayMap(t -> t.2, groupArraySorted${c ? 'If' : ''}(${n})(${tuple}${c ? `, ${c}` : ''}))`;
+        return `arrayMap(t -> t.2, arraySlice(${dir === 'desc' ? 'arrayReverseSort' : 'arraySort'}(t -> t.1, groupArray${c ? 'If' : ''}(${tuple}${c ? `, ${c}` : ''})), 1, ${n}))`;
+      };
+      return ms.map(m => { const f = mapField(ctx, m.field); return { alias: aliasOf(ms.length > 1 ? `${name}_${m.field}` : name), render: c => (n > 1 ? topN(f, c) : c ? `${fn}If(${f}, ${s}, ${c})` : `${fn}(${f}, ${s})`) }; });
     }
     case 'boxplot': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
