@@ -802,8 +802,10 @@ function luceneTokens(qs) {
       let j = i + 1, v = '';
       while (j < qs.length && qs[j] !== '"') { if (qs[j] === '\\') { v += qs[j + 1] || ''; j += 2; } else v += qs[j++]; }
       if (j >= qs.length) throw new Error('guillemet non fermé');
-      i = j + 1; if (qs[i] === '~') { i++; while (/\d/.test(qs[i] || '')) i++; }
-      toks.push({ t: 'phrase', v }); continue;
+      // "a b"~N : proximité (slop)
+      i = j + 1; let slop = '';
+      if (qs[i] === '~') { i++; while (/\d/.test(qs[i] || '')) slop += qs[i++]; }
+      toks.push(slop ? { t: 'phrase', v, slop: +slop } : { t: 'phrase', v }); continue;
     }
     if (c === '[' || c === '{') {
       let j = i + 1; while (j < qs.length && qs[j] !== ']' && qs[j] !== '}') j++;
@@ -932,8 +934,9 @@ function simpleQueryParse(qs, defaultOp) {
         if (end < 0 || end >= to) { i++; negations = 0; continue; }
         const phrase = text.slice(i + 1, end);
         i = end + 1;
-        if (text[i] === '~') { i++; while (i < to && /\d/.test(text[i])) i++; }
-        if (phrase.trim()) add({ op: 'leaf', field: null, tok: { t: 'phrase', v: phrase } }); else negations = 0;
+        let slop = '';
+        if (text[i] === '~') { i++; while (i < to && /\d/.test(text[i])) slop += text[i++]; }
+        if (phrase.trim()) add({ op: 'leaf', field: null, tok: slop ? { t: 'phrase', v: phrase, slop: +slop } : { t: 'phrase', v: phrase } }); else negations = 0;
         continue;
       }
       if (c === '+') { if (pending === null && top !== null) pending = 'and'; i++; negations = 0; continue; }

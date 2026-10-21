@@ -304,8 +304,10 @@ export const CASES = [
   // bool_prefix : le dernier mot est un préfixe, « upstr » doit trouver « upstream » dans title
   { id: 'audit_multi_match_bool_prefix', dsl: total({ multi_match: { query: 'connection upstr', type: 'bool_prefix', fields: ['message', 'title'] } }) },
   // « Connection reset by peer » : peer est à deux positions de l’endroit attendu
-  { id: 'audit_phrase_slop', known: 'slop ignoré : les mots doivent être adjacents', dsl: total({ match_phrase: { message: { query: 'connection peer', slop: 2 } } }) },
-  { id: 'audit_query_string_proximite', known: 'proximité ~N ignorée : les mots doivent être adjacents', dsl: total({ query_string: { query: 'message:"connection peer"~2' } }) },
+  { id: 'audit_phrase_slop', dsl: total({ match_phrase: { message: { query: 'connection peer', slop: 2 } } }) },
+  { id: 'audit_phrase_slop_un', dsl: total({ match_phrase: { message: { query: 'reset peer', slop: 1 } } }) },
+  { id: 'audit_phrase_slop_inversion', known: 'proximité : les mots inversés ne sont pas trouvés (signalé « à vérifier »)', dsl: total({ match_phrase: { message: { query: 'peer connection', slop: 6 } } }) },
+  { id: 'audit_query_string_proximite', dsl: total({ query_string: { query: 'message:"connection peer"~2' } }) },
   // Aucun mot après analyse : zero_terms_query vaut none par défaut, aucun document
   { id: 'audit_match_sans_mot', dsl: total({ match: { message: '!!!' } }) },
   // Deux lettres inversées comptent pour une seule modification (transpositions: true par défaut)

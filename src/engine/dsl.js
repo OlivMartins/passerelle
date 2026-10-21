@@ -627,7 +627,7 @@ const strictText = ctx => ctx.cfg.clickhouse.text_match === 'strict';
  * « user » n’est pas trouvé dans « user_id » ni dans « user.name », « 3.14 » ne l’est pas dans « 3.14s ».
  * prefix : le dernier mot peut se prolonger (match_phrase_prefix).
  */
-function wordsRegex(tokens, strict, prefix) {
+function wordsRegex(tokens, strict, prefix, slop) {
   const W = '\\p{L}\\p{N}_';
   const first = tokens[0]; const last = tokens[tokens.length - 1];
   const digitFirst = /^\p{N}/u.test(first); const digitLast = /\p{N}$/u.test(last);
@@ -637,7 +637,9 @@ function wordsRegex(tokens, strict, prefix) {
     right = digitLast ? `(?:$|[^${W}.,']|[.,'](?:$|[^\\p{N}]))` : `(?:$|[^${W}.'’]|[.'’](?:$|[^\\p{L}_]))`;
     sep = `(?:[^${W}.,'’]|[.,'’](?:$|[^${W}]))[^${W}]*`;
   }
-  return `(?i)${left}${tokens.map(escRe).join(sep)}${prefix ? '' : right}`;
+  // slop : jusqu’à slop mots entre deux mots cherchés, dans l’ordre
+  const join = slop ? `${sep}(?:[${W}]+${sep}){0,${slop}}` : sep;
+  return `(?i)${left}${tokens.map(escRe).join(join)}${prefix ? '' : right}`;
 }
 // Le document contient ce mot (au sens d’Elasticsearch)
 function wordCond(ctx, f, token) {
@@ -648,11 +650,11 @@ function wordCond(ctx, f, token) {
   return parts.length === 1 && parts[0] === token ? pre[0] : andJoin(pre.concat([`positionCaseInsensitiveUTF8(${f}, ${chStr(token)}) > 0`]));
 }
 // Le document contient ces mots à la suite ; prefix : le dernier n’est qu’un début de mot
-function phraseCond(ctx, f, tokens, prefix) {
+function phraseCond(ctx, f, tokens, prefix, slop) {
   if (tokens.length === 1 && !prefix) return wordCond(ctx, f, tokens[0]);
   const complete = prefix ? tokens.slice(0, -1) : tokens;
   const pre = [...new Set(complete.flatMap(hasTokenParts))].map(p => hasTok(f, p));
-  return andJoin(pre.concat([`match(${f}, ${chStr(wordsRegex(tokens, strictText(ctx), prefix))})`]));
+  return andJoin(pre.concat([`match(${f}, ${chStr(wordsRegex(tokens, strictText(ctx), prefix, slop))})`]));
 }
 function matchClause(ctx, field, o, type) {
   const q = o.query;
@@ -686,7 +688,14 @@ function matchClause(ctx, field, o, type) {
   ctx.stats.ok++;
   if (type === 'match_phrase') {
     H(ctx, 'text', `${field} contient « ${String(q).trim()} »`);
-    return phraseCond(ctx, f, words, false);
+    const slop = o.slop !== undefined ? chInt(o.slop, 'slop') : 0;
+    // Mots dans l’ordre, avec au plus slop mots entre deux : exact pour deux mots et slop 1. Elasticsearch accepte
+    // aussi les mots inversés (dès slop 2), et compte le slop sur toute la phrase, pas entre chaque paire.
+    if (slop && words.length > 1 && (slop >= 2 || words.length > 2)) {
+      ctx.stats.ok--; ctx.stats.approx++;
+      ctx.notes.add('warn', `Proximité (slop ${slop}) sur ${field}`, 'Les mots sont cherchés dans l’ordre, avec au plus ' + slop + ' mots entre deux. Elasticsearch trouve aussi les mots inversés et répartit le slop sur toute la phrase.');
+    }
+    return phraseCond(ctx, f, words, false, slop);
   }
   H(ctx, 'text', `${field} contient « ${String(q).trim()}… »`);
   if (type === 'match_phrase_prefix') return phraseCond(ctx, f, words, true);
@@ -898,7 +907,7 @@ function luceneSQL(ctx, n, defFields, leaf) {
 }
 // Terme d’une requête simple_query_string : pas de syntaxe champ:valeur, d’intervalle ni de joker interne
 function simpleLeaf(ctx, field, tok, defaultOp) {
-  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.v } });
+  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.slop ? { query: tok.v, slop: tok.slop } : tok.v } });
   if (tok.t === 'fuzzy') return tq(ctx, { fuzzy: { [field]: tok.n === null ? { value: tok.v } : { value: tok.v, fuzziness: tok.n } } });
   if (tok.t === 'prefix') return tq(ctx, { wildcard: { [field]: { value: tok.v + '*' } } });
   if (isTextField(ctx, field)) return tq(ctx, { match: { [field]: { query: tok.v, operator: defaultOp || 'or' } } });
@@ -906,7 +915,7 @@ function simpleLeaf(ctx, field, tok, defaultOp) {
 }
 function luceneLeaf(ctx, field, tok) {
   if (field === '_exists_') return tq(ctx, { exists: { field: tok.v } });
-  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.v } });
+  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.slop ? { query: tok.v, slop: tok.slop } : tok.v } });
   if (tok.t === 'regex') return tq(ctx, { regexp: { [field]: tok.v } });
   if (tok.t === 'range') {
     const m = /^\s*(\S+)\s+TO\s+(\S+)\s*$/i.exec(tok.v);
