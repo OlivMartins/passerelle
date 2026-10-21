@@ -4,5 +4,5 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE timestamp >= '09/03/2026'
-  AND timestamp < '10/03/2026';
+WHERE timestamp >= parseDateTime64InJodaSyntax('09/03/2026', 'dd/MM/yyyy', 'UTC')
+  AND timestamp < parseDateTime64InJodaSyntax('10/03/2026', 'dd/MM/yyyy', 'UTC');

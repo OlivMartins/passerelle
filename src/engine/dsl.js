@@ -533,7 +533,19 @@ function rangeClause(ctx, field, spec0) {
     if (v === undefined || v === null) continue;
     let sql, s = sym, date = false;
     const dm = parseDateMath(v);
-    if (dm) {
+    const pattern = customDateFormat(fmt);
+    if (pattern && typeof v === 'string') {
+      // Format personnalisé (dd/MM/yyyy) : ClickHouse lit la date avec le même motif. Sans heure dans le motif,
+      // gt et lte vont jusqu’à la fin du jour, comme Elasticsearch.
+      if (/\|\||^now/.test(v)) throw new Error(`calcul de date avec le format ${fmt} : à traduire à la main (${v})`);
+      const zone = zoneOf(ctx.cfg, tz);
+      sql = `parseDateTime64InJodaSyntax(${chStr(v)}, ${chStr(pattern)}${zone ? `, ${chStr(zone)}` : ''})`;
+      if ((op === 'gt' || op === 'lte') && !/[Hhkms]/.test(pattern)) {
+        if (!/d/.test(pattern)) throw new Error(`borne ${op} avec le format ${fmt} : l’arrondi au mois ou à l’année est à traduire à la main`);
+        sql += ' + INTERVAL 1 DAY'; s = op === 'gt' ? '>=' : '<';
+      }
+      date = true;
+    } else if (dm) {
       // Bornes « gt » et « lte » : Elasticsearch arrondit vers le haut, jusqu’à la fin de l’unité arrondie (now/d)
       // ou jusqu’à la fin du jour quand la date est écrite sans heure (2026-03-10).
       const upper2 = op === 'gt' || op === 'lte';
@@ -564,6 +576,16 @@ function rangeClause(ctx, field, spec0) {
   if (multi) return `arrayExists(x -> ${parts.join(' AND ')}, ${f})`;
   if (parts.length === 2 && spec.gte !== undefined && spec.lte !== undefined && !isDate) return `${f} BETWEEN ${chVal(spec.gte)} AND ${chVal(spec.lte)}`;
   return andJoin(parts);
+}
+// Motif de date personnalisé (dd/MM/yyyy), par opposition aux formats nommés d’Elasticsearch
+// (strict_date_optional_time, epoch_millis…) ; null s’il n’y en a pas
+function customDateFormat(fmt) {
+  if (!fmt) return null;
+  const parts = String(fmt).split('||');
+  const custom = parts.filter(p => !/^[a-z_]+$/.test(p) || /yy|dd|HH|mm|ss/.test(p));
+  if (!custom.length) return null;
+  if (parts.length > 1) throw new Error(`plusieurs formats de date (${fmt}) : à traduire à la main`);
+  return custom[0];
 }
 /* ---------- Recherche plein texte ---------- */
 /*

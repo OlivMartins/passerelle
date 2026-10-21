@@ -312,8 +312,11 @@ export const CASES = [
   { id: 'audit_flou_transposition', known: 'fuzzy : une transposition compte pour deux modifications (editDistance)', dsl: total({ fuzzy: { message: { value: 'tiemout', fuzziness: 1 } } }) },
   { id: 'audit_term_epoch', dsl: total({ term: { [TS]: EPOCH(5) } }) },
   { id: 'audit_terms_epoch', dsl: total({ terms: { [TS]: [EPOCH(5), EPOCH(6)] } }) },
-  { id: 'audit_plage_format', known: 'range avec un format de date personnalisé : la valeur est recopiée, ClickHouse ne sait pas la lire', dsl: total({ range: { [TS]: { gte: '09/03/2026', lt: '10/03/2026', format: 'dd/MM/yyyy' } } }) },
-  { id: 'audit_ids', dsl: { size: 5, sort: [{ [TS]: 'asc' }], query: { ids: { values: ['3', '10', '2999', 'abc'] } } } },
+  { id: 'audit_plage_format', dsl: total({ range: { [TS]: { gte: '09/03/2026', lt: '10/03/2026', format: 'dd/MM/yyyy' } } }) },
+  // Sans heure dans le motif, lte va jusqu’à la fin du jour
+  { id: 'audit_plage_format_borne_incluse', tz: PARIS, dsl: total({ range: { [TS]: { gt: '08/03/2026', lte: '09/03/2026', format: 'dd/MM/yyyy' } } }) },
+  { id: 'audit_plage_format_heure', dsl: total({ range: { [TS]: { gte: '09/03/2026 06:30', lt: '09/03/2026 18:00', format: 'dd/MM/yyyy HH:mm' } } }) },
+  { id: 'audit_ids',dsl: { size: 5, sort: [{ [TS]: 'asc' }], query: { ids: { values: ['3', '10', '2999', 'abc'] } } } },
   { id: 'audit_ids_vide', dsl: total({ ids: { values: [] } }) },
 
   /* ---------- Écarts relevés par l’audit du 2026-10-21 : agrégations ---------- */
