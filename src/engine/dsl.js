@@ -1612,16 +1612,18 @@ function sortList(ctx, sort) {
     else { f = Object.keys(s)[0]; o = isObj(s[f]) ? s[f] : { order: s[f] }; }
     if (f === '_score') { ctx.notes.add('info', 'Tri par _score ignoré', 'Pas de score de pertinence en SQL.'); continue; }
     if (f === '_doc' || f === '_shard_doc') continue;
+    // Le sens est recopié dans le SQL : comme pour les agrégations (parseOrder), seuls asc et desc passent
+    const dir = String(o.order || 'asc').toLowerCase();
+    if (dir !== 'asc' && dir !== 'desc') throw new Error(`sens de tri inconnu pour ${f} : ${JSON.stringify(o.order)}`);
     if (f === '_script') {
-      try { const sc = o.script; const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, { mode: 'expr', params: sc.params || {} }); out.push(`${r.sql} ${String(o.order || 'asc').toUpperCase()}`); ctx.stats.ok++; }
+      try { const sc = o.script; const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, { mode: 'expr', params: sc.params || {} }); out.push(`${r.sql} ${dir.toUpperCase()}`); ctx.stats.ok++; }
       catch (e) { todo(ctx, 'tri scripté', e.message); }
       continue;
     }
     if (f === '_geo_distance') { todo(ctx, 'tri _geo_distance', 'Utilisez ORDER BY geoDistance(lon, lat, x, y).'); continue; }
     let e = mapField(ctx, f);
     if (o.missing !== undefined && o.missing !== '_last' && o.missing !== '_first') e = `ifNull(${e}, ${chVal(o.missing)})`;
-    let dir = String(o.order || 'asc').toUpperCase();
-    out.push(`${e} ${dir}${o.missing === '_first' ? ' NULLS FIRST' : ''}`);
+    out.push(`${e} ${dir.toUpperCase()}${o.missing === '_first' ? ' NULLS FIRST' : ''}`);
   }
   return out;
 }
