@@ -2,5 +2,5 @@
 
 -- Mesures globales
 SELECT
-    quantilesTDigestArray(0.5, 0.9)(nums) AS p
+    arrayMap(v -> if(isNaN(v), NULL, v), quantilesTDigestArray(0.5, 0.9)(nums)) AS p
 FROM logs.events;

@@ -4,4 +4,4 @@
 SELECT
     count() AS total
 FROM logs.events
-WHERE arrayExists(t -> editDistanceUTF8(t, 'conection') <= 1, tokens(lowerUTF8(message)));
+WHERE arrayExists(t -> least(editDistanceUTF8(t, 'conection'), damerauLevenshteinDistance(t, 'conection')) <= 1, tokens(lowerUTF8(message)));

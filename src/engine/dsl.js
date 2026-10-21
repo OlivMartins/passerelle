@@ -801,10 +801,14 @@ function clauseSQL(ctx, q) {
       let fz = isObj(raw) && raw.fuzziness !== undefined ? raw.fuzziness : 'AUTO';
       const d = /^\d+$/.test(String(fz)) ? +fz : v.length <= 2 ? 0 : v.length <= 5 ? 1 : 2;
       const f = mapField(ctx, field); ctx.stats.approx++;
-      ctx.notes.add('info', 'fuzzy → editDistanceUTF8', 'Distance d’édition calculée à la volée : coûteux sur de gros volumes, à combiner avec un filtre sélectif. Nécessite une version récente de ClickHouse.');
+      ctx.notes.add('info', 'fuzzy → distance d’édition', 'Distance calculée à la volée (editDistanceUTF8 et damerauLevenshteinDistance) : coûteux sur de gros volumes, à combiner avec un filtre sélectif. L’inversion de deux lettres accentuées compte pour deux modifications, pour une seule chez Elasticsearch.');
       H(ctx, 'filters', `${field} ≈ ${v}`);
-      if (isTextField(ctx, field)) return `arrayExists(t -> editDistanceUTF8(t, ${chStr(v.toLowerCase())}) <= ${d}, tokens(lowerUTF8(${f})))`;
-      return `editDistanceUTF8(${f}, ${chStr(v)}) <= ${d}`;
+      // Elasticsearch compte l’inversion de deux lettres voisines pour une modification (transpositions: true par défaut).
+      // damerauLevenshteinDistance le fait mais compte en octets : least() garde editDistanceUTF8 pour les lettres
+      // accentuées, où une transposition reste comptée deux fois.
+      const dist = (a, b) => (isObj(raw) && raw.transpositions === false ? `editDistanceUTF8(${a}, ${b})` : `least(editDistanceUTF8(${a}, ${b}), damerauLevenshteinDistance(${a}, ${b}))`);
+      if (isTextField(ctx, field)) return `arrayExists(t -> ${dist('t', chStr(v.toLowerCase()))} <= ${d}, tokens(lowerUTF8(${f})))`;
+      return `${dist(f, chStr(v))} <= ${d}`;
     }
     case 'ids': {
       ctx.stats.ok++; mapField(ctx, '_id');
@@ -1026,7 +1030,8 @@ function metricDef(ctx, name, type, body) {
       const ps = (body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => +(chNum(p, 'percentiles.percents') / 100).toFixed(4));
       ctx.notes.add('info', 'percentiles → quantilesTDigest()', 'Même algorithme (t-digest) qu’Elasticsearch : résultats comparables. Le résultat est un tableau dans l’ordre des percentiles demandés.');
       const fnq = colType && colType.array ? 'quantilesTDigestArray' : 'quantilesTDigest';
-      return [{ alias: A, render: c => (c ? `${fnq}If(${ps.join(', ')})(${x}, ${c})` : `${fnq}(${ps.join(', ')})(${x})`) }];
+      // Groupe qui peut être vide (mesure globale ou filtrée) : quantilesTDigest rend nan là où Elasticsearch rend null
+      return [{ alias: A, render: (c, e) => { const q = c ? `${fnq}If(${ps.join(', ')})(${x}, ${c})` : `${fnq}(${ps.join(', ')})(${x})`; return e ? `arrayMap(v -> if(isNaN(v), NULL, v), ${q})` : q; } }];
     }
     case 'percentile_ranks': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);

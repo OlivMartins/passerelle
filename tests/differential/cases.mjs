@@ -309,7 +309,7 @@ export const CASES = [
   // Aucun mot après analyse : zero_terms_query vaut none par défaut, aucun document
   { id: 'audit_match_sans_mot', dsl: total({ match: { message: '!!!' } }) },
   // Deux lettres inversées comptent pour une seule modification (transpositions: true par défaut)
-  { id: 'audit_flou_transposition', known: 'fuzzy : une transposition compte pour deux modifications (editDistance)', dsl: total({ fuzzy: { message: { value: 'tiemout', fuzziness: 1 } } }) },
+  { id: 'audit_flou_transposition', dsl: total({ fuzzy: { message: { value: 'tiemout', fuzziness: 1 } } }) },
   { id: 'audit_term_epoch', dsl: total({ term: { [TS]: EPOCH(5) } }) },
   { id: 'audit_terms_epoch', dsl: total({ terms: { [TS]: [EPOCH(5), EPOCH(6)] } }) },
   { id: 'audit_plage_format', dsl: total({ range: { [TS]: { gte: '09/03/2026', lt: '10/03/2026', format: 'dd/MM/yyyy' } } }) },
@@ -335,7 +335,7 @@ export const CASES = [
   { id: 'audit_mesures_tableau_par_groupe', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { s: { stats: { field: 'nums' } }, p: { percentiles: { field: 'nums', percents: [50] } } } } } }, tol: 0.05 },
   { id: 'audit_percentiles_tableau', tol: 0.05, dsl: { size: 0, aggs: { p: { percentiles: { field: 'nums', percents: [50, 90] } } } } },
   { id: 'audit_histogramme_tableau', dsl: { size: 0, aggs: { h: { histogram: { field: 'nums', interval: 5 } } } } },
-  { id: 'audit_percentiles_sans_document', known: 'percentiles sans document : nan au lieu de null (forme à arbitrer)', dsl: { size: 0, query: { term: { service: 'inconnu' } }, aggs: { p: { percentiles: { field: 'latency_ms', percents: [50] } } } } },
+  { id: 'audit_percentiles_sans_document', dsl: { size: 0, query: { term: { service: 'inconnu' } }, aggs: { p: { percentiles: { field: 'latency_ms', percents: [50] } } } } },
   { id: 'audit_multi_terms_absent', dsl: { size: 0, aggs: { m: { multi_terms: { terms: [{ field: 'service' }, { field: 'env' }], size: 30 } } } } },
   /* ---------- Écarts relevés par l’audit du 2026-10-21 : tri et pagination ---------- */
   { id: 'audit_search_after_deux_cles', dsl: { size: 10, sort: [{ status: 'asc' }, { [TS]: 'asc' }], search_after: [404, T10] } },
