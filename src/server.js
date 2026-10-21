@@ -118,9 +118,12 @@ async function validateVector(text, format) {
     if (ext === 'toml') body = /^data_dir\s*=/m.test(body) ? body.replace(/^data_dir\s*=.*$/m, `data_dir = ${JSON.stringify(dataDir)}`) : `data_dir = ${JSON.stringify(dataDir)}\n${body}`;
     const file = path.join(dir, `vector.${ext}`);
     await fsp.writeFile(file, body, { mode: 0o600 });
-    // Les variables ${…} absentes reçoivent une valeur factice : on valide la structure, pas les secrets.
-    const env = Object.assign({}, process.env);
-    for (const m of body.matchAll(/(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}/g)) if (env[m[1]] === undefined) env[m[1]] = 'validation';
+    // Vector ne reçoit aucun secret du service : sa sortie revient au client, et la configuration soumise
+    // peut lire un fichier (remap « file: /proc/self/environ »). Les variables ${…} reçoivent une valeur factice :
+    // on valide la structure, pas les secrets.
+    const env = {};
+    for (const [k, v] of Object.entries(process.env)) if (k === 'PATH' || k === 'HOME' || k === 'TZ' || k.startsWith('VECTOR_')) env[k] = v;
+    for (const m of body.matchAll(/(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}/g)) env[m[1]] = 'validation';
     const bin = process.env.PASSERELLE_VECTOR_BIN || 'vector';
     const r = await runProcess(bin, ['--color', 'never', 'validate', '--skip-healthchecks', file], env, 90000);
     const output = (r.stdout + '\n' + r.stderr).replace(/\x1b\[[0-9;]*m/g, '').split('\n')
