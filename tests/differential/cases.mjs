@@ -315,8 +315,8 @@ export const CASES = [
 
   /* ---------- Écarts relevés par l’audit du 2026-10-21 : agrégations ---------- */
   // Les cinq valeurs de retries ont exactement 450 documents : Elasticsearch départage par clé croissante
-  { id: 'audit_terms_ordre_explicite_egalites', known: { N: 'order explicite : le départage par clé croissante est perdu, les égalités en limite du top N sont tranchées au hasard', D: 'order explicite sans départage par clé ; en valeurs par défaut, 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } } } } } },
-  { id: 'audit_terms_imbrique_egalites', known: { N: 'top N nommé (CTE) : ORDER BY count() DESC sans départage par clé', D: 'top N nommé sans départage par clé ; en valeurs par défaut, 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } }, aggs: { lvl: { terms: { field: 'level', size: 2 } } } } } } },
+  { id: 'audit_terms_ordre_explicite_egalites', known: { D: 'valeur par défaut : 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } } } } } },
+  { id: 'audit_terms_imbrique_egalites', known: { D: 'valeur par défaut : 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } }, aggs: { lvl: { terms: { field: 'level', size: 2 } } } } } } },
   // 5 h ne divise pas 24 : Elasticsearch aligne les tranches sur l’epoch, pas sur minuit
   { id: 'audit_date_5h', known: 'intervalle fixe qui ne divise pas 24 h : toStartOfInterval repart de minuit chaque jour, Elasticsearch aligne sur l’epoch', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, fixed_interval: '5h' } } } } },
   { id: 'audit_date_offset', known: 'offset non appliqué (signalé « à vérifier »)', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day', offset: '+6h' } } } } },

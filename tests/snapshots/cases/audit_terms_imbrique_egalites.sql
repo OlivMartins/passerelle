@@ -8,7 +8,7 @@ WITH
         FROM logs.events
         WHERE isNotNull(retries)
         GROUP BY r
-        ORDER BY count() DESC
+        ORDER BY count() DESC, r ASC
         LIMIT 2
     )
 SELECT

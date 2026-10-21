@@ -1034,6 +1034,8 @@ function parseOrder(order, def) {
     return { by: k === '_term' ? '_key' : k, dir };
   });
 }
+// terms et multi_terms : Elasticsearch départage toujours les égalités par clé croissante, même avec un order explicite
+const withKeyTiebreak = order => order.some(o => o.by === '_key') ? order : [...order, { by: '_key', dir: 'asc' }];
 // Elasticsearch écrit les bornes d’une plage comme des doubles Java : 100 devient « 100.0 »
 function javaDouble(v) {
   const n = Number(v);
@@ -1100,7 +1102,7 @@ function buildLevel(ctx, name, def) {
         ctx.stats.ok++; H(ctx, 'groups', `valeurs rares de ${body.field}`);
       } else {
         L.size = body.size !== undefined ? chInt(body.size, 'terms.size') : 10; L.limitable = true;
-        L.order = parseOrder(body.order, L.order);
+        L.order = withKeyTiebreak(parseOrder(body.order, L.order));
         if ((body.min_doc_count || 1) > 1) L.having.push(`doc_count >= ${chInt(body.min_doc_count, 'min_doc_count')}`);
         if (body.min_doc_count === 0) ctx.notes.add('warn', 'min_doc_count: 0', 'Les valeurs sans document ne peuvent pas apparaître via GROUP BY : il faudrait une jointure avec la liste des valeurs attendues.');
         if (type !== 'terms') { ctx.stats.approx++; ctx.notes.add('warn', `${type} approximé`, 'Le score de significativité n’est pas calculé : regroupement simple par fréquence.'); } else ctx.stats.ok++;
@@ -1110,7 +1112,7 @@ function buildLevel(ctx, name, def) {
     }
     case 'multi_terms': {
       (body.terms || []).forEach((t, i) => { const k = mapField(ctx, t.field); ctx.groupCols.add(k); L.keys.push({ sql: k, alias: aliasOf(`${name}_${t.field}`) }); });
-      L.size = body.size !== undefined ? chInt(body.size, 'multi_terms.size') : 10; L.limitable = true; L.order = parseOrder(body.order, L.order);
+      L.size = body.size !== undefined ? chInt(body.size, 'multi_terms.size') : 10; L.limitable = true; L.order = withKeyTiebreak(parseOrder(body.order, L.order));
       ctx.stats.ok++; H(ctx, 'groups', `par ${(body.terms || []).map(t => t.field).join(' + ')} (${L.size} premiers)`);
       break;
     }

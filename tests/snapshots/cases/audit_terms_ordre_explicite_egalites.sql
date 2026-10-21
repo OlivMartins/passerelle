@@ -7,5 +7,5 @@ SELECT
 FROM logs.events
 WHERE isNotNull(retries)
 GROUP BY r
-ORDER BY doc_count DESC
+ORDER BY doc_count DESC, r ASC
 LIMIT 2;
