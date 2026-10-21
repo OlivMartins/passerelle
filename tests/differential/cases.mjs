@@ -310,5 +310,22 @@ export const CASES = [
   { id: 'audit_terms_epoch', known: 'terms sur une date avec des epoch en millisecondes : comparés tels quels à la colonne, sans conversion en date', dsl: total({ terms: { [TS]: [EPOCH(5), EPOCH(6)] } }) },
   { id: 'audit_plage_format', known: 'range avec un format de date personnalisé : la valeur est recopiée, ClickHouse ne sait pas la lire', dsl: total({ range: { [TS]: { gte: '09/03/2026', lt: '10/03/2026', format: 'dd/MM/yyyy' } } }) },
   { id: 'audit_ids', dsl: { size: 5, sort: [{ [TS]: 'asc' }], query: { ids: { values: ['3', '10', '2999', 'abc'] } } } },
-  { id: 'audit_ids_vide', dsl: total({ ids: { values: [] } }) }
+  { id: 'audit_ids_vide', dsl: total({ ids: { values: [] } }) },
+
+  /* ---------- Écarts relevés par l’audit du 2026-10-21 : agrégations ---------- */
+  // Les cinq valeurs de retries ont exactement 450 documents : Elasticsearch départage par clé croissante
+  { id: 'audit_terms_ordre_explicite_egalites', known: { N: 'order explicite : le départage par clé croissante est perdu, les égalités en limite du top N sont tranchées au hasard', D: 'order explicite sans départage par clé ; en valeurs par défaut, 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } } } } } },
+  { id: 'audit_terms_imbrique_egalites', known: { N: 'top N nommé (CTE) : ORDER BY count() DESC sans départage par clé', D: 'top N nommé sans départage par clé ; en valeurs par défaut, 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } }, aggs: { lvl: { terms: { field: 'level', size: 2 } } } } } } },
+  // 5 h ne divise pas 24 : Elasticsearch aligne les tranches sur l’epoch, pas sur minuit
+  { id: 'audit_date_5h', known: 'intervalle fixe qui ne divise pas 24 h : toStartOfInterval repart de minuit chaque jour, Elasticsearch aligne sur l’epoch', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, fixed_interval: '5h' } } } } },
+  { id: 'audit_date_offset', known: 'offset non appliqué (signalé « à vérifier »)', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day', offset: '+6h' } } } } },
+  { id: 'audit_date_fuseau_decalage', known: 'time_zone écrit en décalage (+01:00) : recopié tel quel, ClickHouse ne le connaît pas', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day', time_zone: '+01:00' } } } } },
+  // Elasticsearch refuse un intervalle calendaire multiple
+  { id: 'audit_date_intervalle_invalide', known: 'intervalle refusé par Elasticsearch : la traduction produit une tranche d’une heure sans rien signaler', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: '2d' } } } } },
+  { id: 'audit_mesures_tableau', known: 'stats sur un tableau : SQL refusé (le combinateur -Array ne couvre que avg, sum, min et max isolés)', dsl: { size: 0, aggs: { s: { stats: { field: 'nums' } } } } },
+  { id: 'audit_percentiles_tableau', tol: 0.05, known: 'percentiles sur un tableau : SQL refusé', dsl: { size: 0, aggs: { p: { percentiles: { field: 'nums', percents: [50, 90] } } } } },
+  { id: 'audit_histogramme_tableau', known: 'histogram sur un tableau : SQL refusé', dsl: { size: 0, aggs: { h: { histogram: { field: 'nums', interval: 5 } } } } },
+  { id: 'audit_percentiles_sans_document', known: 'percentiles sans document : nan au lieu de null', dsl: { size: 0, query: { term: { service: 'inconnu' } }, aggs: { p: { percentiles: { field: 'latency_ms', percents: [50] } } } } },
+  { id: 'audit_multi_terms_absent', known: 'multi_terms : les groupes où un champ est absent sont gardés', dsl: { size: 0, aggs: { m: { multi_terms: { terms: [{ field: 'service' }, { field: 'env' }], size: 30 } } } } },
+  { id: 'audit_top_metrics_size', known: 'top_metrics : size ignoré, une seule valeur (argMax)', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { [TS]: 'desc' }, size: 3 } } } } }
 ];
