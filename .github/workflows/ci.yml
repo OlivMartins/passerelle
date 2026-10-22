@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Appelé par release.yml : une release n'est construite qu'après les mêmes preuves que main
+  workflow_call:
+    inputs:
+      ref:
+        description: Révision à tester (étiquette de la release)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -14,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -22,32 +31,30 @@ jobs:
       - run: npm test
       - run: npm run build:ui
       - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.ref }}
         with:
           name: passerelle-html
           path: dist/passerelle.html
 
+  # Le README annonce trois versions majeures d'Elasticsearch : chacune est jouée, à chaque changement
   differentiel:
-    name: Banc différentiel Elasticsearch / ClickHouse
+    name: Banc différentiel Elasticsearch ${{ matrix.es }} / ClickHouse
     runs-on: ubuntu-latest
-    services:
-      elasticsearch:
-        image: docker.elastic.co/elasticsearch/elasticsearch:8.19.22
-        env:
-          discovery.type: single-node
-          xpack.security.enabled: 'false'
-          ES_JAVA_OPTS: -Xms1g -Xmx1g
-        ports:
-          - 9200:9200
-        options: >-
-          --health-cmd "curl -s http://localhost:9200/_cluster/health"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 12
+    strategy:
+      fail-fast: false
+      matrix:
+        es: ['7.17.29', '8.19.22', '9.5.4']
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Démarrer Elasticsearch ${{ matrix.es }}
+        env:
+          ES_VERSION: ${{ matrix.es }}
+        run: sh tests/differential/es.sh up
       - name: Extraire le binaire ClickHouse 26.9 de son image officielle
         run: sh tests/differential/clickhouse.sh 26.9 ./clickhouse
       - name: Comparer les résultats
@@ -60,6 +67,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -68,3 +77,22 @@ jobs:
           LOGSTASH_VERSION: 9.5.5
           VECTOR_VERSION: 0.59.0
         run: npm run test:pipelines
+
+  image:
+    name: Image conteneur
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Construire l'image
+        run: docker build -t passerelle:ci .
+      - name: Démarrer et traduire une requête
+        run: |
+          docker run -d --name passerelle -p 127.0.0.1:8080:8080 --read-only --tmpfs /tmp passerelle:ci
+          for i in $(seq 30); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 1; done
+          curl -fsS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
+            --data-binary '{"query":{"term":{"service":"api"}}}' | grep -q '"verdict"'
+      - name: Journal du conteneur
+        if: failure()
+        run: docker logs passerelle

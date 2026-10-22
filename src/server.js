@@ -1,5 +1,5 @@
 /* Passerelle — serveur HTTP (interface + API) et ligne de commande */
-const VERSION = '1.1.1';
+const VERSION = '1.2.0';
 const http = require('node:http');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -57,7 +57,6 @@ function publicConfig(cfg) {
   if (c.kafka.password && !ENV_REF.test(c.kafka.password)) c.kafka.password = '${KAFKA_PASSWORD}';
   return c;
 }
-function coverage(stats) { const t = stats.ok + stats.approx + stats.ko || 1; return Object.assign({}, stats, { percent: Math.round((100 * (stats.ok + stats.approx)) / t) }); }
 
 /* ---------- Interface embarquée ---------- */
 function loadUIHtml() {
@@ -161,27 +160,88 @@ async function validateVector(text, format) {
   } finally { await fsp.rm(dir, { recursive: true, force: true }); }
 }
 function withoutStrings(s) { return s.replace(/'(?:[^'\\]|\\.)*'/g, "''").replace(/`(?:[^`\\]|\\.)*`/g, '``').replace(/--[^\n]*/g, ''); }
-async function validateSQL(cfg, sql) {
+/*
+ * EXPLAIN indexes = 1 évalue les sous-requêtes scalaires et imprime leur valeur dans le plan : sans garde,
+ * la validation lirait toute table accessible au compte du service (vérifié sur ClickHouse 26.9).
+ * La requête est donc d’abord analysée par EXPLAIN AST, qui ne lit aucune donnée : seules les tables de la
+ * configuration (index_mapping, default_table, listes nommées) et les CTE de la requête sont acceptées,
+ * sans fonction de table (url, file, remote…) ni lecture hors requête (dictGet, joinGet, file).
+ */
+function allowedTables(cfg) {
+  const ch = cfg.clickhouse; const db = expand(ch.database) || 'default';
+  const qualify = t => (String(t).includes('.') ? String(t) : `${db}.${t}`);
+  return new Set([...Object.values(ch.index_mapping || {}), ch.default_table, (ch.lists && ch.lists.table) || `${db}.passerelle_lists`].filter(Boolean).map(qualify));
+}
+function parseAST(text) {
+  const root = { text: '', children: [] }; const stack = [{ indent: -1, node: root }];
+  for (const line of String(text).split('\n')) {
+    if (!line.trim()) continue;
+    const indent = line.length - line.trimStart().length; const node = { text: line.trim(), children: [] };
+    while (stack[stack.length - 1].indent >= indent) stack.pop();
+    stack[stack.length - 1].node.children.push(node); stack.push({ indent, node });
+  }
+  return root;
+}
+function astReferences(root) {
+  const refs = []; const todo = [[root, null]];
+  while (todo.length) {
+    const [n, parent] = todo.pop();
+    let m;
+    if ((m = /^TableIdentifier (\S+)/.exec(n.text))) refs.push({ kind: 'table', name: m[1] });
+    else if ((m = /^Function (\w+)/.exec(n.text))) {
+      if (parent && parent.text.startsWith('TableExpression')) refs.push({ kind: 'function', name: m[1] });
+      // Fonctions qui lisent hors de la requête : dictionnaires, tables Join, fichiers du serveur
+      else if (/^(dict\w*|joinGet\w*|file)$/i.test(m[1])) refs.push({ kind: 'reader', name: m[1] });
+      else if (/^(global)?(not)?(null)?in$/i.test(m[1])) {
+        // x IN db.table : la table est un simple identifiant à droite de IN
+        const args = n.children[0] ? n.children[0].children : [];
+        if (args[1] && /^Identifier \S+$/.test(args[1].text.replace(/ \(alias .*\)$/, ''))) refs.push({ kind: 'table', name: args[1].text.split(' ')[1] });
+      }
+    }
+    for (const c of n.children) todo.push([c, n]);
+  }
+  return refs;
+}
+async function clickhouseQuery(cfg, body, params) {
   const ep = expand(cfg.clickhouse.endpoint).replace(/\/+$/, '');
-  if (!ep) throw new HttpError(503, 'clickhouse.endpoint n’est pas configuré');
-  const stmt = String(sql).trim().replace(/;\s*$/, '');
-  const bare = withoutStrings(stmt);
-  if (/;/.test(bare)) throw new HttpError(400, 'une seule requête à la fois');
-  if (!/^\s*(WITH|SELECT)\b/i.test(bare.replace(/^(\s*--[^\n]*\n)*/, ''))) throw new HttpError(400, 'seules les requêtes SELECT (éventuellement précédées de WITH) sont acceptées');
   const url = new URL(ep + '/');
   url.searchParams.set('database', expand(cfg.clickhouse.database) || 'default');
   // readonly=1 et non 2 : en 2, la requête peut changer ses réglages (SETTINGS max_execution_time = 0)
   // et appeler d’autres hôtes par url() ; vérifié sur ClickHouse 26.9
   url.searchParams.set('readonly', '1');
   url.searchParams.set('max_execution_time', '15');
+  for (const [k, v] of params) url.searchParams.set(k, v);
   const headers = { 'content-type': 'text/plain; charset=utf-8' };
   const user = expand(cfg.clickhouse.user);
   if (user) { headers['x-clickhouse-user'] = user; headers['x-clickhouse-key'] = expand(cfg.clickhouse.password); }
   let r;
-  try { r = await fetch(url, { method: 'POST', headers, body: `EXPLAIN indexes = 1 ${stmt} FORMAT TSVRaw`, signal: AbortSignal.timeout(20000) }); }
+  try { r = await fetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(20000) }); }
   catch (e) { throw new HttpError(502, `ClickHouse injoignable : ${e.cause ? e.cause.code || e.cause.message : e.message}`); }
-  const text = await r.text();
-  return { valid: r.ok, status: r.status, plan: text.trim() };
+  return { ok: r.ok, status: r.status, text: (await r.text()).trim() };
+}
+async function validateSQL(cfg, sql, query) {
+  if (!expand(cfg.clickhouse.endpoint)) throw new HttpError(503, 'clickhouse.endpoint n’est pas configuré');
+  const stmt = String(sql).trim().replace(/;\s*$/, '');
+  const bare = withoutStrings(stmt);
+  if (/;/.test(bare)) throw new HttpError(400, 'une seule requête à la fois');
+  if (!/^\s*(WITH|SELECT)\b/i.test(bare.replace(/^(\s*--[^\n]*\n)*/, ''))) throw new HttpError(400, 'seules les requêtes SELECT (éventuellement précédées de WITH) sont acceptées');
+  // Paramètres de requête ({nom:Type}) : param_nom=… dans l’adresse de l’appel, transmis à ClickHouse
+  const params = [...query].filter(([k]) => /^param_[A-Za-z_][A-Za-z0-9_]*$/.test(k));
+  const ast = await clickhouseQuery(cfg, `EXPLAIN AST ${stmt}`, params);
+  if (!ast.ok) return { valid: false, status: ast.status, plan: ast.text };
+  const db = expand(cfg.clickhouse.database) || 'default';
+  const allowed = allowedTables(cfg);
+  const ctes = new Set([...bare.matchAll(/(?:\bWITH\b|,)\s*`?([A-Za-z_][A-Za-z0-9_]*)`?\s+AS\s*\(/gi)].map(m => m[1]));
+  for (const ref of astReferences(parseAST(ast.text))) {
+    if (ref.kind === 'function') throw new HttpError(400, `fonction de table refusée : ${ref.name}()`);
+    if (ref.kind === 'reader') throw new HttpError(400, `fonction refusée : ${ref.name}() lit des données hors de la requête`);
+    const name = ref.name.replace(/`/g, '');
+    if (!name.includes('.') && ctes.has(name)) continue;
+    const table = name.includes('.') ? name : `${db}.${name}`;
+    if (!allowed.has(table)) throw new HttpError(400, `table ${table} hors de la configuration : la validation ne lit que ${[...allowed].join(', ')} (clickhouse.index_mapping, default_table, lists.table)`);
+  }
+  const r = await clickhouseQuery(cfg, `EXPLAIN indexes = 1 ${stmt} FORMAT TSVRaw`, params);
+  return { valid: r.ok, status: r.status, plan: r.text };
 }
 
 /* ---------- Serveur ---------- */
@@ -218,19 +278,19 @@ function serve(opts) {
       switch (url.pathname) {
         case '/v1/translate/dsl': {
           const r = translateDSL(body, cfg, { index: url.searchParams.get('index') || '' });
-          if (r.empty) return json(res, 400, { error: 'requête vide' });
-          if (r.error) return json(res, 422, { error: r.error });
-          return json(res, 200, { table: r.table, sql: r.sql, statements: r.statements, lists: r.lists, notes: r.notes, coverage: coverage(r.stats), summary: r.sentence });
+          if (r.empty) return json(res, 400, { error: 'requête vide', verdict: 'unrecognized' });
+          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized' });
+          return json(res, 200, { verdict: verdictOf(r), table: r.table, sql: r.sql, statements: r.statements, parameters: r.parameters, lists: r.lists, notes: r.notes, coverage: coverage(r.stats), summary: r.sentence });
         }
         case '/v1/translate/logstash': {
           const fmt = url.searchParams.get('format') === 'toml' ? 'toml' : 'yaml';
           const r = translateLogstash(body, cfg);
-          if (r.empty) return json(res, 400, { error: 'pipeline vide' });
-          if (r.error) return json(res, 422, { error: r.error });
-          return json(res, 200, { format: fmt, config: r[fmt], notes: r.notes, coverage: coverage(r.stats), topology: r.graph, env: r.env, summary: r.sentence });
+          if (r.empty) return json(res, 400, { error: 'pipeline vide', verdict: 'unrecognized' });
+          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized' });
+          return json(res, 200, { verdict: verdictOf(r), format: fmt, config: r[fmt], notes: r.notes, coverage: coverage(r.stats), topology: r.graph, env: r.env, summary: r.sentence });
         }
         case '/v1/validate/vector': return json(res, 200, await limited(() => validateVector(body, url.searchParams.get('format') || 'yaml')));
-        case '/v1/validate/sql': return json(res, 200, await limited(() => validateSQL(cfg, body)));
+        case '/v1/validate/sql': return json(res, 200, await limited(() => validateSQL(cfg, body, url.searchParams)));
         default: return json(res, 404, { error: 'ressource inconnue' });
       }
     } catch (e) {
@@ -258,8 +318,8 @@ const HELP = `Passerelle ${VERSION} — traduction Elasticsearch/Logstash vers C
 
 Utilisation :
   passerelle serve       [--config FICHIER] [--listen HÔTE:PORT]
-  passerelle dsl2sql     <fichier|dossier>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo] [--verbose]
-  passerelle ls2vector   <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo] [--verbose]
+  passerelle dsl2sql     <fichier|dossier>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo|review] [--verbose]
+  passerelle ls2vector   <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review] [--verbose]
   passerelle check-config [--config FICHIER] [--quiet]
   passerelle version
 
@@ -270,7 +330,9 @@ Variables d’environnement :
   PASSERELLE_VECTOR_BIN  binaire Vector pour /v1/validate/vector (vector par défaut)
   CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, KAFKA_USERNAME, KAFKA_PASSWORD : secrets référencés par la configuration
 
-Codes de sortie : 0 succès, 1 erreur, 2 éléments à reprendre (avec --fail-on todo).`;
+Verdict de chaque fichier : prête, à vérifier, à reprendre, non reconnue.
+Codes de sortie : 0 succès, 1 erreur ou fichier non reconnu,
+  2 fichier à reprendre (--fail-on todo), ou à vérifier ou à reprendre (--fail-on review).`;
 // Options déclarées : une option mal écrite ou une valeur inconnue est une erreur, pas une option ignorée
 // (« --fail-on todos » désactivait en silence le contrôle d’une intégration continue).
 const OPTIONS = {
@@ -287,7 +349,7 @@ function parseArgs(argv) {
     fail(`${e.code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION' ? 'option inconnue' : 'option sans sa valeur, ou avec une valeur en trop'} : ${opt[1]} (passerelle --help)`);
   }
   const o = Object.assign({ _: r.positionals }, r.values);
-  if (o['fail-on'] !== undefined && o['fail-on'] !== 'todo') fail(`--fail-on attend la valeur todo, pas « ${o['fail-on']} »`);
+  if (o['fail-on'] !== undefined && o['fail-on'] !== 'todo' && o['fail-on'] !== 'review') fail(`--fail-on attend todo ou review, pas « ${o['fail-on']} »`);
   if (o.format !== undefined && o.format !== 'yaml' && o.format !== 'toml') fail(`--format attend yaml ou toml, pas « ${o.format} »`);
   return o;
 }
@@ -309,29 +371,37 @@ function batch(kind, o) {
   const files = collect(o._, kind === 'dsl' ? /\.(json|txt|es)$/i : /\.(conf|cfg|logstash)$/i);
   if (!files.length) fail('aucun fichier correspondant trouvé');
   if (o.out) fs.mkdirSync(o.out, { recursive: true });
-  let errors = 0, todos = 0;
+  let errors = 0, failing = 0;
+  const threshold = o['fail-on'] ? VERDICT_RANK[o['fail-on']] : Infinity;
+  const MARK = { ready: '✓', review: '~', todo: '!' };
   for (const f of files) {
     const text = fs.readFileSync(f, 'utf8');
     const r = kind === 'dsl' ? translateDSL(text, cfg, { index: o.index || '' }) : translateLogstash(text, cfg);
-    if (r.error || r.empty) { errors++; process.stderr.write(`✗ ${f} : ${r.error || 'fichier vide'}\n`); continue; }
-    const cov = coverage(r.stats); if (r.stats.ko) todos++;
-    const content = kind === 'dsl' ? `-- Traduit par Passerelle ${VERSION} depuis ${path.basename(f)}\n-- Table ClickHouse : ${r.table}\n\n${r.sql}\n` : r[fmt];
+    if (r.error || r.empty) { errors++; process.stderr.write(`✗ ${f} (non reconnue) : ${r.error || 'fichier vide'}\n`); continue; }
+    const cov = coverage(r.stats); const verdict = verdictOf(r);
+    if (VERDICT_RANK[verdict] >= threshold) failing++;
+    const params = kind === 'dsl' && r.parameters.length ? `-- Paramètres : ${r.parameters.map(p => `{${p.name}} ← ${p.source}`).join(', ')}\n` : '';
+    const content = kind === 'dsl' ? `-- Traduit par Passerelle ${VERSION} depuis ${path.basename(f)}\n-- Table ClickHouse : ${r.table}\n-- Verdict : ${VERDICTS[verdict]}\n${params}\n${r.sql}\n` : r[fmt];
+    const summary = `${VERDICTS[verdict]} : ${cov.percent} % traduit, ${r.stats.approx} à vérifier, ${r.stats.ko} à reprendre`;
     if (o.out) {
       const target = path.join(o.out, path.basename(f).replace(/\.[^.]+$/, '') + (kind === 'dsl' ? '.sql' : `.${fmt}`));
       fs.writeFileSync(target, content);
       // Listes nommées : la table et ses lignes, à exécuter avant la requête
       const lists = kind === 'dsl' ? r.lists : [];
       if (lists.length) fs.writeFileSync(target.replace(/\.sql$/, '.lists.sql'), lists.map(l => l.sql).join('\n\n') + '\n');
-      process.stderr.write(`${r.stats.ko ? '!' : '✓'} ${f} → ${target} (${cov.percent} % traduit, ${r.stats.approx} à vérifier, ${r.stats.ko} à reprendre${lists.length ? `, ${lists.length} liste(s) nommée(s)` : ''})\n`);
+      process.stderr.write(`${MARK[verdict]} ${f} → ${target} (${summary}${lists.length ? `, ${lists.length} liste(s) nommée(s)` : ''})\n`);
     } else {
       process.stdout.write(content + (files.length > 1 ? '\n' : ''));
-      process.stderr.write(`${r.stats.ko ? '!' : '✓'} ${f} (${cov.percent} % traduit, ${r.stats.approx} à vérifier, ${r.stats.ko} à reprendre)\n`);
+      process.stderr.write(`${MARK[verdict]} ${f} (${summary})\n`);
       if (kind === 'dsl' && r.lists.length) process.stderr.write(`    ${r.lists.length} liste(s) nommée(s) : ajoutez --out pour écrire leur fichier .lists.sql\n`);
     }
     if (o.verbose) r.notes.forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`));
   }
   if (errors) process.exit(1);
-  if (todos && o['fail-on'] === 'todo') { process.stderr.write(`${todos} fichier(s) contiennent des éléments à reprendre.\n`); process.exit(2); }
+  if (failing) {
+    process.stderr.write(`${failing} fichier(s) ${o['fail-on'] === 'todo' ? 'à reprendre' : 'à vérifier ou à reprendre'}.\n`);
+    process.exit(2);
+  }
 }
 function main(argv) {
   const [cmd, ...rest] = argv; const o = parseArgs(rest);

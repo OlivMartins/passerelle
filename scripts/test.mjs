@@ -14,12 +14,12 @@ import { CASES } from '../tests/differential/cases.mjs';
 import { INDEX, configOverride } from '../tests/differential/dataset.mjs';
 import { CASES as PIPELINE_CASES } from '../tests/pipelines/cases.mjs';
 import { translatedPipeline } from '../tests/pipelines/transport.mjs';
+import { loadEngine, engineSource } from './engine.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const UPDATE = process.argv.includes('--update');
 const rd = p => readFileSync(join(ROOT, p), 'utf8');
-const engine = ['src/engine/base.js', 'src/engine/dsl.js', 'src/engine/logstash.js'].map(rd).join('');
-const E = new Function(`'use strict';\n${engine}\nreturn { translateDSL, translateLogstash, toYAML, DEFAULT_CONFIG, mergeConfig };`)();
+const E = loadEngine();
 
 // Éléments « à reprendre » attendus : le filtre ruby de batch.conf n’a pas d’équivalent automatique
 const EXPECTED_TODO = { 'logstash/batch.conf': 1 };
@@ -151,6 +151,56 @@ check(/topic: '\{\{ type \}\}'\n\s+dangerously_allow_unconfined_template_resolut
 const everyInput = 'input { kafka { topics => ["t"] } stdin { } file { path => "/var/log/app.log" } tcp { port => 5000 } udp { port => 5001 } http { port => 8080 } beats { port => 5044 } generator { } } output { stdout { } }';
 const namespaced = cfg => Object.values(E.translateLogstash(everyInput, cfg).config.sources).filter(s => s.log_namespace === true).length;
 check(namespaced(E.DEFAULT_CONFIG) === 8 && namespaced(E.mergeConfig(E.DEFAULT_CONFIG, { vector: { log_namespace: false } })) === 0, 'entrées : chaque source déclare le namespace de logs que suppose le VRL généré');
+
+/* ---------- Contrat de confiance : rien de faux annoncé comme juste ---------- */
+const refused = (dsl, re) => { const r = tr(dsl); return E.verdictOf(r) === 'unrecognized' && re.test(r.error || ''); };
+const guarded = (dsl, re) => { const r = tr(dsl); return E.verdictOf(r) === 'todo' && re.test(r.sql) && r.statements.every(s => /throwIf\(1, /.test(s.sql)); };
+// Discover demande fields: ["*"] avec _source: false : toutes les colonnes, jamais une colonne nommée « * »
+const discover = tr({ _source: false, fields: [{ field: '*', include_unmapped: 'true' }, { field: '@timestamp', format: 'strict_date_optional_time' }], stored_fields: ['*'], size: 5 });
+check(/SELECT\n {4}\*\nFROM/.test(discover.sql) && !discover.sql.includes('`*`'), 'fields ["*"] de Discover : SELECT *');
+check(/COLUMNS\('\^http\\\\\.\.\*\$'\)/.test(tr({ _source: false, fields: ['http.*'] }).sql), 'fields à motif : COLUMNS(regex)');
+// Clés inconnues : la requête est refusée, comme Elasticsearch la refuserait
+check(refused({ qeury: { term: { service: 'api' } } }, /qeury/), 'clé inconnue du corps de recherche : refus');
+check(refused({ query: { bool: { filtre: [{ term: { service: 'api' } }] } } }, /filtre/), 'clé inconnue de bool : refus');
+check(refused({ query: { term: { service: 'api' }, range: { status: { gte: 500 } } } }, /une clause par objet/), 'deux clauses dans un objet : refus');
+check(refused({ query: { term: { service: 'api', host: 'a' } } }, /un seul champ/), 'deux champs dans term : refus');
+check(refused({ size: 0, aggs: { a: { terms: { field: 'service' }, avg: { field: 'latency_ms' } } } }, /deux types/), 'deux types dans une agrégation : refus');
+check(refused({ attributes: { title: 't' }, type: 'search', id: 'x' }, /Inspect/), 'objet sauvegardé Kibana : refus qui dit quoi copier');
+check(refused(JSON.parse('{"query":' + '{"bool":{"must":['.repeat(400) + '{"match_all":{}}' + ']}}'.repeat(400) + '}'), /imbriquée/), 'requête imbriquée à l’excès : refus, pas de pile épuisée');
+// Paramètre inconnu ou option non traduite : à reprendre, et le SQL s’arrête sur throwIf
+check(guarded({ size: 0, aggs: { a: { terms: { field: 'service', sise: 5 } } } }, /sise/), 'paramètre inconnu d’agrégation : à reprendre, SQL arrêté');
+check(guarded({ query: { term: { service: 'api' } }, knn: { field: 'v', query_vector: [1], k: 1 } }, /knn/), 'knn : à reprendre, SQL arrêté');
+check(guarded({ query: { match_bool_prefix: { message: { query: 'conn ref', operator: 'and' } } } }, /operator/), 'option qui change le résultat sans être traduite : à reprendre');
+check(E.verdictOf(tr({ query: { match: { message: { query: 'x', analyzer: 'french' } } } })) === 'review', 'analyseur personnalisé : à vérifier');
+const quiet = tr({ query: { term: { service: 'api' } }, highlight: { fields: { message: {} } }, version: true });
+check(E.verdictOf(quiet) === 'ready' && quiet.notes.some(n => n.title === 'Options sans effet sur le résultat'), 'options sans effet (highlight, version) : signalées, verdict inchangé');
+check(E.coverage({ ok: 999, approx: 0, ko: 1 }).percent === 99, 'couverture : 999 clauses sur 1 000 ne s’affichent pas 100 %');
+// Modèles Watcher, Kibana et Grafana : paramètres ClickHouse
+const watcher = tr({ size: 0, query: { range: { '@timestamp': { gte: '{{ctx.trigger.scheduled_time}}||-5m' } } } });
+check(E.verdictOf(watcher) === 'ready' && watcher.sql.includes("parseDateTime64BestEffort({scheduled_time:String}, 3, 'UTC') - INTERVAL 5 MINUTE") && watcher.parameters[0].source === '{{ctx.trigger.scheduled_time}}', 'modèle Watcher : paramètre {scheduled_time:String}');
+const grafana = tr({ size: 0, query: { bool: { filter: [{ range: { '@timestamp': { gte: '$timeFrom', format: 'epoch_millis' } } }, { query_string: { query: 'service:$service' } }] } } });
+check(grafana.sql.includes('fromUnixTimestamp64Milli(toInt64({timeFrom:String}))') && grafana.sql.includes('service = {service:String}'), 'variables Grafana : bornes epoch_millis et valeurs en paramètres');
+check(guarded({ query: { match: { message: '{{ctx.payload.word}}' } } }, /modèle « \{\{ctx\.payload\.word\}\} »/), 'modèle dans une recherche plein texte : à reprendre');
+// Analyse Lucene : une longue liste de OR ne doit pas épuiser la pile
+const longOr = tr({ query: { query_string: { query: Array.from({ length: 20000 }, (_, i) => `host:h${i}`).join(' OR ') } } });
+check(!longOr.error && longOr.stats.ko === 0, 'query_string de 20 000 OR : traduite');
+check(tr({ query: { query_string: { query: '('.repeat(5000) + 'a' + ')'.repeat(5000) } } }).stats.ko === 1, 'query_string imbriquée à l’excès : à reprendre, pas de pile épuisée');
+
+// Sortie elasticsearch : identifiants en variables, index tiré d’un champ, data stream
+const esOut = E.translateLogstash('input { stdin {} } output { elasticsearch { hosts => ["es:9200"] index => "%{[@metadata][index]}-%{+YYYY.MM.dd}" user => "elastic" password => "changeme" ssl_enabled => true cacert => "/etc/ca.pem" } }', E.DEFAULT_CONFIG);
+check(!esOut.yaml.includes('changeme') && esOut.yaml.includes("password: '${ELASTICSEARCH_PASSWORD}'") && esOut.env.includes('ELASTICSEARCH_PASSWORD'), 'sortie elasticsearch : mot de passe lu dans une variable, jamais recopié');
+check(/dangerously_allow_unconfined_template_resolution: true/.test(esOut.yaml) && /endpoints: \[https:\/\/es:9200\]/.test(esOut.yaml) && /ca_file: \/etc\/ca\.pem/.test(esOut.yaml), 'sortie elasticsearch : index tiré d’un champ autorisé, HTTPS et autorité de certification');
+const dsOut = E.translateLogstash('input { stdin {} } output { elasticsearch { hosts => ["https://es:9200"] data_stream => "true" data_stream_dataset => "nginx" api_key => "${ES_API_KEY}" } }', E.DEFAULT_CONFIG);
+check(/mode: data_stream/.test(dsOut.yaml) && /dataset: nginx/.test(dsOut.yaml) && dsOut.yaml.includes("Authorization: 'ApiKey ${ES_API_KEY}'"), 'sortie elasticsearch : data stream et clé d’API');
+const upd = E.translateLogstash('input { stdin {} } output { elasticsearch { action => "update" doc_as_upsert => true } }', E.DEFAULT_CONFIG);
+check(E.verdictOf(upd) === 'todo', 'sortie elasticsearch : mise à jour de documents à reprendre');
+check(E.verdictOf(E.translateLogstash('input { stdin {} } output { file { path => "/tmp/x" flush_interval => 0 inconnue => 1 } }', E.DEFAULT_CONFIG)) === 'review', 'option de sortie non reprise : à vérifier');
+check(/imbrication/.test(E.translateLogstash('input { stdin {} } filter { ' + 'if [a] { '.repeat(500) + 'drop {}' + ' }'.repeat(500) + ' } output { stdout {} }', E.DEFAULT_CONFIG).error || ''), 'pipeline imbriqué à l’excès : refus, pas de pile épuisée');
+
+// Les fichiers du moteur et le serveur partagent une portée : un nom déclaré deux fois casserait le binaire
+const declared = (engineSource() + rd('src/server.js')).match(/^(?:function|const|let|class) +[A-Za-z_$][\w$]*/gm).map(d => d.split(/ +/)[1]);
+const twice = [...new Set(declared.filter((d, i) => declared.indexOf(d) !== i))];
+check(!twice.length, 'aucun nom déclaré deux fois dans le binaire assemblé', twice.join(', '));
 
 process.stdout.write(failures ? `\n${failures} échec(s)\n` : '\nTous les tests passent.\n');
 process.exit(failures ? 1 : 0);

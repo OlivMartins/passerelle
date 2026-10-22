@@ -1,8 +1,12 @@
 /* Passerelle — moteur partie 3 : Logstash → Vector */
+const LS_MAX_DEPTH = 64;
 function parseLogstash(src) {
   let i = 0; const s = String(src); const n = s.length;
   const lineAt = pos => s.slice(0, pos).split('\n').length;
   const fail = msg => { throw new Error(`Ligne ${lineAt(i)} : ${msg}`); };
+  // Blocs, parenthèses, négations et valeurs s’imbriquent par récursion : une borne évite d’épuiser la pile
+  let depth = 0;
+  const nested = fn => { if (++depth > LS_MAX_DEPTH) fail(`imbrication sur plus de ${LS_MAX_DEPTH} niveaux`); try { return fn(); } finally { depth--; } };
   function ws() { while (i < n) { const c = s[i]; if (c === '#') { while (i < n && s[i] !== '\n') i++; } else if (c === ' ' || c === '\t' || c === '\n' || c === '\r') i++; else break; } }
   function at(t) { ws(); return s.startsWith(t, i); }
   function eat(t) { if (at(t)) { i += t.length; return true; } return false; }
@@ -18,8 +22,8 @@ function parseLogstash(src) {
   function value() {
     ws(); const c = s[i];
     if (c === '"' || c === "'") return { t: 'str', v: str() };
-    if (c === '[') { i++; const items = []; while (!at(']')) { if (i >= n) fail('« ] » attendu'); items.push(value()); eat(','); } expect(']'); return { t: 'arr', v: items }; }
-    if (c === '{') return { t: 'hash', v: hash() };
+    if (c === '[') { i++; const items = []; while (!at(']')) { if (i >= n) fail('« ] » attendu'); items.push(nested(value)); eat(','); } expect(']'); return { t: 'arr', v: items }; }
+    if (c === '{') return { t: 'hash', v: nested(hash) };
     const m = /^-?\d+(\.\d+)?(?![A-Za-z_])/.exec(s.slice(i));
     if (m) { i += m[0].length; return { t: 'num', v: +m[0] }; }
     const b = bare();
@@ -37,12 +41,12 @@ function parseLogstash(src) {
   function stmt() {
     if (word('if')) {
       const line = lineAt(i); i += 2; const branches = [];
-      const c = cond(); expect('{'); const b = body(); expect('}'); branches.push({ cond: c, body: b });
+      const c = cond(); expect('{'); const b = nested(body); expect('}'); branches.push({ cond: c, body: b });
       for (;;) {
         if (!word('else')) break;
         i += 4;
-        if (word('if')) { i += 2; const c2 = cond(); expect('{'); const b2 = body(); expect('}'); branches.push({ cond: c2, body: b2 }); }
-        else { expect('{'); const b3 = body(); expect('}'); branches.push({ cond: null, body: b3 }); break; }
+        if (word('if')) { i += 2; const c2 = cond(); expect('{'); const b2 = nested(body); expect('}'); branches.push({ cond: c2, body: b2 }); }
+        else { expect('{'); const b3 = nested(body); expect('}'); branches.push({ cond: null, body: b3 }); break; }
       }
       return { k: 'if', branches, line };
     }
@@ -55,9 +59,9 @@ function parseLogstash(src) {
   function andC() { let l = notC(); for (;;) { if (word('and')) { i += 3; l = { op: 'and', l, r: notC() }; } else if (word('nand')) { i += 4; l = { op: 'nand', l, r: notC() }; } else break; } return l; }
   function notC() {
     ws();
-    if (s[i] === '!' && s[i + 1] !== '=' && s[i + 1] !== '~') { i++; return { op: 'not', e: notC() }; }
-    if (word('not')) { i += 3; return { op: 'not', e: notC() }; }
-    if (s[i] === '(') { i++; const e = orC(); expect(')'); return e; }
+    if (s[i] === '!' && s[i + 1] !== '=' && s[i + 1] !== '~') { i++; return { op: 'not', e: nested(notC) }; }
+    if (word('not')) { i += 3; return { op: 'not', e: nested(notC) }; }
+    if (s[i] === '(') { i++; const e = nested(orC); expect(')'); return e; }
     return comparison();
   }
   function comparison() {
@@ -899,8 +903,8 @@ function buildSink(v, st, cfg, used, singleKafka) {
   const s = lsSettings(st);
   const tplOf = t => String(t).replace(/%\{([^}]+)\}/g, (m, ref) => {
     if (ref.startsWith('+')) return joda2strf(ref.slice(1));
+    // Une métadonnée (%nom) se lit aussi dans un modèle Vector : vérifié avec Vector 0.59
     const p = vPathOf(fieldSegs(ref), v.ns);
-    if (p.startsWith('%')) v.note('warn', 'Métadonnée dans un modèle', `« ${ref} » : copiez la valeur dans un champ de l’événement pour l’utiliser dans le nom du topic.`);
     return `{{ ${p.replace(/^\./, '')} }}`;
   });
   let sink;
@@ -931,15 +935,149 @@ function buildSink(v, st, cfg, used, singleKafka) {
   }
   const name = uniq(used, compName(s.id || st.name + '_out'));
   const others = {
-    elasticsearch: () => ({ type: 'elasticsearch', inputs: [], endpoints: lsList(s.hosts || 'http://localhost:9200'), bulk: { index: tplOf(s.index || 'logstash-%{+yyyy.MM.dd}') } }),
+    elasticsearch: () => elasticsearchSink(v, s, tplOf),
     stdout: () => ({ type: 'console', inputs: [], encoding: { codec: 'json' } }),
-    file: () => ({ type: 'file', inputs: [], path: tplOf(s.path || '/tmp/out.log'), encoding: { codec: 'json' } }),
-    http: () => ({ type: 'http', inputs: [], uri: s.url || 'http://localhost', encoding: { codec: 'json' } }),
+    file: () => Object.assign({ type: 'file', inputs: [], path: tplOf(s.path || '/tmp/out.log'), encoding: { codec: 'json' } }, truthy(s.gzip) ? { compression: 'gzip' } : {}),
+    http: () => httpSink(v, s),
     null: () => ({ type: 'blackhole', inputs: [] })
   };
   if (!others[st.name]) { v.stats.ko++; v.note('err', `Sortie ${st.name} non traduite (ligne ${st.line})`, 'Aucun sink Vector équivalent n’a été choisi automatiquement.'); return null; }
   sink = others[st.name](); sink.__label = st.name; v.stats.ok++;
+  unhandledOptions(v, st, s);
   return { name, sink };
+}
+
+/* ---------- Sorties autres que Kafka ---------- */
+// Options de sortie : traitées par la traduction (handled) ou sans effet sur les données écrites (noEffect).
+// Toute autre option est signalée « à vérifier » au lieu de disparaître.
+const OUTPUT_COMMON = ['id', 'enable_metric', 'workers', 'codec', 'ecs_compatibility'];
+const OUTPUT_OPTIONS = {
+  elasticsearch: {
+    handled: ['hosts', 'index', 'user', 'password', 'cloud_id', 'cloud_auth', 'api_key', 'data_stream', 'data_stream_type', 'data_stream_dataset', 'data_stream_namespace', 'data_stream_auto_routing', 'data_stream_sync_fields', 'action', 'document_id', 'pipeline', 'routing', 'ssl', 'ssl_enabled', 'cacert', 'ssl_certificate_authorities', 'ssl_certificate_verification', 'ssl_verification_mode', 'ssl_certificate', 'ssl_key', 'keystore', 'keystore_password', 'truststore', 'truststore_password', 'http_compression', 'timeout', 'custom_headers', 'proxy', 'manage_template', 'template', 'template_name', 'template_overwrite', 'template_api', 'ilm_enabled', 'ilm_rollover_alias', 'ilm_pattern', 'ilm_policy', 'doc_as_upsert', 'upsert', 'script', 'script_type', 'script_lang', 'script_var_name', 'scripted_upsert', 'version', 'version_type', 'parent', 'join_field'],
+    noEffect: ['retry_initial_interval', 'retry_max_interval', 'retry_on_conflict', 'sniffing', 'sniffing_delay', 'sniffing_path', 'pool_max', 'pool_max_per_route', 'resurrect_delay', 'validate_after_inactivity', 'silence_errors_in_log', 'failure_type_logging_whitelist', 'dlq_custom_codes', 'dlq_on_failed_indexname_interpolation', 'compression_level']
+  },
+  stdout: { handled: [], noEffect: [] },
+  null: { handled: [], noEffect: [] },
+  file: { handled: ['path', 'gzip'], noEffect: ['flush_interval', 'create_if_deleted', 'dir_mode', 'file_mode', 'stale_cleanup_interval'] },
+  http: { handled: ['url', 'http_method', 'format', 'headers', 'content_type'], noEffect: ['retry_failed', 'retry_non_idempotent', 'retryable_codes', 'automatic_retries', 'pool_max', 'pool_max_per_route', 'keepalive', 'connect_timeout', 'socket_timeout', 'request_timeout', 'cookies', 'follow_redirects', 'ignorable_codes'] }
+};
+function unhandledOptions(v, st, s) {
+  const known = OUTPUT_OPTIONS[st.name];
+  if (!known) return;
+  const left = Object.keys(s).filter(k => !OUTPUT_COMMON.includes(k) && !known.handled.includes(k) && !known.noEffect.includes(k));
+  if (!left.length) return;
+  v.stats.approx++;
+  v.note('warn', `Sortie ${st.name} : option${left.length > 1 ? 's' : ''} non reprise${left.length > 1 ? 's' : ''} (ligne ${st.line})`, `${left.join(', ')} : sans équivalent automatique dans le sink Vector. Vérifiez que l’écriture n’en dépend pas.`);
+}
+const truthy = x => x === true || String(x).toLowerCase() === 'true';
+const LS_ENV_REF = /^\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-?[^}]*)?\}$/;
+// ${VAR:défaut} de Logstash s’écrit ${VAR:-défaut} pour Vector
+const vectorEnv = x => String(x).replace(/^\$\{([A-Za-z_][A-Za-z0-9_]*):(?!-)/, '${$1:-');
+// Un secret écrit en clair dans le pipeline n’est jamais recopié : il est lu dans une variable d’environnement
+function secretRef(v, value, variable, what) {
+  const m = LS_ENV_REF.exec(String(value === undefined ? '' : value));
+  if (m) { v.env.add(m[1]); return vectorEnv(value); }
+  v.env.add(variable);
+  if (value !== undefined && value !== '') v.note('opt', `${what} hors configuration`, `La valeur écrite dans le pipeline n’est pas recopiée : elle est lue dans la variable d’environnement ${variable}.`);
+  return '${' + variable + '}';
+}
+function elasticsearchSink(v, s, tplOf) {
+  const https = truthy(s.ssl) || truthy(s.ssl_enabled);
+  // Sans schéma, Logstash parle HTTP, ou HTTPS avec ssl_enabled
+  const endpoints = lsList(s.hosts || 'localhost:9200').map(h => (/^[a-z][a-z0-9+.-]*:\/\//i.test(String(h)) ? String(h) : `${https ? 'https' : 'http'}://${h}`));
+  const sink = { type: 'elasticsearch', inputs: [], endpoints };
+  const todo = (title, detail) => { v.stats.ko++; v.note('err', title, detail); };
+  const review = (title, detail) => { v.stats.approx++; v.note('warn', title, detail); };
+  if (s.cloud_id) todo('cloud_id non traduit', 'Vector ne connaît pas l’identifiant Elastic Cloud : renseignez dans endpoints l’URL Elasticsearch du déploiement.');
+
+  // Authentification : clé d’API, ou utilisateur et mot de passe (cloud_auth : « utilisateur:mot de passe »)
+  const request = {};
+  if (s.api_key) {
+    request.headers = { Authorization: `ApiKey ${secretRef(v, s.api_key, 'ELASTICSEARCH_API_KEY', 'Clé d’API Elasticsearch')}` };
+    v.note('warn', 'Clé d’API Elasticsearch', 'Logstash attend « id:clé » et l’encode lui-même. La variable doit contenir la forme encodée : echo -n "id:clé" | base64.');
+  } else if (s.user !== undefined || s.password !== undefined || s.cloud_auth !== undefined) {
+    const pair = s.cloud_auth !== undefined && !LS_ENV_REF.test(String(s.cloud_auth)) ? String(s.cloud_auth).split(':') : [];
+    let user = s.user !== undefined ? s.user : pair[0];
+    if (user === undefined) { user = '${ELASTICSEARCH_USER}'; v.env.add('ELASTICSEARCH_USER'); }
+    else if (LS_ENV_REF.test(String(user))) { v.env.add(LS_ENV_REF.exec(String(user))[1]); user = vectorEnv(user); }
+    const password = s.password !== undefined ? s.password : pair.length > 1 ? pair.slice(1).join(':') : undefined;
+    sink.auth = { strategy: 'basic', user: String(user), password: secretRef(v, password, 'ELASTICSEARCH_PASSWORD', 'Mot de passe Elasticsearch') };
+  }
+  if (isObj(s.custom_headers)) request.headers = Object.assign({}, s.custom_headers, request.headers);
+  if (s.timeout !== undefined) request.timeout_secs = Number(s.timeout) || 60;
+  if (Object.keys(request).length) sink.request = request;
+  if (truthy(s.http_compression)) sink.compression = 'gzip';
+  if (s.proxy) sink.proxy = { enabled: true, http: String(s.proxy), https: String(s.proxy) };
+
+  // Destination : data stream, ou index (avec son action et l’identifiant du document)
+  const ds = s.data_stream === undefined ? '' : String(s.data_stream).toLowerCase();
+  if (ds === 'true') {
+    sink.mode = 'data_stream';
+    sink.data_stream = { type: s.data_stream_type || 'logs', dataset: s.data_stream_dataset || 'generic', namespace: s.data_stream_namespace || 'default' };
+    if (s.data_stream_auto_routing !== undefined) sink.data_stream.auto_routing = truthy(s.data_stream_auto_routing);
+    if (s.data_stream_sync_fields !== undefined) sink.data_stream.sync_fields = truthy(s.data_stream_sync_fields);
+    if (s.index) v.note('info', 'index ignoré', 'En mode data stream, la destination est type-dataset-namespace : index est ignoré, comme par Logstash.');
+  } else {
+    if (ds === 'auto') review('data_stream => auto', 'Logstash choisit le mode selon Elasticsearch et les autres options ; la traduction écrit dans un index. Si la destination est un data stream, passez le sink en mode: data_stream.');
+    const index = tplOf(s.index || 'logstash-%{+yyyy.MM.dd}');
+    sink.bulk = { index };
+    // Vector 0.57 et suivants refusent un modèle sans préfixe littéral : les noms d’index viennent alors de l’événement
+    if (/^\{\{/.test(index)) {
+      sink.dangerously_allow_unconfined_template_resolution = true;
+      v.note('warn', 'Index tiré d’un champ', `L’index « ${index} » vient entièrement de l’événement : Vector 0.57 et suivants l’exigent explicitement (dangerously_allow_unconfined_template_resolution). Un événement peut ainsi écrire dans n’importe quel index ; ajoutez un préfixe fixe si possible.`);
+    }
+    if (s.action !== undefined) {
+      const action = String(s.action);
+      if (/^(index|create)$/.test(action) || /%\{/.test(action)) sink.bulk.action = tplOf(action);
+      else todo(`action « ${action} » non traduite`, 'Le sink Vector écrit avec index ou create ; une mise à jour ou une suppression de documents se réécrit à la main.');
+    }
+  }
+  if (s.document_id !== undefined) {
+    const m = /^%\{([^}]+)\}$/.exec(String(s.document_id));
+    const path = m ? vPathOf(fieldSegs(m[1]), v.ns) : '';
+    // id_key désigne un champ de l’événement : Vector 0.59 refuse une métadonnée (%id)
+    if (path && !path.startsWith('%')) sink.id_key = path.replace(/^\./, '');
+    else review('document_id non repris', `« ${s.document_id} » ${path ? 'vient d’une métadonnée' : 'mêle texte et champs'} : calculez-le dans un champ de l’événement par une étape VRL, puis désignez ce champ par id_key.`);
+  }
+  if (s.pipeline !== undefined) {
+    if (/%\{/.test(String(s.pipeline))) review('pipeline tiré d’un champ', `« ${s.pipeline} » : le sink Vector prend un nom de pipeline d’ingestion fixe.`);
+    else sink.pipeline = String(s.pipeline);
+  }
+  if (s.routing !== undefined) review('routing non repris', `« ${s.routing} » : le sink Vector ne choisit pas le shard de destination ; les requêtes qui passent routing doivent s’en passer.`);
+
+  // TLS
+  const tls = {};
+  const cas = lsList(s.ssl_certificate_authorities || s.cacert);
+  if (cas.length) tls.ca_file = String(cas[0]);
+  if (cas.length > 1) review('Plusieurs autorités de certification', `Vector lit un seul fichier : concaténez ${cas.join(', ')} en un seul PEM.`);
+  if (s.ssl_certificate) tls.crt_file = String(s.ssl_certificate);
+  if (s.ssl_key) tls.key_file = String(s.ssl_key);
+  if (String(s.ssl_verification_mode || '').toLowerCase() === 'none' || (s.ssl_certificate_verification !== undefined && !truthy(s.ssl_certificate_verification))) {
+    tls.verify_certificate = false;
+    v.note('warn', 'Certificat Elasticsearch non vérifié', 'Repris du pipeline d’origine : à corriger avant la production.');
+  }
+  if (Object.keys(tls).length) sink.tls = tls;
+  if (s.keystore || s.truststore) review('Magasins de certificats Java', 'keystore et truststore (JKS, PKCS12) se convertissent en PEM pour Vector : tls.crt_file, tls.key_file, tls.ca_file.');
+
+  // Ce que Logstash fait dans Elasticsearch, en dehors de l’écriture
+  if (['manage_template', 'template', 'template_name', 'template_overwrite', 'template_api', 'ilm_enabled', 'ilm_rollover_alias', 'ilm_pattern', 'ilm_policy'].some(k => s[k] !== undefined)) {
+    review('Modèles d’index et ILM', 'Logstash installe le modèle d’index et la politique ILM au démarrage ; Vector ne le fait pas. Installez-les une fois avec l’API d’Elasticsearch.');
+  }
+  const updates = ['doc_as_upsert', 'upsert', 'script', 'scripted_upsert', 'version', 'version_type', 'parent', 'join_field'].filter(k => s[k] !== undefined);
+  if (updates.length) todo('Mise à jour de documents non traduite', `${updates.join(', ')} : le sink Vector ajoute des documents, il ne les met pas à jour.`);
+  return sink;
+}
+function httpSink(v, s) {
+  const sink = { type: 'http', inputs: [], uri: s.url || 'http://localhost', encoding: { codec: 'json' } };
+  const method = String(s.http_method || 'post').toLowerCase();
+  if (method !== 'post') sink.method = method;
+  const headers = Object.assign({}, isObj(s.headers) ? s.headers : {});
+  if (s.content_type) headers['Content-Type'] = String(s.content_type);
+  if (Object.keys(headers).length) sink.request = { headers };
+  const format = String(s.format || 'json');
+  if (format === 'json' || format === 'json_batch') v.note('warn', 'Sortie http : envoi par lots', `Vector envoie les événements par lots, un JSON par ligne ; Logstash (${format}) ${format === 'json' ? 'envoie un événement par requête' : 'envoie un tableau JSON'}. Vérifiez que le destinataire l’accepte.`);
+  else { v.stats.ko++; v.note('err', `Sortie http : format « ${format} » non traduit`, 'Seuls json et json_batch ont un équivalent : le corps de la requête est à réécrire.'); }
+  return sink;
 }
 function flatOutputs(stmts, conds, out) {
   for (const st of stmts) {
@@ -957,6 +1095,14 @@ function flatOutputs(stmts, conds, out) {
   return out;
 }
 function translateLogstash(src, cfg) {
+  try { return translatePipeline(src, cfg); }
+  catch (e) {
+    // Une construction hors de portée (pile épuisée) ne doit pas devenir une erreur interne du service
+    if (e instanceof RangeError) return { error: 'Pipeline trop imbriqué pour être traduit.' };
+    throw e;
+  }
+}
+function translatePipeline(src, cfg) {
   const notes = makeNotes();
   // Compatibilité ECS : celle de la configuration (v8 par défaut, comme Logstash 8 et suivants), sauf réglage du plugin
   const v = { ns: cfg.vector.log_namespace !== false, compat: !!cfg.vector.logstash_compat, ecs: String(cfg.vector.ecs_compatibility || 'v8') !== 'disabled', stats: { ok: 0, approx: 0, ko: 0 }, enrich: {}, env: new Set(), note: (l, t, d, c) => notes.add(l, t, d, c) };

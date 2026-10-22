@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.1.1-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.1.1"></a>
+  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.2.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.2.0"></a>
   <a href="https://github.com/OlivMartins/passerelle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/OlivMartins/passerelle/ci.yml?branch=main&style=flat-square&label=tests&labelColor=1B2A33" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache%202.0-1E7A68?style=flat-square&labelColor=1B2A33" alt="Licence Apache 2.0"></a>
   <img src="https://img.shields.io/badge/Linux-x86__64-53636B?style=flat-square&labelColor=1B2A33" alt="Linux x86_64">
@@ -55,7 +55,7 @@ Un SQL ClickHouse idiomatique et des configurations Vector typées, produits en 
 
 **Il explique**
 
-Un taux de couverture, un résumé en français et des remarques classées : à reprendre, à vérifier, optimisation. Chacun sait où porter son attention.
+Un verdict par requête (prête, à vérifier, à reprendre), un taux de couverture, un résumé en français et des remarques classées. Chacun sait où porter son attention.
 
 </td>
 <td width="33%" valign="top">
@@ -155,6 +155,35 @@ Passerelle signale aussi que `heure` gagnerait à être une colonne matérialis�
 </tr>
 </table>
 
+## Rien de faux annoncé comme juste
+
+Chaque traduction reçoit un verdict, affiché avant le pourcentage, dans l’interface, l’API et la ligne de commande.
+
+| Verdict | Ce qu’il garantit |
+|---|---|
+| **Prête** | Traduction directe, à relire comme tout code. |
+| **À vérifier** | Une approximation ou un écart connu, expliqué dans les remarques. |
+| **À reprendre** | Un élément sans équivalent : le SQL s’arrête sur `throwIf` avec un message explicite au lieu de répondre faux. |
+| **Non reconnue** | L’entrée n’est pas une requête qu’Elasticsearch accepterait. |
+
+Passerelle lit la requête comme Elasticsearch la lit. Une clé inconnue (`qeury`, `filtre` dans un `bool`, deux clauses dans un même objet) fait refuser la requête. Un paramètre inconnu, ou une option qui change le résultat sans être traduite (`knn`, `min_score`, `operator` d’un `match_bool_prefix`), la rend « à reprendre ». Les options sans effet sur le résultat (`highlight`, `profile`, `boost`) sont simplement signalées.
+
+### Requêtes d’alertes et de tableaux de bord
+
+Les valeurs remplies à l’exécution deviennent des paramètres ClickHouse. Une condition de Watcher :
+
+```json
+{ "range": { "@timestamp": { "gte": "{{ctx.trigger.scheduled_time}}||-5m" } } }
+```
+
+devient :
+
+```sql
+WHERE timestamp >= parseDateTime64BestEffort({scheduled_time:String}, 3, 'UTC') - INTERVAL 5 MINUTE
+```
+
+Sont reconnus les modèles de Watcher et des alertes Kibana (`{{…}}`) et les variables de Grafana (`$__timeFrom`, `${service}`, `[[service]]`, `$service`). La valeur se passe à l’exécution : `param_scheduled_time=…` en HTTP, `--param_scheduled_time=…` avec clickhouse-client. Un modèle placé là où ClickHouse exige une valeur fixe, comme une recherche plein texte, rend la requête « à reprendre ».
+
 ## Logstash vers Vector, Kafka compris
 
 <picture>
@@ -165,6 +194,7 @@ Passerelle signale aussi que `heure` gagnerait à être une colonne matérialis�
 - **Chaque filtre devient une étape VRL nommée** : grok, dissect, date, mutate, json, kv, geoip, translate, fingerprint, et neuf autres. Le code est typé selon les règles du compilateur VRL : aucune erreur ignorée en silence.
 - **Les sorties conditionnelles deviennent un aiguillage** `route`, avec une destination par branche.
 - **Kafka reste au cœur du flux** : mêmes topics, groupe de consommateurs, SASL et TLS. Les identifiants sont référencés par des variables d’environnement plutôt qu’écrits en clair ; depuis la 0.57, Vector ne les remplace qu’avec l’option `--dangerously-allow-env-var-interpolation`, que rappelle l’en-tête du fichier généré.
+- **Elasticsearch en sortie, configuration comprise** : identifiants lus dans des variables d’environnement, TLS, data streams, identifiant de document et pipeline d’ingestion. Ce qui n’a pas d’équivalent dans Vector (mise à jour de documents, modèles d’index, ILM) est signalé.
 - **Rien ne change pour les consommateurs** : `@timestamp`, `@version` et le format de date de Logstash sont reproduits.
 - **Logstash 8 et ECS** : avec `vector.ecs_compatibility: v8` (par défaut, comme Logstash 8 et suivants), la traduction reproduit `[event][original]`, les noms ECS des motifs grok composites (Apache, syslog) et les cibles ECS de `fingerprint` et `translate`. `disabled` garde les conventions d’avant ; un réglage `ecs_compatibility` du pipeline l’emporte.
 - **Bascule sans risque** : en mode shadow, Vector lit avec son propre groupe et écrit dans des topics `-shadow`, à côté de Logstash, le temps de comparer.
@@ -314,19 +344,30 @@ Téléchargez [`passerelle.html`](https://github.com/OlivMartins/passerelle/rele
 ### Sur un serveur Linux
 
 ```bash
-curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.1.1/passerelle-1.1.1-linux-x86_64.tar.gz
-tar xzf passerelle-1.1.1-linux-x86_64.tar.gz && cd passerelle-1.1.1-linux-x86_64
+curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.2.0/passerelle-1.2.0-linux-x86_64.tar.gz
+tar xzf passerelle-1.2.0-linux-x86_64.tar.gz && cd passerelle-1.2.0-linux-x86_64
 sudo ./install.sh
 ```
 
 Un seul binaire, Node.js embarqué, aucune dépendance à installer. Le service systemd démarre sur `127.0.0.1:8080`, avec une API protégée par un jeton généré à l’installation. Il faut une distribution Linux x86_64 récente (glibc 2.28+ : RHEL 8, Debian 10, Ubuntu 20.04 ou plus récent). Configuration, reverse proxy, mise à jour : tout est dans le [guide d’installation](docs/INSTALL.md).
 
+### En conteneur
+
+```bash
+docker build -t passerelle .
+docker run --rm -p 127.0.0.1:8080:8080 --read-only --tmpfs /tmp \
+  -e PASSERELLE_TOKEN="$(openssl rand -hex 32)" \
+  -v "$PWD/passerelle.yaml:/etc/passerelle/passerelle.yaml:ro" passerelle
+```
+
+L’image tourne sous un utilisateur sans privilège et accepte un système de fichiers en lecture seule. Elle ne contient pas Vector : `/v1/validate/vector` y répond 503.
+
 ### Dans votre intégration continue
 
 ```bash
-# Traduit des dossiers entiers ; code de sortie 2 si un élément reste à reprendre
+# Traduit des dossiers entiers ; code de sortie 2 si un fichier est à reprendre (todo), ou pas prêt (review)
 passerelle dsl2sql   requetes/  --config passerelle.yaml --out build/sql    --fail-on todo
-passerelle ls2vector pipelines/ --config passerelle.yaml --out build/vector --fail-on todo
+passerelle ls2vector pipelines/ --config passerelle.yaml --out build/vector --fail-on review
 
 # Ou à la demande, par l’API REST
 curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
@@ -335,16 +376,16 @@ curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
 
 | Route | Rôle |
 |---|---|
-| `POST /v1/translate/dsl` | Requête DSL (JSON ou format console Kibana) vers SQL, avec remarques et couverture |
-| `POST /v1/translate/logstash` | Pipeline `.conf` vers configuration Vector, en YAML ou TOML |
-| `POST /v1/validate/sql` | `EXPLAIN indexes = 1` sur votre ClickHouse, en lecture seule |
+| `POST /v1/translate/dsl` | Requête DSL (JSON ou format console Kibana) vers SQL, avec verdict, paramètres, remarques et couverture |
+| `POST /v1/translate/logstash` | Pipeline `.conf` vers configuration Vector, en YAML ou TOML, avec verdict |
+| `POST /v1/validate/sql` | `EXPLAIN indexes = 1` sur votre ClickHouse, en lecture seule, après contrôle des tables lues |
 | `POST /v1/validate/vector` | Compilation complète de la configuration et du VRL par `vector validate` |
 
 ## Sécurité et confidentialité
 
 - **Vos requêtes restent chez vous.** L’interface traduit dans le navigateur, hors ligne, sans police ni script externe ni télémétrie.
 - **Service durci.** Utilisateur dédié sans privilège, système de fichiers en lecture seule, filtre seccomp vérifié sur les appels système réellement utilisés. Score `systemd-analyze security` : 1.2, « OK ».
-- **API sobre.** Jeton comparé en temps constant, requêtes intersites refusées, politique CSP stricte, corps limités à 2 Mio. La validation SQL n’accepte qu’un `SELECT`, exécuté en `readonly`.
+- **API sobre.** Jeton comparé en temps constant, requêtes intersites refusées, politique CSP stricte, corps limités à 2 Mio. La validation SQL n’accepte qu’un `SELECT` sur les tables de la configuration, vérifiées par `EXPLAIN AST` avant toute exécution, en `readonly`. Le compte ClickHouse conseillé est décrit dans le [guide d’installation](docs/INSTALL.md#compte-clickhouse-de-validation).
 - **Secrets hors des fichiers.** Par défaut, les mots de passe sont des références `${VARIABLE}`, aussi bien dans la configuration de Passerelle que dans les configurations Vector qu’il génère.
 
 Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
@@ -353,7 +394,7 @@ Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
 
 **28** types de requêtes, **51** agrégations, **18** filtres Logstash, avec les langages qui vont avec : Painless, syntaxe Lucene et grok. Les cas approchés sont signalés « à vérifier », les cas non traduits « à reprendre », sans jamais passer inaperçus.
 
-Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc différentiel](tests/README.md) exécute les mêmes requêtes sur Elasticsearch 7.17, 8.19 et 9.5 et sur ClickHouse, puis compare les résultats.
+Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc différentiel](tests/README.md) exécute les mêmes requêtes sur Elasticsearch 7.17, 8.19 et 9.5 et sur ClickHouse, puis compare les résultats : la CI le joue sur les trois versions à chaque changement et avant chaque release.
 
 <details>
 <summary><b>Couverture détaillée</b></summary>
@@ -384,10 +425,11 @@ npm test                 # traduit chaque exemple et vérifie le résultat
 npm run test:diff        # compare les résultats de ClickHouse à ceux d’Elasticsearch (voir tests/README.md)
 npm run test:pipelines   # compare les événements de Vector à ceux de Logstash (voir tests/README.md)
 npm run build:ui         # dist/passerelle.html : l’interface autonome
+npm run build:server     # interface et dist/passerelle.cjs, sans binaire (image conteneur)
 npm run build            # interface, binaire Linux x86_64 et archive de release
 ```
 
-Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction, `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur.
+Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction (assemblé dans l’ordre donné par `scripts/engine.mjs`), `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur.
 
 ## Licence
 

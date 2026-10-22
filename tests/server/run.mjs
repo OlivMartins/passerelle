@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
+import { engineSource } from '../../scripts/engine.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const rd = p => readFileSync(join(ROOT, p), 'utf8');
@@ -24,7 +25,7 @@ const check = (ok, label, detail) => {
 
 /* ---------- Montage ---------- */
 const BIN = join(TMP, 'passerelle.cjs');
-writeFileSync(BIN, "'use strict';\n" + ['src/engine/base.js', 'src/engine/dsl.js', 'src/engine/logstash.js', 'src/server.js'].map(rd).join(''));
+writeFileSync(BIN, "'use strict';\n" + engineSource() + rd('src/server.js'));
 const UI = join(TMP, 'passerelle.html');
 writeFileSync(UI, '<!doctype html><html><body><script>void 0;</script></body></html>');
 // Faux Vector : recopie son environnement dans sa sortie, que l'API renvoie au client
@@ -34,13 +35,26 @@ writeFileSync(VECTOR, '#!/bin/sh\nenv\n'); chmodSync(VECTOR, 0o755);
 const SECRET = 'secret-clickhouse-4f9a';
 const TOKEN = 'jeton-de-test-81c2';
 
-// Fausse instance ClickHouse : note l'adresse reçue, répond après un délai réglable
+// Fausse instance ClickHouse : note l'adresse et le corps reçus, répond après un délai réglable.
+// À EXPLAIN AST, elle répond un arbre réduit : une TableExpression par « FROM nom » ou « FROM fonction(… ».
 const chSeen = [];
+const chBodies = [];
 let chDelay = 0;
+function fakeAST(sql) {
+  const lines = ['SelectWithUnionQuery (children 1)'];
+  for (const m of sql.matchAll(/\bFROM\s+([A-Za-z_][\w.]*)(\()?/g)) {
+    lines.push('   TableExpression (children 1)', m[2] ? `    Function ${m[1]} (children 1)` : `    TableIdentifier ${m[1]}`);
+  }
+  for (const m of sql.matchAll(/\b(dictGet\w*)\(/g)) lines.push(`   Function ${m[1]} (children 1)`);
+  return lines.join('\n') + '\n';
+}
 const ch = http.createServer((req, res) => {
   chSeen.push(new URL(req.url, 'http://x'));
-  req.resume();
-  req.on('end', () => setTimeout(() => { res.writeHead(200); res.end('Expression\n'); }, chDelay));
+  let body = ''; req.setEncoding('utf8'); req.on('data', d => { body += d; });
+  req.on('end', () => setTimeout(() => {
+    chBodies.push(body);
+    res.writeHead(200); res.end(/^EXPLAIN AST /.test(body) ? fakeAST(body) : 'Expression\n');
+  }, chDelay));
 });
 await new Promise(r => ch.listen(0, '127.0.0.1', r));
 const CONFIG = join(TMP, 'passerelle.json');
@@ -127,6 +141,24 @@ try {
   const all = await Promise.all([1, 2, 3].map(() => request(prod, 'POST', '/v1/validate/sql', { body: 'SELECT 1', headers: auth })));
   chDelay = 0;
   check(all.some(x => x.status === 429), 'validation SQL : au plus deux en parallèle', all.map(x => x.status).join(', '));
+  // EXPLAIN indexes = 1 évalue les sous-requêtes scalaires : une table hors configuration est refusée avant
+  r = await request(prod, 'POST', '/v1/validate/sql', { body: "SELECT count() FROM logs.events WHERE service = (SELECT any(k) FROM logs.secrets)", headers: auth });
+  check(r.status === 400 && /logs\.secrets/.test(r.json.error) && !chBodies.at(-1).startsWith('EXPLAIN indexes'), 'validation SQL : table hors configuration refusée avant EXPLAIN', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/validate/sql', { body: "SELECT * FROM url('http://exemple.invalid/x', CSV, 'a String')", headers: auth });
+  check(r.status === 400 && /url\(\)/.test(r.json.error), 'validation SQL : fonction de table refusée', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/validate/sql', { body: "SELECT dictGet('secrets', 'v', 1) FROM logs.events", headers: auth });
+  check(r.status === 400 && /dictGet/.test(r.json.error), 'validation SQL : lecture de dictionnaire refusée', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/validate/sql?param_when=2026-10-22&param_x%3By=1', { body: 'WITH base AS (SELECT * FROM logs.events) SELECT count() FROM base WHERE timestamp >= {when:String}', headers: auth });
+  const sent = chSeen.at(-1);
+  check(r.status === 200 && r.json.valid && sent.searchParams.get('param_when') === '2026-10-22' && !sent.searchParams.has('param_x;y'), 'validation SQL : CTE acceptée, paramètres param_* transmis', `statut ${r.status}`);
+
+  /* ---------- Verdict ---------- */
+  r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ size: 0, query: { range: { '@timestamp': { gte: '{{ctx.trigger.scheduled_time}}||-5m' } } } }), headers: auth });
+  check(r.status === 200 && r.json.verdict && r.json.parameters.length === 1 && r.json.parameters[0].name === 'scheduled_time', 'traduction DSL : verdict et paramètres renvoyés', r.body.slice(0, 200));
+  r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ query: { bool: { filtre: [] } } }), headers: auth });
+  check(r.status === 422 && r.json.verdict === 'unrecognized', 'traduction DSL : clé inconnue refusée, verdict non reconnue', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/logstash', { body: 'input { stdin {} } filter { ruby { code => "x" } } output { stdout {} }', headers: auth });
+  check(r.status === 200 && r.json.verdict === 'todo', 'traduction Logstash : verdict renvoyé', r.json && r.json.verdict);
 
   /* ---------- Sens de tri des documents ---------- */
   r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ sort: [{ service: { order: 'desc; DROP TABLE logs.events --' } }] }), headers: auth });
@@ -148,6 +180,10 @@ let c = cli('dsl2sql', '--verbose', 'examples/dsl/erreurs_5xx.json', 'examples/d
 check(c.status === 0 && /erreurs_5xx/.test(c.stdout) && /recherche_texte/.test(c.stdout), 'dsl2sql --verbose A B : les deux fichiers traduits', `code ${c.status}`);
 c = cli('ls2vector', 'examples/logstash/batch.conf', '--fail-on', 'todo');
 check(c.status === 2, '--fail-on todo : code 2 sur un élément à reprendre', `code ${c.status}`);
+c = cli('dsl2sql', 'examples/dsl/erreurs_5xx.json', '--fail-on', 'todo');
+check(c.status === 0 && /Verdict : /.test(c.stdout), '--fail-on todo : code 0 sans élément à reprendre, verdict dans le SQL', `code ${c.status}`);
+c = cli('dsl2sql', 'examples/dsl/erreurs_5xx.json', '--fail-on', 'review');
+check(c.status === 2 && /à vérifier/.test(c.stderr), '--fail-on review : code 2 sur un fichier à vérifier', `code ${c.status} ${c.stderr}`);
 c = cli('ls2vector', 'examples/logstash/batch.conf', '--fail-on', 'todos');
 check(c.status === 1, '--fail-on avec une valeur inconnue : erreur', `code ${c.status}`);
 c = cli('ls2vector', 'examples/logstash/batch.conf', '--fial-on', 'todo');

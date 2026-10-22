@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /*
  * Construction de Passerelle
- *   node scripts/build.mjs            interface, bundle serveur, binaire Linux x86_64 et archive de release
- *   node scripts/build.mjs --ui-only  interface autonome uniquement (dist/passerelle.html)
+ *   node scripts/build.mjs              interface, bundle serveur, binaire Linux x86_64 et archive de release
+ *   node scripts/build.mjs --ui-only    interface autonome uniquement (dist/passerelle.html)
+ *   node scripts/build.mjs --no-binary  interface et bundle serveur (dist/passerelle.cjs), pour l’image conteneur
  *
  * Le binaire est un « single executable application » Node.js : il doit être construit
  * avec un Node.js 24 officiel pour Linux x86_64. Par défaut, le Node qui exécute ce script ;
@@ -13,16 +14,18 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { engineSource } from './engine.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(ROOT, 'dist');
 const rd = p => readFileSync(join(ROOT, p), 'utf8');
 const { version: VERSION } = JSON.parse(rd('package.json'));
 const uiOnly = process.argv.includes('--ui-only');
+const noBinary = process.argv.includes('--no-binary');
 const step = msg => process.stdout.write(`• ${msg}\n`);
 
 /* ---------- Sources ---------- */
-const ENGINE = ['src/engine/base.js', 'src/engine/dsl.js', 'src/engine/logstash.js'].map(rd).join('');
+const ENGINE = engineSource();
 
 function examples() {
   const index = JSON.parse(rd('examples/index.json'));
@@ -128,7 +131,8 @@ try {
   mkdirSync(DIST, { recursive: true });
   step(`Passerelle ${VERSION}`);
   buildUI();
-  if (!uiOnly) { buildServer(); buildBinary(); buildArchive(); }
+  if (!uiOnly) buildServer();
+  if (!uiOnly && !noBinary) { buildBinary(); buildArchive(); }
 } catch (e) {
   process.stderr.write(`échec de la construction : ${e.message}\n`);
   process.exit(1);

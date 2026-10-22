@@ -1,6 +1,7 @@
-# Construit l'archive Linux x86_64, sa somme de contrôle et la page autonome,
-# puis les joint à la release. Se déclenche à la publication d'une release,
-# ou à la main (onglet Actions > Release > Run workflow) pour compléter une release existante.
+# Rejoue toute la CI (tests, bancs différentiel et Logstash / Vector, image) sur l'étiquette de la release,
+# puis construit l'archive Linux x86_64, sa somme de contrôle et la page autonome, et les joint à la release.
+# Se déclenche à la publication d'une release, ou à la main (onglet Actions > Release > Run workflow)
+# pour compléter une release existante. Si un banc échoue, rien n'est joint.
 name: Release
 
 on:
@@ -13,12 +14,21 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  preuves:
+    name: Tests et bancs sur l'étiquette
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+
   assets:
     name: Construire et joindre les fichiers
+    needs: preuves
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
     steps:
@@ -30,7 +40,6 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm test
       - name: Construire le binaire et l'archive
         run: |
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"

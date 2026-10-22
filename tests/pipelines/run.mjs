@@ -18,9 +18,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CASES } from './cases.mjs';
 import { ECS_MODES, inputOf, outputsOf, outputFile, translatedPipeline, logstashPipeline } from './transport.mjs';
+import { loadEngine } from '../../scripts/engine.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(HERE, '..', '..');
 const args = Object.fromEntries(process.argv.slice(2).map(a => {
   const m = /^--([^=]+)=(.*)$/.exec(a);
   return m ? [m[1], m[2]] : [a.replace(/^--/, ''), true];
@@ -31,9 +31,7 @@ const VEC = join(WORK, 'vector');
 const ONLY = args.only ? new RegExp(args.only) : null;
 const modes = args.ecs ? [args.ecs] : ECS_MODES;
 
-const rd = p => readFileSync(join(ROOT, p), 'utf8');
-const engine = ['src/engine/base.js', 'src/engine/dsl.js', 'src/engine/logstash.js'].map(rd).join('');
-const E = new Function(`'use strict';\n${engine}\nreturn { translateLogstash, DEFAULT_CONFIG, mergeConfig };`)();
+const E = loadEngine();
 
 /* ---------- Dossier de travail ---------- */
 // Chaque moteur a son dossier, monté sur /work dans son conteneur : conf/ ce qu’il joue, in/ ses entrées, out/ ses événements
