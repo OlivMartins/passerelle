@@ -12,15 +12,14 @@
  * Code de sortie : 0 si chaque cas se comporte comme annoncé dans cases.mjs, 1 sinon
  * (régression, ou écart connu qui a disparu sans que cases.mjs soit mis à jour).
  */
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { dataset, ES_INDEX, INDEX, VARIANTS, clickhouseDDL, clickhouseRow, esDocument, configOverride } from './dataset.mjs';
 import { CASES } from './cases.mjs';
+import { loadEngine } from '../../scripts/engine.mjs';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const args = Object.fromEntries(process.argv.slice(2).map(a => {
   const m = /^--([^=]+)=(.*)$/.exec(a);
   return m ? [m[1], m[2]] : [a.replace(/^--/, ''), true];
@@ -31,9 +30,7 @@ const WORK = process.env.PASSERELLE_DIFF_WORK || join(tmpdir(), 'passerelle-diff
 const ONLY = args.only ? new RegExp(args.only) : null;
 const variants = args.variant ? [args.variant] : Object.keys(VARIANTS);
 
-const rd = p => readFileSync(join(ROOT, p), 'utf8');
-const engine = ['src/engine/base.js', 'src/engine/dsl.js', 'src/engine/logstash.js'].map(rd).join('');
-const E = new Function(`'use strict';\n${engine}\nreturn { translateDSL, DEFAULT_CONFIG, mergeConfig };`)();
+const E = loadEngine();
 
 /* ---------- Accès aux deux moteurs ---------- */
 async function es(path, body, method) {

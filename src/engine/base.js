@@ -112,6 +112,19 @@ function columnType(cfg, table, column) {
 }
 const hasSchema = cfg => isObj(cfg.clickhouse.columns) && Object.keys(cfg.clickhouse.columns).length > 0;
 
+// Profondeur d’imbrication d’une valeur JSON, mesurée sans récursion
+const MAX_DSL_DEPTH = 128;
+function jsonDepth(v) {
+  let max = 0; const stack = [[v, 1]];
+  while (stack.length) {
+    const [x, d] = stack.pop();
+    if (x === null || typeof x !== 'object') continue;
+    if (d > max) max = d;
+    for (const c of Object.values(x)) stack.push([c, d + 1]);
+  }
+  return max;
+}
+
 function makeNotes() {
   const list = [];
   return {
@@ -120,6 +133,29 @@ function makeNotes() {
       if (!list.some(n => n.title === title && n.detail === (detail || ''))) list.push({ level, title, detail: detail || '', code: code || '' });
     }
   };
+}
+
+/* ---------- Verdict et couverture d’une traduction ---------- */
+/*
+ * Le verdict dit si la sortie peut partir telle quelle, du pire au meilleur :
+ *   unrecognized  l’entrée n’est pas une requête ou un pipeline analysable
+ *   todo          au moins un élément à reprendre : le SQL s’arrête sur throwIf, la configuration est incomplète
+ *   review        approximation ou remarque « à vérifier »
+ *   ready         traduction directe
+ * Le pourcentage ne vient qu’en second : il compte des clauses, pas des requêtes prêtes.
+ */
+const VERDICTS = { ready: 'prête', review: 'à vérifier', todo: 'à reprendre', unrecognized: 'non reconnue' };
+const VERDICT_RANK = { ready: 0, review: 1, todo: 2, unrecognized: 3 };
+function verdictOf(r) {
+  if (!r || r.empty || r.error) return 'unrecognized';
+  if (r.stats.ko || r.notes.some(n => n.level === 'err')) return 'todo';
+  if (r.stats.approx || r.notes.some(n => n.level === 'warn')) return 'review';
+  return 'ready';
+}
+// Arrondi vers le bas : une seule clause à reprendre suffit à ne jamais afficher 100 %
+function coverage(stats) {
+  const total = stats.ok + stats.approx + stats.ko;
+  return Object.assign({}, stats, { percent: total ? Math.floor((100 * (stats.ok + stats.approx)) / total) : 100 });
 }
 
 /* ---------- ClickHouse : littéraux et identifiants ---------- */
@@ -829,38 +865,47 @@ function luceneTokens(qs) {
   }
   return toks;
 }
+const LUCENE_MAX_DEPTH = 64;
 function luceneParse(qs, defaultOp) {
   const toks = luceneTokens(qs); let p = 0;
   const peek = () => toks[p]; const next = () => toks[p++];
   const defOp = String(defaultOp || 'OR').toUpperCase();
   const starts = t => t && ['term', 'phrase', 'range', 'regex', 'field', '(', 'NOT', 'PLUS'].includes(t.t);
   function assign(node, f) { if (node.op === 'leaf') { if (!node.field) node.field = f; } else node.a.forEach(x => assign(x, f)); }
+  // Les suites d’opérateurs donnent un nœud à n opérandes, pas un arbre aussi profond que la liste :
+  // une liste de milliers de « OR » ne doit pas épuiser la pile. Seules les parenthèses et les NOT imbriquent.
+  let depth = 0;
+  function nested(fn) {
+    if (++depth > LUCENE_MAX_DEPTH) throw new Error(`requête imbriquée sur plus de ${LUCENE_MAX_DEPTH} niveaux`);
+    try { return fn(); } finally { depth--; }
+  }
+  const nary = (op, items) => (items.length === 1 ? items[0] : { op, a: items });
   function orE() {
-    let l = andE();
+    const items = [andE()];
     for (;;) {
       const t = peek();
-      if (t && t.t === 'OR') { next(); l = { op: 'or', a: [l, andE()] }; }
-      else if (defOp === 'OR' && starts(t) && t.t !== 'NOT') l = { op: 'or', a: [l, andE()] };
+      if (t && t.t === 'OR') { next(); items.push(andE()); }
+      else if (defOp === 'OR' && starts(t) && t.t !== 'NOT') items.push(andE());
       else break;
     }
-    return l;
+    return nary('or', items);
   }
   function andE() {
-    let l = unary();
+    const items = [unary()];
     for (;;) {
       const t = peek();
-      if (t && t.t === 'AND') { next(); l = { op: 'and', a: [l, unary()] }; }
-      else if (t && t.t === 'NOT') l = { op: 'and', a: [l, unary()] };
-      else if (defOp === 'AND' && starts(t)) l = { op: 'and', a: [l, unary()] };
+      if (t && t.t === 'AND') { next(); items.push(unary()); }
+      else if (t && t.t === 'NOT') items.push(unary());
+      else if (defOp === 'AND' && starts(t)) items.push(unary());
       else break;
     }
-    return l;
+    return nary('and', items);
   }
   function unary() {
     const t = peek();
     if (!t) throw new Error('requête query_string incomplète');
-    if (t.t === 'NOT') { next(); return { op: 'not', a: [unary()] }; }
-    if (t.t === 'PLUS') { next(); return unary(); }
+    if (t.t === 'NOT') { next(); return { op: 'not', a: [nested(unary)] }; }
+    if (t.t === 'PLUS') { next(); return nested(unary); }
     return primary();
   }
   // Elasticsearch refuse une requête mal formée (HTTP 400) : l’analyse doit échouer de la même façon
@@ -871,11 +916,11 @@ function luceneParse(qs, defaultOp) {
   function primary() {
     const t = next();
     if (!t) throw new Error('requête query_string incomplète');
-    if (t.t === '(') { const e = orE(); close(); return e; }
+    if (t.t === '(') { const e = nested(orE); close(); return e; }
     if (t.t === 'field') {
       const nt = peek();
-      if (nt && nt.t === '(') { next(); const e = orE(); close(); assign(e, t.v); return e; }
-      const leaf = primary(); assign(leaf, t.v); return leaf;
+      if (nt && nt.t === '(') { next(); const e = nested(orE); close(); assign(e, t.v); return e; }
+      const leaf = nested(primary); assign(leaf, t.v); return leaf;
     }
     if (t.t === ')') throw new Error('parenthèse fermante inattendue');
     if (t.t === 'AND' || t.t === 'OR' || t.t === 'NOT' || t.t === 'PLUS') throw new Error(`opérateur ${t.t} inattendu`);
