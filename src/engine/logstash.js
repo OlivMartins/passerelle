@@ -465,8 +465,15 @@ class VrlGen {
           if (!fn) return this.v.note('warn', 'convert', `Type « ${ty} » inconnu pour ${f}.`);
           if (/_eu$/.test(ty)) this.v.note('warn', `convert ${ty}`, 'Le format numérique européen (virgule décimale) n’est pas géré : remplacez la virgule avant la conversion.');
           if (fn === 'to_string' && this.tget(x) === 'str') return;
+          // Nombres lus comme Logstash : espaces autour, séparateurs « , » et « _ » ignorés ; pour un entier, aussi les
+          // décimales (tronquées), la notation 1e3 et l’hexadécimal 0x1A
+          const num = (ty === 'integer' || ty === 'float') && this.tget(x) !== 'int' && this.tget(x) !== 'float';
+          const expr = !num ? `${fn}(${x}) ?? ${x}` : ty === 'integer' ? `to_int(${x}) ?? parse_int(num) ?? to_int(to_float(num) ?? ${x}) ?? ${x}` : `to_float(${x}) ?? to_float(num) ?? ${x}`;
+          const numLine = `num = replace(replace(strip_whitespace(string(${x}) ?? ""), ",", ""), "_", "")`;
           // Un champ absent ou nul n’est pas converti : to_int(null) vaudrait 0
-          if (this.present(x)) this.assign(x, `${fn}(${x}) ?? ${x}`); else this.assignIf(`${x} != null`, x, `${fn}(${x}) ?? ${x}`);
+          if (this.present(x)) { if (num) this.emit(numLine); this.assign(x, expr); }
+          else if (!num) this.assignIf(`${x} != null`, x, expr);
+          else { this.open(`if ${x} != null`); this.emit(numLine); this.assign(x, expr); this.close(); this.tset(x, 'any'); }
         }); break;
         case 'gsub': { const a = lsList(v); for (let i = 0; i + 2 < a.length; i += 3) { const x = this.path(a[i]); const rep = String(a[i + 2]).replace(/\$/g, '$$$$').replace(/\\(\d)/g, '$${$1}'); onString(x, bang => `replace${bang}(${x}, ${vraw(a[i + 1], 'r')}, ${vq(rep)})`, 'str'); } break; }
         case 'uppercase': unary(v, 'upcase'); break;

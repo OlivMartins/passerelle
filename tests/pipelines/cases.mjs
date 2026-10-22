@@ -48,7 +48,8 @@ export const CASES = [
 
   // mutate : convertir
   { id: 'mutate_convert_entier', filter: convert('integer'), events: [{ n: '42' }, { n: '-7' }, { n: 4.7 }, { n: true }] },
-  { id: 'mutate_convert_entier_formes', filter: convert('integer'), events: [{ n: ' 42 ' }, { n: '42.9' }, { n: '1,000' }, { n: '0x1A' }], known: 'Logstash lit aussi « 42 » entouré d’espaces, « 42.9 », « 1,000 » et « 0x1A » ; la traduction les laisse en chaînes' },
+  { id: 'mutate_convert_entier_formes', filter: convert('integer'), events: [{ n: ' 42 ' }, { n: '42.9' }, { n: '1,000' }, { n: '0x1A' }] },
+  { id: 'mutate_convert_nombres_formes', filter: 'mutate { convert => { "n" => "integer" "f" => "float" } }', events: [{ n: '1e3', f: '1,5' }, { n: '1_000', f: ' 1.5 ' }, { n: '-42.9', f: '1_000.25' }] },
   { id: 'mutate_convert_non_convertible', filter: convert('integer'), events: [{ n: 'x' }, { n: '' }], known: 'la valeur reste telle quelle des deux côtés, mais Logstash pose _mutate_error' },
   { id: 'mutate_convert_champ_absent', filter: convert('integer'), events: [{ m: 1 }] },
   { id: 'mutate_convert_champ_nul', filter: convert('integer'), events: [{ n: null }] },

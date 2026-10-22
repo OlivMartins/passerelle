@@ -112,7 +112,10 @@ transforms:
     inputs: [split]
     source: |
       # mutate
-      if .body.items.qty != null { .body.items.qty = to_int(.body.items.qty) ?? .body.items.qty }
+      if .body.items.qty != null {
+        num = replace(replace(strip_whitespace(string(.body.items.qty) ?? ""), ",", ""), "_", "")
+        .body.items.qty = to_int(.body.items.qty) ?? parse_int(num) ?? to_int(to_float(num) ?? .body.items.qty) ?? .body.items.qty
+      }
       if is_string(.service) { .service = replace!(.service, r'[^a-z0-9]+', "_") }
   logstash_finalize:
     type: remap

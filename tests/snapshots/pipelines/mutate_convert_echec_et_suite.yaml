@@ -6,6 +6,9 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      if .n != null { .n = to_int(.n) ?? .n }
+      if .n != null {
+        num = replace(replace(strip_whitespace(string(.n) ?? ""), ",", ""), "_", "")
+        .n = to_int(.n) ?? parse_int(num) ?? to_int(to_float(num) ?? .n) ?? .n
+      }
       if exists(.k) { .k = push(array(.k) ?? [.k], "v") } else { .k = "v" }
       .tags = compact(flatten([.tags, "converti"]))
