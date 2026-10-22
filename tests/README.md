@@ -103,15 +103,14 @@ Chaque cas est joué dans les deux modes de compatibilité ECS de Logstash, parc
 - **v8**, le réglage par défaut depuis Logstash 8 ;
 - **disabled**, celui des pipelines plus anciens.
 
-La configuration jouée par Vector est celle que produit Passerelle, sans retouche. Seul le transport est celui du banc : Vector lit son entrée standard, Logstash un fichier, et tous deux écrivent dans un fichier. L’entrée fichier de Logstash pose le nom d’hôte et le chemin du fichier sur l’événement ; un préambule les retire avant les filtres du cas, pour que Logstash livre ce qu’une entrée Kafka livrerait.
+La traduction est faite dans le même mode (`vector.ecs_compatibility`) : chaque cas donne deux configurations Vector. La configuration jouée par Vector est celle que produit Passerelle, sans retouche. Seul le transport est celui du banc : Vector lit son entrée standard, Logstash un fichier, et tous deux écrivent dans un fichier. L’entrée fichier de Logstash pose le nom d’hôte et le chemin du fichier sur l’événement ; un préambule les retire avant les filtres du cas, pour que Logstash livre ce qu’une entrée Kafka livrerait.
 
-Trois tolérances, pas une de plus :
+Deux tolérances, pas une de plus :
 
-- `[event][original]`, que les codecs de Logstash ajoutent en mode `v8` ;
 - l’horodatage posé à l’ingestion, qui ne peut pas être égal des deux côtés ;
 - un UUID, tiré au hasard par chaque moteur et comparé par sa forme.
 
-Les deux premières sont portées par un cas qui les désactive (champ `exact`) et en fait l’inventaire.
+La première est portée par un cas qui la désactive (champ `exact`) et en fait l’inventaire. `[event][original]`, que les codecs de Logstash ajoutent en mode `v8`, est comparé comme les autres champs.
 
 ### Ce qu’il ne couvre pas
 

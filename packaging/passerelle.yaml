@@ -45,3 +45,4 @@ vector:
   logstash_compat: true
   acknowledgements: true
   shadow_mode: false
+  ecs_compatibility: v8               # comme Logstash 8 et suivants ; disabled pour les pipelines d'avant ECS. Un réglage du pipeline l'emporte

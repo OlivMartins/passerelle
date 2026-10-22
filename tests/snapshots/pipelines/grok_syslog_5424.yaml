@@ -1,0 +1,56 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  grok:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # grok
+      parsed, err = parse_grok(.message, s'%{SYSLOG5424LINE}')
+      if err == null {
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
+        # Mode ECS : captures renommées comme dans les motifs ecs-v1 de Logstash
+        if exists(.syslog5424_pri) {
+          v = del(.syslog5424_pri)
+          .log.syslog.priority = to_int(v) ?? v
+        }
+        if exists(.syslog5424_ver) {
+          v = del(.syslog5424_ver)
+          .system.syslog.version = v
+        }
+        if exists(.syslog5424_ts) {
+          v = del(.syslog5424_ts)
+          .timestamp = v
+        }
+        if exists(.syslog5424_host) {
+          v = del(.syslog5424_host)
+          .host.hostname = v
+        }
+        if exists(.syslog5424_app) {
+          v = del(.syslog5424_app)
+          .process.name = v
+        }
+        if exists(.syslog5424_proc) {
+          v = del(.syslog5424_proc)
+          .process.pid = to_int(v) ?? v
+        }
+        if exists(.syslog5424_msgid) {
+          v = del(.syslog5424_msgid)
+          .event.code = v
+        }
+        if exists(.syslog5424_sd) {
+          v = del(.syslog5424_sd)
+          .system.syslog.structured_data = v
+        }
+        if exists(.syslog5424_msg) {
+          v = del(.syslog5424_msg)
+          if exists(.message) { .message = push(array(.message) ?? [.message], v) } else { .message = v }
+        }
+      } else {
+        .tags = compact(flatten([.tags, "_grokparsefailure"]))
+      }

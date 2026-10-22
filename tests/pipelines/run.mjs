@@ -50,10 +50,11 @@ function prepare(cases) {
       writeFileSync(join(LS, 'conf', `${c.id}.${mode}.conf`), logstashPipeline(c, mode));
       // Un seul worker : Logstash garde alors l’ordre des événements
       pipelines.push(`- pipeline.id: ${c.id}__${mode}\n  path.config: /work/conf/${c.id}.${mode}.conf\n  pipeline.workers: 1\n  pipeline.ecs_compatibility: ${mode}\n`);
+      // La traduction est faite avec le même mode ECS que Logstash (vector.ecs_compatibility)
+      const t = E.translateLogstash(translatedPipeline(c, mode), E.mergeConfig(E.DEFAULT_CONFIG, { vector: { ecs_compatibility: mode } }));
+      translations.set(`${c.id}.${mode}`, t);
+      if (t.yaml) writeFileSync(join(VEC, 'conf', `${c.id}.${mode}.yaml`), t.yaml);
     }
-    const t = E.translateLogstash(translatedPipeline(c), E.DEFAULT_CONFIG);
-    translations.set(c.id, t);
-    if (t.yaml) writeFileSync(join(VEC, 'conf', `${c.id}.yaml`), t.yaml);
   }
   writeFileSync(join(LS, 'pipelines.yml'), pipelines.join(''));
   return translations;
@@ -84,24 +85,24 @@ function logstashResult(c, mode, log) {
   return { outputs: outputsFrom(LS, c, `${c.id}.${mode}`) };
 }
 
-function vectorResult(c, t, codes) {
+function vectorResult(c, mode, t, codes) {
+  const id = `${c.id}.${mode}`;
   if (t.error || t.empty) return { error: `traduction impossible : ${t.error || 'résultat vide'}` };
-  const code = codes.get(c.id);
+  const code = codes.get(id);
   if (code === undefined) return { error: 'configuration non jouée' };
   if (code !== 0) {
-    const log = readFileSync(join(VEC, 'log', `${c.id}.log`), 'utf8');
+    const log = readFileSync(join(VEC, 'log', `${id}.log`), 'utf8');
     const where = /(?:Transform|Source|Sink) "[^"]+"/.exec(log);
     const what = /^error\[E\d+\]: .*$/m.exec(log);
     return { error: `configuration refusée par Vector (code ${code})${where ? `, ${where[0]}` : ''}${what ? ` : ${what[0]}` : ''}` };
   }
-  return { outputs: outputsFrom(VEC, c, c.id) };
+  return { outputs: outputsFrom(VEC, c, id) };
 }
 
 /* ---------- Comparaison ---------- */
 /*
- * Les événements sont comparés champ par champ, types compris : 42 n’est pas "42". Deux tolérances seulement,
- * chacune désactivée par le champ « exact » d’un cas qui en fait l’inventaire :
- *   original     en mode v8, les codecs de Logstash ajoutent [event][original] ; la traduction ne le pose pas
+ * Les événements sont comparés champ par champ, types compris : 42 n’est pas "42", et [event][original] compris.
+ * Une tolérance seulement, désactivée par le champ « exact » d’un cas qui en fait l’inventaire :
  *   horodatage   un @timestamp posé à l’ingestion ne peut pas être égal des deux côtés : il est reconnu à ce
  *                qu’il tombe pendant l’exécution du banc, et sa précision n’est pas comparée non plus
  * Un UUID, tiré au hasard par chaque moteur, n’est comparé que par sa forme.
@@ -113,10 +114,6 @@ const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 function normalize(event, c, window) {
   const e = JSON.parse(JSON.stringify(event), (k, v) => (typeof v === 'string' && UUID.test(v) ? '<uuid>' : v));
   const exact = c.exact || [];
-  if (!exact.includes('original') && isObj(e.event)) {
-    delete e.event.original;
-    if (!Object.keys(e.event).length) delete e.event;
-  }
   const ts = e['@timestamp'];
   if (typeof ts === 'string' && Date.parse(ts) >= window[0] && Date.parse(ts) <= window[1]) {
     const digits = (/\.(\d+)Z$/.exec(ts) || ['', ''])[1].length;
@@ -190,15 +187,15 @@ for (const [name, run, dir] of [['Logstash', logstash, LS], ['Vector', vector, V
 const window = [started - 60000, Date.now() + 60000];
 const codes = new Map(existsSync(join(VEC, 'codes')) ? readFileSync(join(VEC, 'codes'), 'utf8').split('\n').filter(Boolean).map(l => [l.split(' ')[0], Number(l.split(' ')[1])]) : []);
 console.log(`${logstash.version} / ${vector.version.replace(/^vector (\S+).*/, 'Vector $1')} / Node.js ${process.versions.node}`);
-console.log(`${cases.length * modes.length} pipelines joués par Logstash en ${logstash.seconds} s, ${cases.length} configurations par Vector en ${vector.seconds} s (${WORK})\n`);
+console.log(`${cases.length * modes.length} pipelines joués par Logstash en ${logstash.seconds} s, ${cases.length * modes.length} configurations par Vector en ${vector.seconds} s (${WORK})\n`);
 
 const totals = { same: 0, known: 0, failed: 0 };
 const failures = [];
 for (const mode of modes) {
   console.log(`--- Logstash en ecs_compatibility ${mode}`);
   for (const c of cases) {
-    const t = translations.get(c.id);
-    const res = compare(c, logstashResult(c, mode, logstash.text), vectorResult(c, t, codes), window);
+    const t = translations.get(`${c.id}.${mode}`);
+    const res = compare(c, logstashResult(c, mode, logstash.text), vectorResult(c, mode, t, codes), window);
     const known = knownFor(c, mode);
     const flagged = !!((t.stats && (t.stats.approx || t.stats.ko)) || (t.notes || []).some(n => n.level === 'warn' || n.level === 'err'));
     let status;

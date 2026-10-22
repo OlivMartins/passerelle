@@ -1,4 +1,5 @@
 # Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
 
 transforms:
   grok:
@@ -14,6 +15,48 @@ transforms:
           if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
         }
         . = merge(object!(.), merge(parsed, dup))
+        # Mode ECS : captures renommées comme dans les motifs ecs-v1 de Logstash
+        if exists(.clientip) {
+          v = del(.clientip)
+          .source.address = v
+        }
+        if exists(.ident) {
+          v = del(.ident)
+          if v != "-" { .apache.access.user.identity = v }
+        }
+        if exists(.auth) {
+          v = del(.auth)
+          if v != "-" { .user.name = v }
+        }
+        if exists(.verb) {
+          v = del(.verb)
+          .http.request.method = v
+        }
+        if exists(.request) {
+          v = del(.request)
+          .url.original = v
+        }
+        if exists(.httpversion) {
+          v = del(.httpversion)
+          .http.version = v
+        }
+        del(.rawrequest)
+        if exists(.response) {
+          v = del(.response)
+          .http.response.status_code = to_int(v) ?? v
+        }
+        if exists(.bytes) {
+          v = del(.bytes)
+          .http.response.body.bytes = to_int(v) ?? v
+        }
+        if exists(.referrer) {
+          v = replace(string(del(.referrer)) ?? "", r'^"|"$$', "")
+          if v != "-" { .http.request.referrer = v }
+        }
+        if exists(.agent) {
+          v = replace(string(del(.agent)) ?? "", r'^"|"$$', "")
+          if v != "-" { .user_agent.original = v }
+        }
       } else {
         .tags = compact(flatten([.tags, "_grokparsefailure"]))
       }

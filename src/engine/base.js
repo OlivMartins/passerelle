@@ -32,7 +32,7 @@ const DEFAULT_CONFIG = {
     input_topics: [],
     output_topic: ''
   },
-  vector: { format: 'yaml', log_namespace: true, logstash_compat: true, acknowledgements: true, shadow_mode: false }
+  vector: { format: 'yaml', log_namespace: true, logstash_compat: true, acknowledgements: true, shadow_mode: false, ecs_compatibility: 'v8' }
 };
 
 function mergeConfig(base, over) {

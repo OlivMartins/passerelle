@@ -35,6 +35,7 @@ transforms:
       parsed, err = parse_json(raw)
       if err == null {
         . = object(parsed) ?? { "message": parsed }
+        .event.original = raw
       } else {
         . = { "message": raw, "tags": ["_jsonparsefailure"] }
       }

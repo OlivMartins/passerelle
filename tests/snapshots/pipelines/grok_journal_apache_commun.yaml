@@ -1,0 +1,53 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  grok:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # grok
+      parsed, err = parse_grok(.message, s'%{COMMONAPACHELOG}')
+      if err == null {
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
+        # Mode ECS : captures renommées comme dans les motifs ecs-v1 de Logstash
+        if exists(.clientip) {
+          v = del(.clientip)
+          .source.address = v
+        }
+        if exists(.ident) {
+          v = del(.ident)
+          if v != "-" { .apache.access.user.identity = v }
+        }
+        if exists(.auth) {
+          v = del(.auth)
+          if v != "-" { .user.name = v }
+        }
+        if exists(.verb) {
+          v = del(.verb)
+          .http.request.method = v
+        }
+        if exists(.request) {
+          v = del(.request)
+          .url.original = v
+        }
+        if exists(.httpversion) {
+          v = del(.httpversion)
+          .http.version = v
+        }
+        del(.rawrequest)
+        if exists(.response) {
+          v = del(.response)
+          .http.response.status_code = to_int(v) ?? v
+        }
+        if exists(.bytes) {
+          v = del(.bytes)
+          .http.response.body.bytes = to_int(v) ?? v
+        }
+      } else {
+        .tags = compact(flatten([.tags, "_grokparsefailure"]))
+      }

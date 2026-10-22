@@ -15,7 +15,7 @@
  *            le banc échoue pour rappeler de retirer la mention. Formes acceptées :
  *              'raison'            dans les deux modes de compatibilité ECS de Logstash
  *              { v8: 'raison' }    dans un seul mode (v8 ou disabled)
- *   exact    tolérances du banc à désactiver pour ce cas : 'original', 'horodatage' (voir run.mjs)
+ *   exact    tolérance du banc à désactiver pour ce cas : 'horodatage' (voir run.mjs)
  *
  * Un cas ne porte qu’un comportement : quand une opération diverge sur un type d’entrée, ce type a son propre cas.
  */
@@ -34,7 +34,7 @@ export const CASES = [
   { id: 'transport_objet', filter: '', events: [{ a: 1, b: 'deux', c: [3, 4.5], d: { e: null, f: true } }] },
   { id: 'transport_json_invalide', filter: '', codec: 'json', lines: ['{"a":1}', 'ligne non json', '{"a":2}'] },
   { id: 'transport_horodatage_document', filter: '', codec: 'json', lines: ['{"@timestamp":"2026-03-10T09:15:30+01:00","a":1}', '{"@timestamp":"pas une date","a":2}'] },
-  { id: 'transport_event_original', filter: '', lines: ['une ligne'], exact: ['original'], known: { v8: 'la traduction ne pose pas [event][original], que les codecs de Logstash ajoutent en mode ECS' } },
+  { id: 'transport_event_original', filter: '', lines: ['une ligne'] },
   { id: 'transport_horodatage_ingestion', filter: '', lines: ['une ligne'], exact: ['horodatage'], known: 'Logstash écrit l’horodatage d’ingestion à la nanoseconde, la traduction à la milliseconde' },
 
   // mutate : renommer, remplacer
@@ -153,8 +153,12 @@ export const CASES = [
   { id: 'grok_succes_seulement', filter: 'grok { match => { "message" => "%{IP:ip}" } add_tag => ["analyse"] add_field => { "source" => "grok" } }', lines: ['10.0.0.1', 'pas une adresse'] },
   { id: 'grok_target', filter: 'grok { match => { "message" => "%{WORD:verb} %{URIPATH:chemin}" } target => "http" }', lines: ['GET /a'] },
   { id: 'grok_target_imbrique', filter: 'grok { match => { "message" => "%{WORD:verb} %{NUMBER:[n][v]:int}" } target => "http" }', events: [{ message: 'GET 5' }, { message: 'GET 5', http: { x: 1 } }, { message: 'rien' }] },
-  { id: 'grok_journal_apache', filter: 'grok { match => { "message" => "%{COMBINEDAPACHELOG}" } }', lines: ['192.168.1.10 - alice [10/Mar/2026:08:15:30 +0000] "GET /index.html?x=1 HTTP/1.1" 200 5123 "https://exemple.fr/" "Mozilla/5.0 (X11; Linux x86_64)"'], known: { v8: 'en mode ECS, COMBINEDAPACHELOG capture sous les noms ECS ([source][address], [http][request][method]…) et type les nombres ; la traduction garde les noms historiques (clientip, verb…)' } },
-  { id: 'grok_ligne_syslog', filter: 'grok { match => { "message" => "%{SYSLOGLINE}" } }', lines: ['Mar 10 08:15:30 web-1 sshd[1234]: Accepted publickey for alice'], known: { v8: 'en mode ECS, SYSLOGLINE capture sous les noms ECS ; la traduction garde les noms historiques' } },
+  { id: 'grok_journal_apache', filter: 'grok { match => { "message" => "%{COMBINEDAPACHELOG}" } }', lines: ['192.168.1.10 - alice [10/Mar/2026:08:15:30 +0000] "GET /index.html?x=1 HTTP/1.1" 200 5123 "https://exemple.fr/" "Mozilla/5.0 (X11; Linux x86_64)"'] },
+  // Mode ECS : les captures sont renommées comme dans les motifs ecs-v1 (« - » absent, nombres typés)
+  { id: 'grok_journal_apache_commun', filter: 'grok { match => { "message" => "%{COMMONAPACHELOG}" } }', lines: ['10.0.0.1 - - [10/Mar/2026:08:15:30 +0000] "GET / HTTP/1.1" 304 -'] },
+  { id: 'grok_erreur_apache', filter: 'grok { match => { "message" => "%{HTTPD_ERRORLOG}" } }', lines: ['[Tue Mar 10 08:15:30.123456 2026] [core:error] [pid 1234:tid 5678] [client 10.0.0.2:51234] AH00037: Symbolic link not allowed'] },
+  { id: 'grok_syslog_5424', filter: 'grok { match => { "message" => "%{SYSLOG5424LINE}" } }', lines: ['<34>1 2026-03-10T08:15:30.003Z web-1.example.com su 77 ID47 - echec pour alice'] },
+  { id: 'grok_ligne_syslog', filter: 'grok { match => { "message" => "%{SYSLOGLINE}" } }', lines: ['Mar 10 08:15:30 web-1 sshd[1234]: Accepted publickey for alice'] },
 
   // dissect
   { id: 'dissect_simple', filter: 'dissect { mapping => { "message" => "%{date} %{niveau} [%{service}] %{texte}" } }', lines: ['2026-03-10 INFO [api] démarrage terminé', 'ligne sans crochets'] },
@@ -273,14 +277,14 @@ export const CASES = [
   // Sans valeur de repli, add_tag ne vaut que si la clé est trouvée
   { id: 'translate_sans_correspondance', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} add_tag => ["traduit"] }`, events: [{ code: '200' }, { code: '500' }] },
   { id: 'translate_override', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} override => true }`, events: [{ code: '200', libelle: 'déjà' }] },
-  { id: 'translate_sans_cible', filter: `translate { source => "code" ${DICTIONNAIRE} }`, events: [{ code: '200' }], known: { v8: 'sans target, Logstash en mode ECS écrit sur place, dans le champ source ; la traduction écrit dans translation, comme le mode historique' } },
+  { id: 'translate_sans_cible', filter: `translate { source => "code" ${DICTIONNAIRE} }`, events: [{ code: '200' }] },
 
   // fingerprint
   { id: 'fingerprint_sha256', filter: 'fingerprint { source => "message" target => "empreinte" method => "SHA256" }', lines: ['abc', 'été'] },
   { id: 'fingerprint_sha1', filter: 'fingerprint { source => "message" target => "empreinte" method => "SHA1" }', lines: ['abc'] },
   { id: 'fingerprint_md5', filter: 'fingerprint { source => "message" target => "empreinte" method => "MD5" }', lines: ['abc'] },
   { id: 'fingerprint_murmur3', filter: 'fingerprint { source => "message" target => "empreinte" method => "MURMUR3" }', lines: ['abc'], known: 'MURMUR3 : pas de MurmurHash3 en VRL, la traduction déclare le filtre « à reprendre » et n’écrit pas d’empreinte' },
-  { id: 'fingerprint_sans_cible', filter: 'fingerprint { source => "message" method => "SHA256" }', lines: ['abc'], known: { v8: 'sans target, Logstash en mode ECS écrit dans [event][hash] ; la traduction écrit dans fingerprint, comme le mode historique' } },
+  { id: 'fingerprint_sans_cible', filter: 'fingerprint { source => "message" method => "SHA256" }', lines: ['abc'] },
   { id: 'fingerprint_nombre', filter: 'fingerprint { source => "n" target => "empreinte" method => "SHA256" }', events: [{ n: 42 }, { n: 1.5 }] },
   // Seule l’absence du champ retient l’empreinte : un champ nul donne celle d’une chaîne vide
   { id: 'fingerprint_source_absente', filter: 'fingerprint { source => "s" target => "empreinte" method => "SHA256" }', events: [{ n: 1 }, { s: null }] },

@@ -4,6 +4,23 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Non publié]
 
+### À savoir avant de mettre à jour
+
+- **Compatibilité ECS, `v8` par défaut.** Comme Logstash 8 et suivants, la traduction Logstash → Vector suit désormais les conventions ECS :
+  - `[event][original]` sur chaque événement ;
+  - noms ECS des captures des motifs grok composites ;
+  - cible `[event][hash]` de `fingerprint` et traduction sur place de `translate`.
+
+  Pour des pipelines d’avant ECS, réglez `vector.ecs_compatibility: disabled`. Un réglage `ecs_compatibility` écrit dans le pipeline l’emporte.
+
+### Ajouté
+
+- Option `vector.ecs_compatibility` (`v8` ou `disabled`), dans la configuration et dans l’interface.
+
+### Corrigé
+
+- Dans un motif grok à alternative (`HTTPD_ERRORLOG`), la capture de la seconde branche garde son nom.
+
 ## [1.2.0] - 2026-10-22
 
 ### À savoir avant de mettre à jour
@@ -51,7 +68,6 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
   - la source `file` avec ce codec n’est plus refusée par Vector.
 - `@timestamp` venu du document (codec ou filtre `json`) : converti en UTC à la milliseconde ; une valeur illisible est rangée dans `_@timestamp` avec `_timestampparsefailure`.
 - `add_field` et les captures `grok` sur un champ qui existe déjà : la valeur est ajoutée et le champ devient un tableau, sauf `overwrite`.
-- Dans un motif grok à alternative (`HTTPD_ERRORLOG`), la capture de la seconde branche garde son nom.
 - `%{champ}` sur un tableau ou un objet : « a,b » ou le JSON de l’objet, au lieu d’une chaîne vide.
 - `csv` :
   - colonnes `column<n>` au-delà de `columns`, ou sans `columns` ;

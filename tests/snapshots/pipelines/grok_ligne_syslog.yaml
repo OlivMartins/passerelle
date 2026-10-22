@@ -14,6 +14,31 @@ transforms:
           if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
         }
         . = merge(object!(.), merge(parsed, dup))
+        # Mode ECS : captures renommées comme dans les motifs ecs-v1 de Logstash
+        if exists(.program) {
+          v = del(.program)
+          .process.name = v
+        }
+        if exists(.pid) {
+          v = del(.pid)
+          .process.pid = to_int(v) ?? v
+        }
+        if exists(.facility) {
+          v = del(.facility)
+          .log.syslog.facility.code = to_int(v) ?? v
+        }
+        if exists(.priority) {
+          v = del(.priority)
+          .log.syslog.priority = to_int(v) ?? v
+        }
+        if exists(.logsource) {
+          v = del(.logsource)
+          .host.hostname = v
+        }
+        if exists(.timestamp8601) {
+          v = del(.timestamp8601)
+          .timestamp = v
+        }
       } else {
         .tags = compact(flatten([.tags, "_grokparsefailure"]))
       }

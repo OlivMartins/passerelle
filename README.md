@@ -196,6 +196,7 @@ Sont reconnus les modèles de Watcher et des alertes Kibana (`{{…}}`) et les v
 - **Kafka reste au cœur du flux** : mêmes topics, groupe de consommateurs, SASL et TLS. Les identifiants sont référencés par des variables d’environnement plutôt qu’écrits en clair ; depuis la 0.57, Vector ne les remplace qu’avec l’option `--dangerously-allow-env-var-interpolation`, que rappelle l’en-tête du fichier généré.
 - **Elasticsearch en sortie, configuration comprise** : identifiants lus dans des variables d’environnement, TLS, data streams, identifiant de document et pipeline d’ingestion. Ce qui n’a pas d’équivalent dans Vector (mise à jour de documents, modèles d’index, ILM) est signalé.
 - **Rien ne change pour les consommateurs** : `@timestamp`, `@version` et le format de date de Logstash sont reproduits.
+- **Logstash 8 et ECS** : avec `vector.ecs_compatibility: v8` (par défaut, comme Logstash 8 et suivants), la traduction reproduit `[event][original]`, les noms ECS des motifs grok composites (Apache, syslog) et les cibles ECS de `fingerprint` et `translate`. `disabled` garde les conventions d’avant ; un réglage `ecs_compatibility` du pipeline l’emporte.
 - **Bascule sans risque** : en mode shadow, Vector lit avec son propre groupe et écrit dans des topics `-shadow`, à côté de Logstash, le temps de comparer.
 
 <details>
@@ -266,6 +267,7 @@ kafka:
 vector:
   acknowledgements: true              # offsets validés après écriture seulement
   shadow_mode: false
+  ecs_compatibility: v8               # comme Logstash 8+ ; disabled pour les pipelines d’avant ECS
 ```
 
 ### Donnez-lui le schéma de vos colonnes

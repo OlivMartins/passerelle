@@ -20,6 +20,7 @@ exec docker run --rm --name "$NAME" --user "$(id -u):$(id -g)" -e VECTOR_DANGERO
       [ -e "$conf" ] || continue
       cas=$(basename "$conf" .yaml)
       code=0
-      vector --quiet --color never --config "$conf" < "/work/in/$cas.ndjson" > "/work/log/$cas.log" 2>&1 || code=$?
+      # Une configuration par cas et par mode ECS (<cas>.<mode>.yaml), une seule entrée par cas
+      vector --quiet --color never --config "$conf" < "/work/in/${cas%.*}.ndjson" > "/work/log/$cas.log" 2>&1 || code=$?
       echo "$cas $code" >> /work/codes
     done'
