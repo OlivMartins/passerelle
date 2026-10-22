@@ -626,20 +626,24 @@ class VrlGen {
     if (when.length) { this.close(); this.tset(tgt, 'any'); }
     this.ok();
   }
-  f_fingerprint(s) {
+  f_fingerprint(s, p) {
     const srcs = lsList(s.source || 'message'); const tgt = this.path(s.target || 'fingerprint');
     const method = String(s.method || 'SHA1').toUpperCase();
-    const val = srcs.length > 1 || s.concatenate_sources ? srcs.map(f => this.asStr(this.path(f))).join(' + "|" + ') : this.asStr(this.path(srcs[0]));
-    if (srcs.length > 1) this.approx('fingerprint : concaténation', 'Logstash sérialise les sources au format |clé|valeur| ; ici les valeurs sont jointes par « | ». Les empreintes diffèrent.');
+    // MurmurHash3 n’existe pas en VRL : un autre hachage donnerait d’autres clés de dédoublonnage, en silence
+    if (method === 'MURMUR3') return this.ko(p, 'MurmurHash3 n’existe pas en VRL : aucune fonction ne reproduit l’empreinte de Logstash. Choisissez une autre méthode des deux côtés, ou calculez-la en aval.');
+    // Comme Logstash : avec concatenate_sources, les sources triées par nom forment « |a|x|b|y| » ;
+    // sinon, chaque source est hachée tour à tour et la dernière l’emporte
+    const val = s.concatenate_sources
+      ? `"|" + ${[...srcs].sort().map(f => `${vq(f + '|')} + ${this.asStr(this.path(f))} + "|"`).join(' + ')}`
+      : this.asStr(this.path(srcs[srcs.length - 1]));
     let e;
     if (s.key) {
       e = `encode_base16(hmac(${val}, get_env_var!("FINGERPRINT_KEY"), algorithm: ${vq(method.replace(/^SHA(\d)/, 'SHA-$1').replace('SHA-1', 'SHA1'))}))`;
       this.v.note('opt', 'Clé HMAC hors configuration', 'La clé de fingerprint est lue dans la variable d’environnement FINGERPRINT_KEY plutôt que stockée en clair dans la configuration.');
       this.v.env.add('FINGERPRINT_KEY');
-    } else e = { SHA1: `sha1(${val})`, SHA256: `sha2(${val}, variant: "SHA-256")`, SHA384: `sha2(${val}, variant: "SHA-384")`, SHA512: `sha2(${val}, variant: "SHA-512")`, MD5: `md5(${val})`, UUID: 'uuid_v4()', MURMUR3: `to_string(seahash(${val}))` }[method];
-    if (method === 'MURMUR3') this.approx('fingerprint MURMUR3', 'MurmurHash3 n’existe pas en VRL : seahash le remplace, les valeurs diffèrent.');
-    // Un seul champ source : quand il est absent, Logstash n’écrit pas d’empreinte
-    const one = srcs.length === 1 && !s.concatenate_sources && method !== 'UUID' ? this.path(srcs[0]) : null;
+    } else e = { SHA1: `sha1(${val})`, SHA256: `sha2(${val}, variant: "SHA-256")`, SHA384: `sha2(${val}, variant: "SHA-384")`, SHA512: `sha2(${val}, variant: "SHA-512")`, MD5: `md5(${val})`, UUID: 'uuid_v4()' }[method];
+    // Champ source (le dernier, sans concatenate_sources) absent : Logstash n’écrit pas d’empreinte
+    const one = !s.concatenate_sources && method !== 'UUID' ? this.path(srcs[srcs.length - 1]) : null;
     if (!one || this.present(one)) this.assign(tgt, e || `sha1(${val})`, 'str');
     else if (this.tget(one) !== 'null') this.assignIf(`exists(${one})`, tgt, e || `sha1(${val})`);
     this.common(s); this.ok();

@@ -279,13 +279,13 @@ export const CASES = [
   { id: 'fingerprint_sha256', filter: 'fingerprint { source => "message" target => "empreinte" method => "SHA256" }', lines: ['abc', 'été'] },
   { id: 'fingerprint_sha1', filter: 'fingerprint { source => "message" target => "empreinte" method => "SHA1" }', lines: ['abc'] },
   { id: 'fingerprint_md5', filter: 'fingerprint { source => "message" target => "empreinte" method => "MD5" }', lines: ['abc'] },
-  { id: 'fingerprint_murmur3', filter: 'fingerprint { source => "message" target => "empreinte" method => "MURMUR3" }', lines: ['abc'], known: 'MURMUR3 : Logstash donne un entier sur 32 bits, la traduction une chaîne tirée d’un autre hachage' },
+  { id: 'fingerprint_murmur3', filter: 'fingerprint { source => "message" target => "empreinte" method => "MURMUR3" }', lines: ['abc'], known: 'MURMUR3 : pas de MurmurHash3 en VRL, la traduction déclare le filtre « à reprendre » et n’écrit pas d’empreinte' },
   { id: 'fingerprint_sans_cible', filter: 'fingerprint { source => "message" method => "SHA256" }', lines: ['abc'], known: { v8: 'sans target, Logstash en mode ECS écrit dans [event][hash] ; la traduction écrit dans fingerprint, comme le mode historique' } },
   { id: 'fingerprint_nombre', filter: 'fingerprint { source => "n" target => "empreinte" method => "SHA256" }', events: [{ n: 42 }, { n: 1.5 }] },
   // Seule l’absence du champ retient l’empreinte : un champ nul donne celle d’une chaîne vide
   { id: 'fingerprint_source_absente', filter: 'fingerprint { source => "s" target => "empreinte" method => "SHA256" }', events: [{ n: 1 }, { s: null }] },
-  { id: 'fingerprint_champs_concatenes', filter: 'fingerprint { source => ["a", "b"] target => "empreinte" method => "SHA256" concatenate_sources => true }', events: [{ a: 'x', b: 'y' }], known: 'avec concatenate_sources, la chaîne hachée n’est pas celle que compose Logstash' },
-  { id: 'fingerprint_champs_separes', filter: 'fingerprint { source => ["a", "b"] target => "empreinte" method => "SHA256" }', events: [{ a: 'x', b: 'y' }], known: 'sans concatenate_sources, Logstash garde l’empreinte du dernier champ ; la traduction hache les champs réunis' },
+  { id: 'fingerprint_champs_concatenes', filter: 'fingerprint { source => ["a", "b"] target => "empreinte" method => "SHA256" concatenate_sources => true }', events: [{ a: 'x', b: 'y' }] },
+  { id: 'fingerprint_champs_separes', filter: 'fingerprint { source => ["a", "b"] target => "empreinte" method => "SHA256" }', events: [{ a: 'x', b: 'y' }] },
 
   // uuid
   { id: 'uuid_cible', filter: 'uuid { target => "id" }', events: [{ n: 1 }] },

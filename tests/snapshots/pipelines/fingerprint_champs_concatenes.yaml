@@ -1,5 +1,4 @@
-# Couverture : 3 directs, 1 à vérifier, 0 à reprendre
-# À vérifier : fingerprint : concaténation
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
 
 transforms:
   fingerprint:
@@ -7,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # fingerprint
-      .empreinte = sha2((to_string(.a) ?? join(.a, ",") ?? encode_json(.a)) + "|" + (to_string(.b) ?? join(.b, ",") ?? encode_json(.b)), variant: "SHA-256")
+      .empreinte = sha2("|" + "a|" + (to_string(.a) ?? join(.a, ",") ?? encode_json(.a)) + "|" + "b|" + (to_string(.b) ?? join(.b, ",") ?? encode_json(.b)) + "|", variant: "SHA-256")
