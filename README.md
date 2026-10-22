@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.2.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.2.0"></a>
+  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.3.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.3.0"></a>
   <a href="https://github.com/OlivMartins/passerelle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/OlivMartins/passerelle/ci.yml?branch=main&style=flat-square&label=tests&labelColor=1B2A33" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache%202.0-1E7A68?style=flat-square&labelColor=1B2A33" alt="Licence Apache 2.0"></a>
   <img src="https://img.shields.io/badge/Linux-x86__64-53636B?style=flat-square&labelColor=1B2A33" alt="Linux x86_64">
@@ -344,8 +344,8 @@ Téléchargez [`passerelle.html`](https://github.com/OlivMartins/passerelle/rele
 ### Sur un serveur Linux
 
 ```bash
-curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.2.0/passerelle-1.2.0-linux-x86_64.tar.gz
-tar xzf passerelle-1.2.0-linux-x86_64.tar.gz && cd passerelle-1.2.0-linux-x86_64
+curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.3.0/passerelle-1.3.0-linux-x86_64.tar.gz
+tar xzf passerelle-1.3.0-linux-x86_64.tar.gz && cd passerelle-1.3.0-linux-x86_64
 sudo ./install.sh
 ```
 

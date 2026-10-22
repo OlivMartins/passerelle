@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installation de Passerelle 1.2.0 — Linux x86_64 avec systemd
+# Installation de Passerelle 1.3.0 — Linux x86_64 avec systemd
 # Usage : sudo ./install.sh [--no-start] | sudo ./install.sh --uninstall [--purge]
 set -eu
 
