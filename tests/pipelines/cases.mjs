@@ -153,8 +153,12 @@ export const CASES = [
   { id: 'grok_succes_seulement', filter: 'grok { match => { "message" => "%{IP:ip}" } add_tag => ["analyse"] add_field => { "source" => "grok" } }', lines: ['10.0.0.1', 'pas une adresse'] },
   { id: 'grok_target', filter: 'grok { match => { "message" => "%{WORD:verb} %{URIPATH:chemin}" } target => "http" }', lines: ['GET /a'] },
   { id: 'grok_target_imbrique', filter: 'grok { match => { "message" => "%{WORD:verb} %{NUMBER:[n][v]:int}" } target => "http" }', events: [{ message: 'GET 5' }, { message: 'GET 5', http: { x: 1 } }, { message: 'rien' }] },
-  { id: 'grok_journal_apache', filter: 'grok { match => { "message" => "%{COMBINEDAPACHELOG}" } }', lines: ['192.168.1.10 - alice [10/Mar/2026:08:15:30 +0000] "GET /index.html?x=1 HTTP/1.1" 200 5123 "https://exemple.fr/" "Mozilla/5.0 (X11; Linux x86_64)"'], known: { v8: 'en mode ECS, COMBINEDAPACHELOG capture sous les noms ECS ([source][address], [http][request][method]…) et type les nombres ; la traduction garde les noms historiques (clientip, verb…)' } },
-  { id: 'grok_ligne_syslog', filter: 'grok { match => { "message" => "%{SYSLOGLINE}" } }', lines: ['Mar 10 08:15:30 web-1 sshd[1234]: Accepted publickey for alice'], known: { v8: 'en mode ECS, SYSLOGLINE capture sous les noms ECS ; la traduction garde les noms historiques' } },
+  { id: 'grok_journal_apache', filter: 'grok { match => { "message" => "%{COMBINEDAPACHELOG}" } }', lines: ['192.168.1.10 - alice [10/Mar/2026:08:15:30 +0000] "GET /index.html?x=1 HTTP/1.1" 200 5123 "https://exemple.fr/" "Mozilla/5.0 (X11; Linux x86_64)"'] },
+  // Mode ECS : les captures sont renommées comme dans les motifs ecs-v1 (« - » absent, nombres typés)
+  { id: 'grok_journal_apache_commun', filter: 'grok { match => { "message" => "%{COMMONAPACHELOG}" } }', lines: ['10.0.0.1 - - [10/Mar/2026:08:15:30 +0000] "GET / HTTP/1.1" 304 -'] },
+  { id: 'grok_erreur_apache', filter: 'grok { match => { "message" => "%{HTTPD_ERRORLOG}" } }', lines: ['[Tue Mar 10 08:15:30.123456 2026] [core:error] [pid 1234:tid 5678] [client 10.0.0.2:51234] AH00037: Symbolic link not allowed'] },
+  { id: 'grok_syslog_5424', filter: 'grok { match => { "message" => "%{SYSLOG5424LINE}" } }', lines: ['<34>1 2026-03-10T08:15:30.003Z web-1.example.com su 77 ID47 - echec pour alice'] },
+  { id: 'grok_ligne_syslog', filter: 'grok { match => { "message" => "%{SYSLOGLINE}" } }', lines: ['Mar 10 08:15:30 web-1 sshd[1234]: Accepted publickey for alice'] },
 
   // dissect
   { id: 'dissect_simple', filter: 'dissect { mapping => { "message" => "%{date} %{niveau} [%{service}] %{texte}" } }', lines: ['2026-03-10 INFO [api] démarrage terminé', 'ligne sans crochets'] },

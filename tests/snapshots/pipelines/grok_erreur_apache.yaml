@@ -1,0 +1,57 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
+
+transforms:
+  grok:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # grok
+      parsed, err = parse_grok(.message, s'%{HTTPD_ERRORLOG}')
+      if err == null {
+        dup = {}
+        for_each(map_keys(parsed) -> |k| { replace(k, r'\[\d+\]$$', "") }) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(map_keys(parsed) -> |k| { replace(k, r'\[\d+\]$$', "") }, dup))
+        # Mode ECS : captures renommées comme dans les motifs ecs-v1 de Logstash
+        if exists(.loglevel) {
+          v = del(.loglevel)
+          .log.level = v
+        }
+        if exists(.clientip) {
+          v = del(.clientip)
+          .source.address = v
+        }
+        if exists(.module) {
+          v = del(.module)
+          .apache.error.module = v
+        }
+        if exists(.pid) {
+          v = del(.pid)
+          .process.pid = to_int(v) ?? v
+        }
+        if exists(.tid) {
+          v = del(.tid)
+          .process.thread.id = to_int(v) ?? v
+        }
+        if exists(.proxy_errorcode) {
+          v = del(.proxy_errorcode)
+          .apache.error.proxy.error.code = v
+        }
+        if exists(.proxy_message) {
+          v = del(.proxy_message)
+          .apache.error.proxy.error.message = v
+        }
+        if exists(.clientport) {
+          v = del(.clientport)
+          .source.port = to_int(v) ?? v
+        }
+        if exists(.errorcode) {
+          v = del(.errorcode)
+          .error.code = v
+        }
+      } else {
+        .tags = compact(flatten([.tags, "_grokparsefailure"]))
+      }

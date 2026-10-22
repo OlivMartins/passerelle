@@ -255,6 +255,27 @@ class VrlGen {
   }
   failTags(tags) { if (tags.length) this.addTags(tags); }
   ok() { this.v.stats.ok++; }
+  // Mode ECS : renomme les captures historiques des motifs composites (table GROK_ECS), comme le font les motifs ecs-v1
+  grokEcs(patterns, under) {
+    const seen = new Set(); const rows = [];
+    for (const pat of patterns) for (const [, name] of String(pat).matchAll(/%\{(\w+)\}/g)) {
+      if (GROK_ECS[name]) GROK_ECS[name].forEach(r => { if (!seen.has(r[0])) { seen.add(r[0]); rows.push(r); } });
+      else if (GROK_COMPOSITE.test(name)) this.v.note('warn', `grok ${name} en mode ECS`, `Logstash capture ses champs sous des noms ECS ; la traduction garde les noms historiques de parse_grok. Vérifiez les noms attendus en aval, ou passez le filtre en ecs_compatibility => disabled.`);
+    }
+    if (!rows.length) return;
+    this.comment('Mode ECS : captures renommées comme dans les motifs ecs-v1 de Logstash');
+    for (const [legacy, ecs, how] of rows) {
+      const L = under(legacy);
+      if (how === 'drop') { this.emit(`del(${L})`); this.tset(L, 'null'); continue; }
+      const E = under(ecs);
+      this.open(`if exists(${L})`);
+      this.emit(how === 'qs' ? `v = replace(string(del(${L})) ?? "", r'^"|"$', "")` : `v = del(${L})`);
+      // Le message capturé s’ajoute au message d’origine, comme toute capture sur un champ existant
+      const set = ecs === 'message' ? `if exists(${E}) { ${E} = push(array(${E}) ?? [${E}], v) } else { ${E} = v }` : `${E} = ${how === 'int' ? 'to_int(v) ?? v' : 'v'}`;
+      this.emit(how === 'dash' || how === 'qs' ? `if v != "-" { ${set} }` : set);
+      this.close(); this.tset(L, 'null'); this.tset(E, 'any');
+    }
+  }
   // Mode ECS effectif d’un plugin : son réglage ecs_compatibility, sinon celui de la configuration
   ecsOn(s) { const e = s && s.ecs_compatibility; return e ? String(e) !== 'disabled' : this.v.ecs; }
   approx(title, detail) { this.v.stats.approx++; this.v.note('warn', title, detail); }
@@ -379,8 +400,13 @@ class VrlGen {
         this.mergeRoot(`merge(${x}, dup)`);
       };
       const land = x => (tgt ? this.assign(tgt, `merge(object(${tgt}) ?? {}, ${x})`) : landRoot(x));
-      if (pats.length === 1) { this.emit(`parsed, err = parse_grok(${src}, ${vraw(pats[0], 's')})`); this.open('if err == null'); land('parsed'); }
-      else { this.emit(`parsed = ${pats.map(x => `parse_grok(${src}, ${vraw(x, 's')})`).join(' ?? ')} ?? null`); this.open('if parsed != null'); land('object!(parsed)'); }
+      // Un nom capturé dans plusieurs branches d’une alternative (HTTPD_ERRORLOG, ou « %{A:x}|%{B:x} ») revient de
+      // parse_grok sous le nom « x[1] » pour la seconde branche ; Logstash le range sous son nom
+      const alt = lsList(pats0).some(x => /%\{HTTPD_ERRORLOG\}/.test(x) || [...String(x).matchAll(/%\{\w+:([^:}]+)/g)].map(m => m[1]).some((n, i, a) => a.indexOf(n) !== i));
+      const names = x => (alt ? `map_keys(${x}) -> |k| { replace(k, r'\\[\\d+\\]$', "") }` : x);
+      if (pats.length === 1) { this.emit(`parsed, err = parse_grok(${src}, ${vraw(pats[0], 's')})`); this.open('if err == null'); land(names('parsed')); }
+      else { this.emit(`parsed = ${pats.map(x => `parse_grok(${src}, ${vraw(x, 's')})`).join(' ?? ')} ?? null`); this.open('if parsed != null'); land(names('object!(parsed)')); }
+      if (this.ecsOn(s)) this.grokEcs(lsList(pats0), under);
       for (const [tmp, f] of moves) this.assign(under(f), `del(${tgt}.${tmp})`);
       for (const [f, t] of conv) { const fp = under(f); this.assign(fp, `${t === 'int' ? 'to_int' : 'to_float'}(${fp}) ?? ${fp}`); }
       this.common(s);
@@ -781,6 +807,33 @@ function kafkaSecurity(v, s, cfg, obj) {
     if (s.ssl_truststore_location) v.note('warn', 'Truststore Java', `${s.ssl_truststore_location} (JKS) doit être converti en PEM pour Vector : keytool -exportcert -rfc.`);
   }
 }
+/*
+ * Mode ECS : les motifs grok composites de Logstash (patterns ecs-v1) capturent sous des noms ECS, alors que
+ * parse_grok de Vector garde les noms historiques (patterns legacy). Table de renommage tirée des deux jeux de
+ * logstash-patterns-core 4.3.4 : [nom historique, nom ECS, traitement]. Traitements : int (typé comme « :int »),
+ * dash (absent quand la valeur est « - »), qs (guillemets retirés, absent si « - »), drop (non capturé en ECS).
+ */
+const GROK_ECS_COMMON = [['clientip', '[source][address]'], ['ident', '[apache][access][user][identity]', 'dash'], ['auth', '[user][name]', 'dash'],
+  ['verb', '[http][request][method]'], ['request', '[url][original]'], ['httpversion', '[http][version]'], ['rawrequest', null, 'drop'],
+  ['response', '[http][response][status_code]', 'int'], ['bytes', '[http][response][body][bytes]', 'int']];
+const GROK_ECS_COMBINED = GROK_ECS_COMMON.concat([['referrer', '[http][request][referrer]', 'qs'], ['agent', '[user_agent][original]', 'qs']]);
+const GROK_ECS_ERROR = [['loglevel', '[log][level]'], ['clientip', '[source][address]'], ['module', '[apache][error][module]'], ['pid', '[process][pid]', 'int'],
+  ['tid', '[process][thread][id]', 'int'], ['proxy_errorcode', '[apache][error][proxy][error][code]'], ['proxy_message', '[apache][error][proxy][error][message]'],
+  ['clientport', '[source][port]', 'int'], ['errorcode', '[error][code]']];
+const GROK_ECS_PROG = [['program', '[process][name]'], ['pid', '[process][pid]', 'int']];
+const GROK_ECS_FACILITY = [['facility', '[log][syslog][facility][code]', 'int'], ['priority', '[log][syslog][priority]', 'int']];
+const GROK_ECS_SYSLOG = GROK_ECS_PROG.concat(GROK_ECS_FACILITY, [['logsource', '[host][hostname]'], ['timestamp8601', 'timestamp']]);
+const GROK_ECS_5424 = [['syslog5424_pri', '[log][syslog][priority]', 'int'], ['syslog5424_ver', '[system][syslog][version]'], ['syslog5424_ts', 'timestamp'],
+  ['syslog5424_host', '[host][hostname]'], ['syslog5424_app', '[process][name]'], ['syslog5424_proc', '[process][pid]', 'int'],
+  ['syslog5424_msgid', '[event][code]'], ['syslog5424_sd', '[system][syslog][structured_data]'], ['syslog5424_msg', 'message']];
+const GROK_ECS = {
+  COMMONAPACHELOG: GROK_ECS_COMMON, HTTPD_COMMONLOG: GROK_ECS_COMMON, COMBINEDAPACHELOG: GROK_ECS_COMBINED, HTTPD_COMBINEDLOG: GROK_ECS_COMBINED,
+  HTTPD20_ERRORLOG: GROK_ECS_ERROR, HTTPD24_ERRORLOG: GROK_ECS_ERROR, HTTPD_ERRORLOG: GROK_ECS_ERROR,
+  SYSLOGPROG: GROK_ECS_PROG, SYSLOGFACILITY: GROK_ECS_FACILITY, SYSLOGBASE: GROK_ECS_SYSLOG, SYSLOGBASE2: GROK_ECS_SYSLOG, SYSLOGLINE: GROK_ECS_SYSLOG,
+  SYSLOG5424PRI: GROK_ECS_5424, SYSLOG5424BASE: GROK_ECS_5424, SYSLOG5424LINE: GROK_ECS_5424
+};
+// Autres familles de motifs composites qui capturent des champs : en mode ECS, leurs noms sont à vérifier
+const GROK_COMPOSITE = /^(BACULA|BIND9|BRO_|CATALINA|CISCO|CLOUDFRONT|CRONLOG|ELB_|EXIM_|HAPROXY|HTTPD|JAVASTACKTRACE|MCOLLECTIVE|MONGO|NAGIOS|NETSCREEN|POSTGRESQL|RAILS3|REDIS|RPROCESSING|RT_FLOW|RUBY_LOGGER|S3_|SFW2|SHOREWALL|SQUID3|SYSLOG|TOMCATLOG|URIHOST)/;
 // Lecture ISO8601 à la façon de Logstash : avec ou sans fuseau, espace ou T, secondes et décimales facultatives,
 // ou le jour seul (à minuit) ; null si rien ne convient. x : variable VRL contenant la chaîne, virgule décimale déjà ramenée à un point.
 function isoParse(x, tz) {
