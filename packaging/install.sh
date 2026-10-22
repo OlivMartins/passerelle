@@ -83,9 +83,11 @@ fi
 if [ ! -f "$ETC/passerelle.env" ]; then
   TOKEN=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
   ( umask 077; sed "s/^PASSERELLE_TOKEN=.*/PASSERELLE_TOKEN=$TOKEN/" "$HERE/etc/passerelle.env.example" > "$ETC/passerelle.env" )
-  chown root:passerelle "$ETC/passerelle.env"; chmod 0640 "$ETC/passerelle.env"
   say "Jeton d’API généré dans $ETC/passerelle.env"
 fi
+# Lu par systemd avant le démarrage du service : l’utilisateur passerelle n’a pas à y accéder,
+# ce qui protège les secrets même si une validation Vector lit un fichier arbitraire.
+chown root:root "$ETC/passerelle.env"; chmod 0600 "$ETC/passerelle.env"
 install -d -m 0755 "$DOC"
 install -m 0644 "$HERE/README.md" "$DOC/README.md"
 for f in LICENSE NOTICE THIRD_PARTY_LICENSES/nodejs.txt; do

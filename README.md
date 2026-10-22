@@ -342,7 +342,7 @@ curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
 
 - **Vos requêtes restent chez vous.** L’interface traduit dans le navigateur, hors ligne, sans police ni script externe ni télémétrie.
 - **Service durci.** Utilisateur dédié sans privilège, système de fichiers en lecture seule, filtre seccomp vérifié sur les appels système réellement utilisés. Score `systemd-analyze security` : 1.2, « OK ».
-- **API sobre.** Jeton comparé en temps constant, politique CSP stricte, corps limités à 2 Mio. La validation SQL n’accepte qu’un `SELECT`, exécuté en `readonly`.
+- **API sobre.** Jeton comparé en temps constant, requêtes intersites refusées, politique CSP stricte, corps limités à 2 Mio. La validation SQL n’accepte qu’un `SELECT`, exécuté en `readonly`.
 - **Secrets hors des fichiers.** Par défaut, les mots de passe sont des références `${VARIABLE}`, aussi bien dans la configuration de Passerelle que dans les configurations Vector qu’il génère.
 
 Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).

@@ -12,6 +12,8 @@ Un changement du SQL ou du YAML généré fait échouer le test et apparaît en 
 npm run test:update
 ```
 
+`npm test` lance aussi `tests/server/run.mjs` : le serveur et la ligne de commande, interrogés à travers une fausse instance ClickHouse et un faux binaire Vector (Linux seulement). Il couvre les codes HTTP, les refus de sécurité, les options et les codes de sortie.
+
 ## Banc différentiel : `npm run test:diff`
 
 Un instantané prouve que la sortie n’a pas changé, pas qu’elle est juste. Le banc exécute donc chaque requête DSL sur Elasticsearch, sa traduction sur ClickHouse, et compare les deux résultats ligne à ligne : clés, comptes, mesures et ordre.

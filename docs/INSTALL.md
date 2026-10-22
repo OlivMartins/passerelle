@@ -90,7 +90,7 @@ Toutes les routes `/v1/*` exigent l’en-tête `Authorization: Bearer <PASSERELL
 | GET | `/v1/config` | Configuration active, secrets masqués |
 | POST | `/v1/translate/dsl?index=logs-*` | DSL (JSON ou format console Kibana) vers SQL |
 | POST | `/v1/translate/logstash?format=yaml` | Pipeline `.conf` vers configuration Vector (`yaml` ou `toml`) |
-| POST | `/v1/validate/sql` | `EXPLAIN indexes = 1` sur le ClickHouse configuré (SELECT seul, `readonly=2`) |
+| POST | `/v1/validate/sql` | `EXPLAIN indexes = 1` sur le ClickHouse configuré (SELECT seul, `readonly=1`) |
 | POST | `/v1/validate/vector?format=yaml` | Compilation complète de la configuration et du VRL par `vector validate` |
 
 ```bash
@@ -99,7 +99,9 @@ curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
   -H "Authorization: Bearer $TOKEN" --data-binary @requete.json | jq -r .sql
 ```
 
-Les corps de requête sont limités à 2 Mio. Au plus deux validations Vector tournent en parallèle.
+Les corps de requête sont limités à 2 Mio. Au plus deux validations, Vector et SQL confondues, tournent en parallèle.
+
+Un navigateur ne peut pas appeler l’API depuis un autre site : `/v1/*` refuse les requêtes intersites. Sans jeton, cas d’un `passerelle serve` lancé sur un poste, l’API ne répond qu’aux requêtes adressées à `localhost`, `127.0.0.1` ou `[::1]`.
 
 ## Ligne de commande (CI, dépôts Git)
 
@@ -116,7 +118,8 @@ Codes de sortie : `0` succès, `1` erreur, `2` éléments « à reprendre » dé
 - Un filtre seccomp restreint les appels système au groupe `@system-service`. Les appels réellement utilisés, y compris l’exécution de `vector validate`, ont été relevés et sont tous couverts.
 - Score `systemd-analyze security passerelle` : **1.2 (OK)**. Les points restants sont inhérents à la fonction : accès réseau, et pages exécutables nécessaires au JIT de V8.
 - En-têtes HTTP : politique CSP stricte (script autorisé par empreinte SHA-256, aucun `unsafe-eval`), `X-Frame-Options: DENY`, `nosniff`, `no-referrer`.
-- Le jeton est comparé en temps constant. La validation SQL n’accepte qu’un seul SELECT et s’exécute en `readonly=2` avec une limite de 15 s.
+- Le jeton est comparé en temps constant. La validation SQL n’accepte qu’un seul SELECT et s’exécute en `readonly=1`, qui interdit aussi de modifier les réglages, dont la limite de 15 s.
+- `passerelle.env` n’est lisible que par root (0600) : systemd le lit au démarrage. `vector validate` ne reçoit aucune variable d’environnement du service, secrets compris.
 - Les traductions faites dans l’interface restent dans le navigateur. Seuls les appels explicites à l’API passent par le serveur.
 - L’interface ne charge aucune ressource externe (polices système, aucun CDN) : aucune donnée de navigation ne sort vers un tiers.
 

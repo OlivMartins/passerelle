@@ -23,8 +23,21 @@ function loadConfig(file) {
     try { text = fs.readFileSync(file, 'utf8'); } catch (e) { throw new Error(`configuration illisible (${file}) : ${e.code || e.message}`); }
     over = /\.json$/i.test(file) ? JSON.parse(text) : parseYAMLConfig(text);
     if (!isObj(over)) throw new Error(`configuration invalide (${file})`);
+    // Une clé mal écrite laisserait la valeur par défaut en place sans que personne ne le voie
+    const unknown = unknownKeys(over, Object.assign({ version: 1 }, DEFAULT_CONFIG), '');
+    if (unknown.length) throw new Error(`clé${unknown.length > 1 ? 's' : ''} inconnue${unknown.length > 1 ? 's' : ''} dans ${file} : ${unknown.join(', ')}`);
   }
   return mergeConfig(DEFAULT_CONFIG, { clickhouse: over.clickhouse, kafka: over.kafka, vector: over.vector });
+}
+// Les tables de correspondance ont des clés libres, comme dans mergeConfig
+function unknownKeys(src, ref, prefix) {
+  const out = [];
+  for (const [k, v] of Object.entries(src)) {
+    const p = prefix + k;
+    if (!Object.hasOwn(ref, k)) out.push(p);
+    else if (isObj(v) && isObj(ref[k]) && !['index_mapping', 'field_mapping', 'columns', 'names'].includes(k)) out.push(...unknownKeys(v, ref[k], p + '.'));
+  }
+  return out;
 }
 const ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 function expand(s) { return String(s || '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, v) => process.env[v] || ''); }
@@ -94,9 +107,25 @@ function authorized(req) {
   return !!m && crypto.timingSafeEqual(sha(m[1]), sha(token));
 }
 function isLoopback(host) { return host === '127.0.0.1' || host === '::1' || host === 'localhost'; }
+// Une page web ouverte sur le poste ne doit pas pouvoir appeler l’API : requête intersite (CSRF),
+// ou nom de domaine qui pointe soudain vers 127.0.0.1 (DNS rebinding), ce que seul un jeton empêchait.
+function crossSiteRefusal(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site === 'cross-site' || site === 'same-site') return 'requête intersite refusée';
+  if (process.env.PASSERELLE_TOKEN) return '';
+  const m = /^(\[[^\]]*\]|[^:]*)(?::\d+)?$/.exec(req.headers.host || '');
+  const host = m ? m[1].replace(/^\[|\]$/g, '').toLowerCase() : '';
+  return isLoopback(host) ? '' : 'sans PASSERELLE_TOKEN, l’API ne répond qu’aux requêtes adressées à localhost, 127.0.0.1 ou [::1]';
+}
 
 /* ---------- Validation par les moteurs réels ---------- */
+// Validations Vector et SQL confondues : chacune occupe un processus ou une requête ClickHouse jusqu’à son délai
 let running = 0; const MAX_JOBS = 2;
+async function limited(job) {
+  if (running >= MAX_JOBS) throw new HttpError(429, 'trop de validations en cours, réessayez dans quelques secondes');
+  running++;
+  try { return await job(); } finally { running--; }
+}
 function runProcess(bin, args, env, timeout) {
   return new Promise((resolve, reject) => {
     execFile(bin, args, { env, timeout, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
@@ -107,8 +136,6 @@ function runProcess(bin, args, env, timeout) {
   });
 }
 async function validateVector(text, format) {
-  if (running >= MAX_JOBS) throw new HttpError(429, 'trop de validations en cours, réessayez dans quelques secondes');
-  running++;
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'passerelle-'));
   try {
     const dataDir = path.join(dir, 'data'); await fsp.mkdir(dataDir);
@@ -118,15 +145,18 @@ async function validateVector(text, format) {
     if (ext === 'toml') body = /^data_dir\s*=/m.test(body) ? body.replace(/^data_dir\s*=.*$/m, `data_dir = ${JSON.stringify(dataDir)}`) : `data_dir = ${JSON.stringify(dataDir)}\n${body}`;
     const file = path.join(dir, `vector.${ext}`);
     await fsp.writeFile(file, body, { mode: 0o600 });
-    // Les variables ${…} absentes reçoivent une valeur factice : on valide la structure, pas les secrets.
-    const env = Object.assign({}, process.env);
-    for (const m of body.matchAll(/(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}/g)) if (env[m[1]] === undefined) env[m[1]] = 'validation';
+    // Vector ne reçoit aucun secret du service : sa sortie revient au client, et la configuration soumise
+    // peut lire un fichier (remap « file: /proc/self/environ »). Les variables ${…} reçoivent une valeur factice :
+    // on valide la structure, pas les secrets.
+    const env = {};
+    for (const [k, v] of Object.entries(process.env)) if (k === 'PATH' || k === 'HOME' || k === 'TZ' || k.startsWith('VECTOR_')) env[k] = v;
+    for (const m of body.matchAll(/(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}/g)) env[m[1]] = 'validation';
     const bin = process.env.PASSERELLE_VECTOR_BIN || 'vector';
     const r = await runProcess(bin, ['--color', 'never', 'validate', '--skip-healthchecks', file], env, 90000);
     const output = (r.stdout + '\n' + r.stderr).replace(/\x1b\[[0-9;]*m/g, '').split('\n')
       .filter(l => l.trim() && !/librdkafka|rdkafka::|base_producer|Log level is enabled/.test(l)).join('\n').replaceAll(dir, '<tmp>');
     return { valid: r.code === 0, exit_code: r.code, output };
-  } finally { running--; await fsp.rm(dir, { recursive: true, force: true }); }
+  } finally { await fsp.rm(dir, { recursive: true, force: true }); }
 }
 function withoutStrings(s) { return s.replace(/'(?:[^'\\]|\\.)*'/g, "''").replace(/`(?:[^`\\]|\\.)*`/g, '``').replace(/--[^\n]*/g, ''); }
 async function validateSQL(cfg, sql) {
@@ -138,7 +168,9 @@ async function validateSQL(cfg, sql) {
   if (!/^\s*(WITH|SELECT)\b/i.test(bare.replace(/^(\s*--[^\n]*\n)*/, ''))) throw new HttpError(400, 'seules les requêtes SELECT (éventuellement précédées de WITH) sont acceptées');
   const url = new URL(ep + '/');
   url.searchParams.set('database', expand(cfg.clickhouse.database) || 'default');
-  url.searchParams.set('readonly', '2');
+  // readonly=1 et non 2 : en 2, la requête peut changer ses réglages (SETTINGS max_execution_time = 0)
+  // et appeler d’autres hôtes par url() ; vérifié sur ClickHouse 26.9
+  url.searchParams.set('readonly', '1');
   url.searchParams.set('max_execution_time', '15');
   const headers = { 'content-type': 'text/plain; charset=utf-8' };
   const user = expand(cfg.clickhouse.user);
@@ -163,16 +195,20 @@ function serve(opts) {
   const { host, port } = parseListen(opts.listen || process.env.PASSERELLE_LISTEN || '127.0.0.1:8080');
   const LIMIT = 2 * 1024 * 1024;
   configWarnings(cfg).forEach(w => log('warn', w));
-  if (!process.env.PASSERELLE_TOKEN) log(isLoopback(host) ? 'info' : 'warn', 'PASSERELLE_TOKEN absent : l’API /v1 est accessible sans authentification', { listen: `${host}:${port}` });
+  if (!process.env.PASSERELLE_TOKEN) log(isLoopback(host) ? 'info' : 'warn', 'PASSERELLE_TOKEN absent : l’API /v1 est accessible sans authentification, pour les seules requêtes adressées à localhost', { listen: `${host}:${port}` });
 
   const server = http.createServer(async (req, res) => {
     const t0 = process.hrtime.bigint();
-    const url = new URL(req.url, 'http://localhost');
-    res.on('finish', () => log('info', 'requête', { method: req.method, path: url.pathname, status: res.statusCode, ms: Number((process.hrtime.bigint() - t0) / 1000000n), ip: req.socket.remoteAddress }));
+    let url = null;
+    res.on('finish', () => log('info', 'requête', { method: req.method, path: url ? url.pathname : String(req.url).slice(0, 200), status: res.statusCode, ms: Number((process.hrtime.bigint() - t0) / 1000000n), ip: req.socket.remoteAddress }));
+    // Une adresse comme « // » ne s’analyse pas : sans cette garde, l’exception arrêterait le processus
+    try { url = new URL(req.url, 'http://localhost'); } catch (e) { return json(res, 400, { error: 'adresse de requête invalide' }); }
     try {
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return send(res, 200, ui.html, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': ui.csp });
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { status: 'ok', version: VERSION });
       if (!url.pathname.startsWith('/v1/')) return json(res, 404, { error: 'ressource inconnue' });
+      const refusal = crossSiteRefusal(req);
+      if (refusal) return json(res, 403, { error: refusal });
       if (!authorized(req)) return json(res, 401, { error: 'jeton absent ou invalide (Authorization: Bearer …)' });
       if (req.method === 'GET' && url.pathname === '/v1/config') return json(res, 200, publicConfig(cfg));
       if (req.method !== 'POST') return json(res, 405, { error: 'méthode non autorisée' });
@@ -191,8 +227,8 @@ function serve(opts) {
           if (r.error) return json(res, 422, { error: r.error });
           return json(res, 200, { format: fmt, config: r[fmt], notes: r.notes, coverage: coverage(r.stats), topology: r.graph, env: r.env, summary: r.sentence });
         }
-        case '/v1/validate/vector': return json(res, 200, await validateVector(body, url.searchParams.get('format') || 'yaml'));
-        case '/v1/validate/sql': return json(res, 200, await validateSQL(cfg, body));
+        case '/v1/validate/vector': return json(res, 200, await limited(() => validateVector(body, url.searchParams.get('format') || 'yaml')));
+        case '/v1/validate/sql': return json(res, 200, await limited(() => validateSQL(cfg, body)));
         default: return json(res, 404, { error: 'ressource inconnue' });
       }
     } catch (e) {
@@ -220,8 +256,8 @@ const HELP = `Passerelle ${VERSION} — traduction Elasticsearch/Logstash vers C
 
 Utilisation :
   passerelle serve       [--config FICHIER] [--listen HÔTE:PORT]
-  passerelle dsl2sql     <fichier|dossier>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo]
-  passerelle ls2vector   <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo]
+  passerelle dsl2sql     <fichier|dossier>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo] [--verbose]
+  passerelle ls2vector   <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo] [--verbose]
   passerelle check-config [--config FICHIER] [--quiet]
   passerelle version
 
@@ -233,18 +269,24 @@ Variables d’environnement :
   CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, KAFKA_USERNAME, KAFKA_PASSWORD : secrets référencés par la configuration
 
 Codes de sortie : 0 succès, 1 erreur, 2 éléments à reprendre (avec --fail-on todo).`;
+// Options déclarées : une option mal écrite ou une valeur inconnue est une erreur, pas une option ignorée
+// (« --fail-on todos » désactivait en silence le contrôle d’une intégration continue).
+const OPTIONS = {
+  config: { type: 'string' }, listen: { type: 'string' }, index: { type: 'string' }, out: { type: 'string' },
+  format: { type: 'string' }, 'fail-on': { type: 'string' }, quiet: { type: 'boolean' }, verbose: { type: 'boolean' },
+  help: { type: 'boolean', short: 'h' }
+};
 function parseArgs(argv) {
-  const o = { _: [] };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '-h' || a === '--help') o.help = true;
-    else if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      if (eq > 0) o[a.slice(2, eq)] = a.slice(eq + 1);
-      else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) o[a.slice(2)] = argv[++i];
-      else o[a.slice(2)] = true;
-    } else o._.push(a);
+  let r;
+  try { r = require('node:util').parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true }); }
+  catch (e) {
+    const opt = /'(-[^' ]+)/.exec(e.message);
+    if (!opt) fail(`option invalide : ${e.message}`);
+    fail(`${e.code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION' ? 'option inconnue' : 'option sans sa valeur, ou avec une valeur en trop'} : ${opt[1]} (passerelle --help)`);
   }
+  const o = Object.assign({ _: r.positionals }, r.values);
+  if (o['fail-on'] !== undefined && o['fail-on'] !== 'todo') fail(`--fail-on attend la valeur todo, pas « ${o['fail-on']} »`);
+  if (o.format !== undefined && o.format !== 'yaml' && o.format !== 'toml') fail(`--format attend yaml ou toml, pas « ${o.format} »`);
   return o;
 }
 function collect(inputs, exts) {
@@ -261,7 +303,7 @@ function batch(kind, o) {
   if (!o._.length) fail(`aucun fichier à traduire. Exemple : passerelle ${kind === 'dsl' ? 'dsl2sql requetes/' : 'ls2vector pipelines/'}`);
   let cfg;
   try { cfg = loadConfig(o.config || process.env.PASSERELLE_CONFIG || null); } catch (e) { fail(e.message); }
-  const fmt = o.format === 'toml' ? 'toml' : kind === 'ls' ? cfg.vector.format : 'sql';
+  const fmt = kind === 'ls' ? o.format || cfg.vector.format : 'sql';
   const files = collect(o._, kind === 'dsl' ? /\.(json|txt|es)$/i : /\.(conf|cfg|logstash)$/i);
   if (!files.length) fail('aucun fichier correspondant trouvé');
   if (o.out) fs.mkdirSync(o.out, { recursive: true });

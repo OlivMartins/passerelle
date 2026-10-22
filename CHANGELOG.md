@@ -4,6 +4,24 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Non publié]
 
+### Sécurité
+
+- Serveur : une requête sur l’adresse `//` arrêtait le processus. Elle reçoit désormais une réponse 400.
+- Validation Vector : `vector validate` recevait tout l’environnement du service, et sa sortie revient au client. Une configuration soumise pouvait donc faire afficher les secrets (`CLICKHOUSE_PASSWORD`, `PASSERELLE_TOKEN`). Le processus ne reçoit plus que `PATH`, `HOME`, `TZ` et les variables `VECTOR_*`. `install.sh` passe `passerelle.env` en 0600 root:root, installation existante comprise.
+- Validation SQL : `readonly=1` au lieu de `readonly=2`. La requête soumise ne peut plus lever la limite de 15 s ni faire appeler d’autres hôtes par `url()`. La limite de deux validations simultanées couvre aussi la validation SQL.
+- API : les requêtes intersites d’un navigateur sont refusées sur `/v1/*`. Sans `PASSERELLE_TOKEN`, l’API ne répond qu’aux requêtes adressées à `localhost`, `127.0.0.1` ou `[::1]` (DNS rebinding).
+- Traduction DSL : le sens de tri des documents était recopié tel quel dans le SQL. Seuls `asc` et `desc` sont acceptés, comme pour les agrégations.
+
+### Corrigé
+
+- Ligne de commande : une option inconnue, ou sans sa valeur, est une erreur. `--fail-on` n’accepte que `todo` et `--format` que `yaml` ou `toml`. Avant, `--fail-on todos` sortait en 0, et `dsl2sql --verbose A.json B.json` ne traduisait que B.
+- `--format` l’emporte sur `vector.format` de la configuration.
+- Configuration : une clé inconnue est refusée au lieu d’être ignorée. `check-config` sort en 1 et le service ne démarre pas.
+
+### Ajouté
+
+- Tests du serveur et de la ligne de commande, lancés par `npm test`.
+
 ## [1.1.0] - 2026-10-11
 
 Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contribués par @gnocent ([#1](https://github.com/OlivMartins/passerelle/pull/1)) : 494 cas sur 504 donnent désormais le même résultat qu’Elasticsearch.
