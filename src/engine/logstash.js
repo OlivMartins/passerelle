@@ -255,6 +255,8 @@ class VrlGen {
   }
   failTags(tags) { if (tags.length) this.addTags(tags); }
   ok() { this.v.stats.ok++; }
+  // Mode ECS effectif d’un plugin : son réglage ecs_compatibility, sinon celui de la configuration
+  ecsOn(s) { const e = s && s.ecs_compatibility; return e ? String(e) !== 'disabled' : this.v.ecs; }
   approx(title, detail) { this.v.stats.approx++; this.v.note('warn', title, detail); }
   ko(p, detail, code) {
     this.v.stats.ko++; this.todo = true;
@@ -596,7 +598,7 @@ class VrlGen {
     this.ok();
   }
   f_translate(s, p) {
-    const src = this.path(s.source || s.field || 'message'); const tgt = this.path(s.target || s.destination || 'translation');
+    const src = this.path(s.source || s.field || 'message'); const tgt = this.path(s.target || s.destination || (this.ecsOn(s) ? (s.source || s.field || 'message') : 'translation'));
     if (s.regex) this.approx('translate regex', 'Les clés regex ne sont pas reprises : correspondance exacte uniquement.');
     const entries = lsPairs(s.dictionary);
     if (!s.dictionary_path && !entries.length) return this.ko(p, 'translate sans dictionnaire.');
@@ -604,7 +606,9 @@ class VrlGen {
     // Sinon rien ne se passe : ni valeur de repli, ni add_field, ni add_tag.
     const when = [];
     if (!this.present(src)) when.push(`exists(${src})`);
-    if (!s.override) when.push(`!exists(${tgt})`);
+    // Mode ECS sans cible : la traduction remplace la valeur du champ source, qui existe forcément
+    const inPlace = !s.target && !s.destination && this.ecsOn(s);
+    if (!s.override && !inPlace) when.push(`!exists(${tgt})`);
     if (when.length) this.open(`if ${when.join(' && ')}`);
     this.emit(`key = ${this.asStr(src)}`);
     // Sans valeur de repli, add_field, add_tag et remove_field ne valent que si la clé est trouvée
@@ -634,7 +638,7 @@ class VrlGen {
     this.ok();
   }
   f_fingerprint(s, p) {
-    const srcs = lsList(s.source || 'message'); const tgt = this.path(s.target || 'fingerprint');
+    const srcs = lsList(s.source || 'message'); const tgt = this.path(s.target || (this.ecsOn(s) ? '[event][hash]' : 'fingerprint'));
     const method = String(s.method || 'SHA1').toUpperCase();
     // MurmurHash3 n’existe pas en VRL : un autre hachage donnerait d’autres clés de dédoublonnage, en silence
     if (method === 'MURMUR3') return this.ko(p, 'MurmurHash3 n’existe pas en VRL : aucune fonction ne reproduit l’empreinte de Logstash. Choisissez une autre méthode des deux côtés, ou calculez-la en aval.');
@@ -901,7 +905,8 @@ function flatOutputs(stmts, conds, out) {
 }
 function translateLogstash(src, cfg) {
   const notes = makeNotes();
-  const v = { ns: cfg.vector.log_namespace !== false, compat: !!cfg.vector.logstash_compat, stats: { ok: 0, approx: 0, ko: 0 }, enrich: {}, env: new Set(), note: (l, t, d, c) => notes.add(l, t, d, c) };
+  // Compatibilité ECS : celle de la configuration (v8 par défaut, comme Logstash 8 et suivants), sauf réglage du plugin
+  const v = { ns: cfg.vector.log_namespace !== false, compat: !!cfg.vector.logstash_compat, ecs: String(cfg.vector.ecs_compatibility || 'v8') !== 'disabled', stats: { ok: 0, approx: 0, ko: 0 }, enrich: {}, env: new Set(), note: (l, t, d, c) => notes.add(l, t, d, c) };
   let ast;
   try { ast = parseLogstash(src); }
   catch (e) { return { error: e.message }; }
@@ -921,16 +926,23 @@ function translateLogstash(src, cfg) {
     graph.nodes.push({ id: r.name, kind: 'source', type: r.src.type, label: r.src.__label, detail: r.src.__detail });
     // Étape d’initialisation propre à chaque source
     const g = new VrlGen(v);
-    if (v.ns && r.src.__plain) { g.comment('Codec plain : le message brut devient le champ message, comme dans Logstash'); g.emit('. = { "message": . }'); }
+    // Mode ECS : les codecs de Logstash gardent la ligne reçue dans [event][original]
+    const original = v.ns && g.ecsOn(r.s);
+    if (v.ns && r.src.__plain) {
+      g.comment('Codec plain : le message brut devient le champ message, comme dans Logstash');
+      g.emit(original ? '. = { "message": ., "event": { "original": . } }' : '. = { "message": . }');
+    }
     else if (v.ns && r.src.__json) {
       // Comme le codec json de Logstash : une ligne invalide est gardée dans message, avec _jsonparsefailure
       g.comment('Codec json : décodage de la ligne (invalide : gardée dans message, avec _jsonparsefailure)');
       g.emit('raw = string(.) ?? ""');
       g.emit('parsed, err = parse_json(raw)');
       g.open('if err == null'); g.emit('. = object(parsed) ?? { "message": parsed }');
+      // Mode ECS : la ligne reçue est gardée dans [event][original], sauf pour une ligne invalide (comme Logstash)
+      if (original) g.emit('.event.original = raw');
       g.close('} else {'); g.ind++; g.emit('. = { "message": raw, "tags": ["_jsonparsefailure"] }'); g.close();
     }
-    else if (v.ns) { g.comment('Garantit un objet à la racine (un JSON scalaire est rangé dans message)'); g.emit('. = object(.) ?? { "message": . }'); }
+    else if (v.ns) { g.comment('Garantit un objet à la racine (un JSON scalaire est rangé dans message)'); g.emit(original ? '. = object(.) ?? { "message": ., "event": { "original": . } }' : '. = object(.) ?? { "message": . }'); }
     if (cfg.vector.logstash_compat) {
       g.comment('Compatibilité Logstash : @timestamp et @version présents sur chaque événement');
       g.open('if !exists(."@timestamp")'); g.emit('."@timestamp" = now()'); g.close();

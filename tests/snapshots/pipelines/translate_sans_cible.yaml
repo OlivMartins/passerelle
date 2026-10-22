@@ -6,11 +6,11 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # translate
-      if exists(.code) && !exists(.translation) {
+      if exists(.code) {
         key = (to_string(.code) ?? join(.code, ",") ?? encode_json(.code))
         if key == "200" {
-          .translation = "OK"
+          .code = "OK"
         } else if key == "404" {
-          .translation = "Introuvable"
+          .code = "Introuvable"
         }
       }

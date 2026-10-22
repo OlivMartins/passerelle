@@ -15,7 +15,7 @@
  *            le banc échoue pour rappeler de retirer la mention. Formes acceptées :
  *              'raison'            dans les deux modes de compatibilité ECS de Logstash
  *              { v8: 'raison' }    dans un seul mode (v8 ou disabled)
- *   exact    tolérances du banc à désactiver pour ce cas : 'original', 'horodatage' (voir run.mjs)
+ *   exact    tolérance du banc à désactiver pour ce cas : 'horodatage' (voir run.mjs)
  *
  * Un cas ne porte qu’un comportement : quand une opération diverge sur un type d’entrée, ce type a son propre cas.
  */
@@ -34,7 +34,7 @@ export const CASES = [
   { id: 'transport_objet', filter: '', events: [{ a: 1, b: 'deux', c: [3, 4.5], d: { e: null, f: true } }] },
   { id: 'transport_json_invalide', filter: '', codec: 'json', lines: ['{"a":1}', 'ligne non json', '{"a":2}'] },
   { id: 'transport_horodatage_document', filter: '', codec: 'json', lines: ['{"@timestamp":"2026-03-10T09:15:30+01:00","a":1}', '{"@timestamp":"pas une date","a":2}'] },
-  { id: 'transport_event_original', filter: '', lines: ['une ligne'], exact: ['original'], known: { v8: 'la traduction ne pose pas [event][original], que les codecs de Logstash ajoutent en mode ECS' } },
+  { id: 'transport_event_original', filter: '', lines: ['une ligne'] },
   { id: 'transport_horodatage_ingestion', filter: '', lines: ['une ligne'], exact: ['horodatage'], known: 'Logstash écrit l’horodatage d’ingestion à la nanoseconde, la traduction à la milliseconde' },
 
   // mutate : renommer, remplacer
@@ -273,14 +273,14 @@ export const CASES = [
   // Sans valeur de repli, add_tag ne vaut que si la clé est trouvée
   { id: 'translate_sans_correspondance', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} add_tag => ["traduit"] }`, events: [{ code: '200' }, { code: '500' }] },
   { id: 'translate_override', filter: `translate { source => "code" target => "libelle" ${DICTIONNAIRE} override => true }`, events: [{ code: '200', libelle: 'déjà' }] },
-  { id: 'translate_sans_cible', filter: `translate { source => "code" ${DICTIONNAIRE} }`, events: [{ code: '200' }], known: { v8: 'sans target, Logstash en mode ECS écrit sur place, dans le champ source ; la traduction écrit dans translation, comme le mode historique' } },
+  { id: 'translate_sans_cible', filter: `translate { source => "code" ${DICTIONNAIRE} }`, events: [{ code: '200' }] },
 
   // fingerprint
   { id: 'fingerprint_sha256', filter: 'fingerprint { source => "message" target => "empreinte" method => "SHA256" }', lines: ['abc', 'été'] },
   { id: 'fingerprint_sha1', filter: 'fingerprint { source => "message" target => "empreinte" method => "SHA1" }', lines: ['abc'] },
   { id: 'fingerprint_md5', filter: 'fingerprint { source => "message" target => "empreinte" method => "MD5" }', lines: ['abc'] },
   { id: 'fingerprint_murmur3', filter: 'fingerprint { source => "message" target => "empreinte" method => "MURMUR3" }', lines: ['abc'], known: 'MURMUR3 : pas de MurmurHash3 en VRL, la traduction déclare le filtre « à reprendre » et n’écrit pas d’empreinte' },
-  { id: 'fingerprint_sans_cible', filter: 'fingerprint { source => "message" method => "SHA256" }', lines: ['abc'], known: { v8: 'sans target, Logstash en mode ECS écrit dans [event][hash] ; la traduction écrit dans fingerprint, comme le mode historique' } },
+  { id: 'fingerprint_sans_cible', filter: 'fingerprint { source => "message" method => "SHA256" }', lines: ['abc'] },
   { id: 'fingerprint_nombre', filter: 'fingerprint { source => "n" target => "empreinte" method => "SHA256" }', events: [{ n: 42 }, { n: 1.5 }] },
   // Seule l’absence du champ retient l’empreinte : un champ nul donne celle d’une chaîne vide
   { id: 'fingerprint_source_absente', filter: 'fingerprint { source => "s" target => "empreinte" method => "SHA256" }', events: [{ n: 1 }, { s: null }] },

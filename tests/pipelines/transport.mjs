@@ -33,9 +33,9 @@ export function outputsOf(c) {
 }
 const outputBlock = (c, prefix) => `output {\n${c.output ? c.output(name => fileOutput(outputFile(prefix, name))) : fileOutput(prefix)}\n}\n`;
 
-// Pipeline que traduit Passerelle et que joue Vector
-export function translatedPipeline(c) {
-  return `input { stdin {${isJson(c) ? ' codec => json_lines' : ''}${inputOptions(c)} } }\n` + filterBlock(c) + outputBlock(c, c.id);
+// Pipeline que traduit Passerelle et que joue Vector ; avec un mode ECS, ses sorties portent ce mode dans leur nom
+export function translatedPipeline(c, mode) {
+  return `input { stdin {${isJson(c) ? ' codec => json_lines' : ''}${inputOptions(c)} } }\n` + filterBlock(c) + outputBlock(c, mode ? `${c.id}.${mode}` : c.id);
 }
 
 /*

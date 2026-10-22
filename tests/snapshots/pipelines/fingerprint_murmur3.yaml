@@ -18,7 +18,7 @@ transforms:
     inputs: [stdin_in]
     source: |
       # Codec plain : le message brut devient le champ message, comme dans Logstash
-      . = { "message": . }
+      . = { "message": ., "event": { "original": . } }
       # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
       if !exists(."@timestamp") {
         ."@timestamp" = now()
