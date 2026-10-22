@@ -86,7 +86,9 @@ function makeDslCtx(cfg) {
     // Schéma des colonnes : table en cours, colonnes Nullable rencontrées, et constructions dont la justesse en dépend
     table: null, schema: hasSchema(cfg), nullableCols: new Set(), schemaGaps: new Set(),
     // Listes de valeurs sorties du SQL (clickhouse.lists.threshold), par nom
-    lists: new Map()
+    lists: new Map(),
+    // Modèles remplacés par des marqueurs (dsl-params.js)
+    params: []
   };
   ctx.mapField = f => mapField(ctx, f);
   ctx.kindOf = f => { const t = fieldType(ctx, f); return t ? t.kind : null; };
@@ -555,6 +557,13 @@ function rangeClause(ctx, field, spec0) {
       if (upper2 && (dm.round || dayOnly)) s = op === 'gt' ? '>=' : '<';
       date = true;
       if (op[0] === 'g') lower = { dm, v }; else upper = { dm, v };
+    } else if (dateField && isParamMark(v)) {
+      // Modèle (Watcher, Grafana) : la valeur arrive à l’exécution, lue selon le format de la requête
+      const zone = zoneOf(ctx.cfg, tz);
+      sql = /epoch_millis/.test(fmt) ? `fromUnixTimestamp64Milli(toInt64(${chStr(v)}))`
+        : /epoch_second/.test(fmt) ? `toDateTime(toInt64(${chStr(v)}))`
+          : `parseDateTime64BestEffort(${chStr(v)}, 3${zone ? `, ${chStr(zone)}` : ''})`;
+      date = true;
     } else if (dateField && isEpoch(v)) {
       sql = /epoch_second/.test(fmt) && !/epoch_millis/.test(fmt) ? `toDateTime(${chNum(v, 'date en epoch secondes')})` : epochMillisSQL(v);
       date = true;
@@ -1663,9 +1672,14 @@ function rootAggs(ctx, env, aggs) {
 function selectList(ctx, dsl) {
   const cols = [];
   const src = dsl._source;
+  // « * » est toutes les colonnes ; un motif (http.*) devient COLUMNS('regex'), jamais un nom de colonne entre accents graves
   const addField = f => {
-    if (String(f).includes('*')) { cols.push(`COLUMNS(${chStr(globToRe(String(f).replace(/\.keyword$/, '')))})`); ctx.notes.add('opt', 'Motif de champs → COLUMNS()', 'COLUMNS(\'regex\') sélectionne dynamiquement les colonnes dont le nom correspond.'); }
-    else cols.push(mapField(ctx, f));
+    const name = String(f).replace(/\.keyword$/, '');
+    let col;
+    if (name === '*') col = '*';
+    else if (name.includes('*')) { col = `COLUMNS(${chStr(globToRe(name))})`; ctx.notes.add('opt', 'Motif de champs → COLUMNS()', 'COLUMNS(\'regex\') sélectionne dynamiquement les colonnes dont le nom correspond.'); }
+    else col = mapField(ctx, f);
+    if (!cols.includes(col)) cols.push(col);
   };
   if (src === false) { /* rien */ }
   else if (typeof src === 'string') addField(src);
@@ -1675,16 +1689,15 @@ function selectList(ctx, dsl) {
     const ex = src.excludes || src.exclude || [];
     if (!cols.length && ex.length) cols.push(`* EXCEPT (${ex.map(f => mapField(ctx, f)).join(', ')})`);
   }
-  for (const f of [].concat(dsl.fields || [], dsl.docvalue_fields || [], (dsl.stored_fields || []).filter(x => x !== '_none_'))) {
-    const name = isObj(f) ? f.field : f;
-    const m = mapField(ctx, name); if (!cols.includes(m)) cols.push(m);
-  }
+  for (const f of [].concat(dsl.fields || [], dsl.docvalue_fields || [], (dsl.stored_fields || []).filter(x => x !== '_none_'))) addField(isObj(f) ? f.field : f);
+  // Discover demande « * » et @timestamp : * couvre déjà toutes les colonnes
+  if (cols.includes('*')) cols.splice(0, cols.length, '*');
   for (const [n, sf] of Object.entries(dsl.script_fields || {})) {
     try { const sc = sf.script || sf; const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, { mode: 'expr', params: sc.params || {} }); cols.push(`${r.sql} AS ${aliasOf(n)}`); ctx.stats.ok++; }
     catch (e) { todo(ctx, `script_field ${n}`, e.message); }
   }
-  if (!cols.length) {
-    cols.push('*');
+  if (!cols.length || cols[0] === '*') {
+    if (!cols.length) cols.push('*');
     ctx.notes.add('opt', 'SELECT * sur une base colonnaire', 'ClickHouse lit chaque colonne séparément : listez uniquement les champs utiles dans _source pour réduire fortement les lectures disque.');
   }
   return cols;
@@ -1820,9 +1833,14 @@ function translateDSL(input, cfg, opts) {
   const columns = new Set();
   aliasGuard.columns = new Set(); aliasGuard.renamed = new Map();
   try {
-    translateRequest(input, cfg, opts, columns);
+    const first = translateRequest(input, cfg, opts, columns);
     aliasGuard.columns = columns; aliasGuard.renamed = new Map();
-    return translateRequest(input, cfg, opts, new Set());
+    const lostParams = first && first.lostParams && first.lostParams.length ? first.lostParams : null;
+    return translateRequest(input, cfg, lostParams ? Object.assign({}, opts, { lostParams }) : opts, new Set());
+  } catch (e) {
+    // Garde-fou : une construction hors de portée (pile épuisée) devient un refus, pas une erreur interne
+    if (e instanceof RangeError) return { error: 'Requête trop imbriquée pour être traduite.' };
+    throw e;
   } finally {
     aliasGuard.columns = new Set(); aliasGuard.renamed = new Map();
   }
@@ -1845,6 +1863,18 @@ function translateRequest(input, cfg, opts, columns) {
   if (!isObj(dsl)) return { error: 'La requête doit être un objet JSON.' };
   if (dsl.params && isObj(dsl.params.body)) { index = index || dsl.params.index || ''; dsl = dsl.params.body; }
   else if (isObj(dsl.body) && (dsl.index || Object.keys(dsl).length <= 3)) { index = index || dsl.index || ''; dsl = dsl.body; }
+  // Au-delà, la traduction récursive épuiserait la pile ; Elasticsearch limite lui aussi l’imbrication
+  if (jsonDepth(dsl) > MAX_DSL_DEPTH) return { error: `Requête refusée : imbriquée sur plus de ${MAX_DSL_DEPTH} niveaux.` };
+  const check = checkDSL(dsl);
+  if (check.errors.length) {
+    const more = check.errors.length - 1;
+    return { error: `Requête refusée, comme Elasticsearch la refuserait : ${check.errors[0]}${more ? ` (et ${more} autre${more > 1 ? 's' : ''} erreur${more > 1 ? 's' : ''})` : ''}.` };
+  }
+  const tpl = extractTemplates(dsl);
+  dsl = tpl.dsl; ctx.params = tpl.params;
+  const fail = msg => ({ error: restoreTemplates(msg, ctx.params) });
+  const lost = (opts.lostParams || []).map(p => ({ kind: 'todo', label: `modèle « ${p.source} »`, detail: 'La valeur n’est connue qu’à l’exécution, mais cet emplacement (recherche plein texte, intervalle, taille…) demande une valeur fixée à la traduction.' }));
+  const guards = applyStrictIssues(ctx, check.issues.concat(tpl.issues, lost));
   const { table, matched } = resolveTable(ctx, index);
   ctx.table = table;
   const env = { table, baseWhere: [] };
@@ -1874,7 +1904,9 @@ function translateRequest(input, cfg, opts, columns) {
   // Requête
   let where = [];
   try { where = dsl.query ? conjunctsOf(ctx, dsl.query) : []; }
-  catch (e) { return { error: `Requête non analysable : ${e.message}` }; }
+  catch (e) { return fail(`Requête non analysable : ${e.message}`); }
+  // Élément à reprendre hors des clauses (option, paramètre, modèle) : la requête s’arrête sur throwIf
+  where = where.concat(guards);
   env.baseWhere = where;
   const statements = [];
   try {
@@ -1898,7 +1930,7 @@ function translateRequest(input, cfg, opts, columns) {
   } catch (e) {
     // Paramètre invalide (taille, sens de tri…) ou construction hors de portée : mieux vaut refuser
     // la requête, comme Elasticsearch le fait d’un paramètre invalide, que renvoyer un SQL douteux
-    return { error: `Traduction impossible : ${e.message}` };
+    return fail(`Traduction impossible : ${e.message}`);
   }
   if (!statements.length) statements.push({ title: 'Comptage', sql: sqlSelect({ select: ['count() AS count'], from: table, where }) });
   // Conseils
@@ -1913,8 +1945,15 @@ function translateRequest(input, cfg, opts, columns) {
   if (ctx.leadingWildcard) ctx.notes.add('opt', 'Joker en tête de motif', `Un motif qui commence par * impose de lire toute la colonne ${ctx.leadingWildcard}. Un index ngrambf_v1 permet d’éviter une partie des lectures.`, `ALTER TABLE ${table}\n    ADD INDEX idx_ngram ${ctx.leadingWildcard} TYPE ngrambf_v1(3, 65536, 3, 0) GRANULARITY 1;`);
   if (ctx.groupCols.size) ctx.notes.add('opt', 'LowCardinality pour les regroupements', `${[...ctx.groupCols].join(', ')} : si le nombre de valeurs distinctes reste sous ~10 000, le type LowCardinality(String) accélère nettement GROUP BY et réduit le stockage.`);
   if (statements.some(s => /\btop_\w+ AS \(\n/.test(s.sql))) ctx.notes.add('info', 'Top N imbriqués', 'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits en deux temps : une CTE top_<nom> retient les N premiers groupes du parent, puis la requête principale s’y limite, avec des comptes exacts là où Elasticsearch les estime par shard. Le filtre commun est nommé une fois (CTE base). ClickHouse recopie une CTE à chaque emploi : la table est lue une fois par CTE top_ et une fois par la requête principale.');
-  const sql = statements.map(s => `-- ${s.title}\n${withClause(ctx, s.sql)};`).join('\n\n');
-  const statementsOut = statements.map(s => ({ title: s.title, sql: withClause(ctx, s.sql) }));
+  // Modèles : marqueurs des littéraux → {nom:String} ; un marqueur hors littéral redevient lisible
+  const finish = s => restoreTemplates(bindParams(s, ctx.params), ctx.params);
+  const statementsOut = statements.map(s => ({ title: s.title, sql: finish(withClause(ctx, s.sql)) }));
+  const sql = statementsOut.map(s => `-- ${s.title}\n${s.sql};`).join('\n\n');
+  const params = paramsInSQL(statementsOut.map(s => s.sql), ctx.params);
+  if (params.found.length) {
+    const first = params.found[0].name;
+    ctx.notes.add('info', 'Paramètres de requête', `${params.found.map(p => `${p.source} → {${p.name}:${p.types.join(' | ')}}`).join(', ')}. La valeur est fournie à l’exécution : param_${first}=… dans l’URL de l’interface HTTP, --param_${first}=… avec clickhouse-client.`);
+  }
   // Champs runtime : conseil de matérialisation, avec un index quand le champ sert de filtre
   for (const r of Object.values(ctx.runtime)) {
     if (!r.tree) continue;
@@ -1944,6 +1983,8 @@ function translateRequest(input, cfg, opts, columns) {
   for (const [name, alias] of aliasGuard.renamed) ctx.notes.add('warn', `Agrégation « ${name} » renommée ${alias}`, `${rawAlias(name)} est aussi une colonne citée par la requête : un alias du même nom la masquerait partout, y compris dans WHERE. La colonne de résultat s’appelle donc ${alias}.`);
   const order = { err: 0, warn: 1, opt: 2, info: 3 };
   ctx.notes.list.sort((a, b) => order[a.level] - order[b.level]);
-  return { sql, statements: statementsOut, lists, notes: ctx.notes.list, stats: ctx.stats, table, index, matched, human: ctx.human, sentence: sentence(ctx.human) };
+  // Textes affichés : le marqueur d’un modèle redevient le modèle d’origine
+  const human = restoreDeep(ctx.human, ctx.params);
+  return { sql, statements: statementsOut, lists, notes: restoreDeep(ctx.notes.list, ctx.params), stats: ctx.stats, table, index, matched, human, sentence: sentence(human), parameters: params.found, lostParams: params.lost };
 }
 

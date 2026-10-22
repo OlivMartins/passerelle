@@ -2,6 +2,7 @@
 const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const verdictLabel = v => VERDICTS[v].charAt(0).toUpperCase() + VERDICTS[v].slice(1);
 const ICON_COPY = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></svg>';
 const store = {
   get(k, d) { try { const v = localStorage.getItem('passerelle:' + k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
@@ -116,11 +117,10 @@ async function saveFile(filename, data) {
 }
 
 /* ---------- Traductions ---------- */
+// Pastille d’un fichier : la couleur de son verdict (moteur, base.js)
 function statusOf(r) {
   if (!r || r.empty) return 'ok';
-  if (r.error || r.stats.ko) return 'err';
-  if (r.stats.approx || r.notes.some(n => n.level === 'warn')) return 'warn';
-  return 'ok';
+  return { ready: 'ok', review: 'warn' }[verdictOf(r)] || 'err';
 }
 function translate(kind, file) {
   if (!file) return { empty: true };
@@ -158,12 +158,13 @@ function render(kind) {
   // verdict
   const v = $('[data-role="verdict"]', view);
   if (r.empty) { v.hidden = true; }
-  else if (r.error) { v.hidden = false; v.innerHTML = `<p class="sentence error">${esc(r.error)}</p>`; }
+  else if (r.error) { v.hidden = false; v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-unrecognized"><i></i>${verdictLabel('unrecognized')}</span></div><p class="sentence error">${esc(r.error)}</p>`; }
   else {
     v.hidden = false;
     const { ok, approx, ko } = r.stats; const total = ok + approx + ko || 1;
-    const pct = Math.round((100 * (ok + approx)) / total);
-    v.innerHTML = `<div class="verdict-top"><span class="score">${pct} %</span><span class="score-label">traduit automatiquement</span>
+    const verdict = verdictOf(r);
+    // Le verdict d’abord : il dit si la sortie part telle quelle ; le pourcentage compte des clauses
+    v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-${verdict}"><i></i>${verdictLabel(verdict)}</span><span class="score">${coverage(r.stats).percent} %</span><span class="score-label">traduit automatiquement</span>
       <span class="counts"><span><i class="c-ok"></i>${ok} direct${ok > 1 ? 's' : ''}</span><span><i class="c-approx"></i>${approx} à vérifier</span><span><i class="c-ko"></i>${ko} à reprendre</span></span></div>
       <div class="gauge" role="img" aria-label="${ok} éléments traduits directement, ${approx} à vérifier, ${ko} à reprendre"><span class="c-ok" style="width:${(100 * ok) / total}%"></span><span class="c-approx" style="width:${(100 * approx) / total}%"></span><span class="c-ko" style="width:${(100 * ko) / total}%"></span></div>
       <p class="sentence">${esc(r.sentence || '')}</p>`;
@@ -383,9 +384,9 @@ function renderAPI() {
   <div class="doc">
     <section><h2>Contrat d’API</h2><p>Service sans état, authentifié par jeton, documenté en OpenAPI. Les réponses reprennent exactement ce qu’affiche l’interface : SQL ou configuration, remarques et taux de couverture.</p>
       <div class="endpoints">${[
-        ['POST', '/v1/translate/dsl?index=logs-*', 'Traduit une requête DSL (JSON brut ou format console Kibana). Renvoie sql, statements, notes et coverage.'],
-        ['POST', '/v1/translate/logstash?format=yaml', 'Traduit un pipeline .conf. Renvoie la configuration Vector, la topologie et les remarques.'],
-        ['POST', '/v1/validate/sql', 'Exécute EXPLAIN indexes = 1 sur le ClickHouse de recette et renvoie le plan.'],
+        ['POST', '/v1/translate/dsl?index=logs-*', 'Traduit une requête DSL (JSON brut ou format console Kibana). Renvoie verdict, sql, statements, parameters, notes et coverage.'],
+        ['POST', '/v1/translate/logstash?format=yaml', 'Traduit un pipeline .conf. Renvoie le verdict, la configuration Vector, la topologie et les remarques.'],
+        ['POST', '/v1/validate/sql', 'Vérifie les tables lues (EXPLAIN AST), puis exécute EXPLAIN indexes = 1 sur le ClickHouse de recette et renvoie le plan. Paramètres : param_nom=… dans l’adresse.'],
         ['POST', '/v1/validate/vector', 'Compile la configuration et son VRL avec vector validate.'],
         ['GET', '/v1/config', 'Configuration active, secrets masqués.']
       ].map(([vb, p, d]) => `<div class="endpoint"><span class="verb">${vb}</span><code>${esc(p)}</code><p>${d}</p></div>`).join('')}</div></section>

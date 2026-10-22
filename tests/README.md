@@ -12,6 +12,8 @@ Un changement du SQL ou du YAML généré fait échouer le test et apparaît en 
 npm run test:update
 ```
 
+S’y ajoutent des garde-fous ciblés : refus des clés inconnues, verdicts, paramètres de requête, sorties Elasticsearch, profondeur d’imbrication, et aucun nom déclaré deux fois dans le binaire assemblé.
+
 `npm test` lance aussi `tests/server/run.mjs` : le serveur et la ligne de commande, interrogés à travers une fausse instance ClickHouse et un faux binaire Vector (Linux seulement). Il couvre les codes HTTP, les refus de sécurité, les options et les codes de sortie.
 
 ## Banc différentiel : `npm run test:diff`
@@ -42,7 +44,7 @@ tests/differential/es.sh down
 
 Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Le banc refuse de tourner sur une version plus ancienne : ses résultats ne diraient rien de la cible. La CI épingle la 26.9 ; `clickhouse.sh` prend la version voulue en premier argument pour en essayer une autre.
 
-Côté Elasticsearch, le banc donne le même bilan sur trois versions majeures : `ES_VERSION=7.17.29`, `8.19.22` (celle de la CI) et `9.5.4`.
+Côté Elasticsearch, le banc donne le même bilan sur trois versions majeures : `ES_VERSION=7.17.29`, `8.19.22` et `9.5.4`. La CI les joue toutes les trois, à chaque changement et avant chaque release.
 
 Options : `--only=<regex>` pour ne lancer que certains cas, `--variant=N` ou `D` pour un seul schéma, `--verbose` pour le détail de chaque cas, `--sql` pour afficher le SQL traduit.
 

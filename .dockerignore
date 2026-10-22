@@ -1,0 +1,11 @@
+# Seuls package.json, scripts/, src/, examples/, packaging/passerelle.yaml, LICENSE et NOTICE entrent dans l'image
+.git
+.github
+node_modules
+dist
+tests
+docs
+*.tar.gz
+*.sha256
+.env
+*.env
