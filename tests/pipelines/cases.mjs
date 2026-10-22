@@ -103,7 +103,7 @@ export const CASES = [
   // %{champ} dans une valeur
   { id: 'sprintf_types', filter: 'mutate { add_field => { "k" => "%{n}" } }', events: [{ n: 'a' }, { n: 1 }, { n: 1.5 }, { n: true }] },
   { id: 'sprintf_champ_absent', filter: 'mutate { add_field => { "k" => "v-%{n}" } }', events: [{ m: 1 }, { n: null }], known: 'pour un champ absent ou nul, Logstash laisse « %{n} » dans la valeur ; la traduction écrit une chaîne vide' },
-  { id: 'sprintf_tableau_objet', filter: 'mutate { add_field => { "k" => "%{n}" } }', events: [{ n: ['a', 'b'] }, { n: { a: 1 } }], known: 'Logstash écrit un tableau « a,b » et un objet en JSON ; la traduction écrit une chaîne vide' },
+  { id: 'sprintf_tableau_objet', filter: 'mutate { add_field => { "k" => "%{n}" } }', events: [{ n: ['a', 'b'] }, { n: { a: 1 } }] },
   { id: 'sprintf_nombres', filter: 'mutate { add_field => { "k" => "%{n}" } }', codec: 'json', lines: ['{"n":1.0}', '{"n":1e21}'], known: 'un flottant sans décimale s’écrit « 1.0 » et « 1.0E21 » pour Logstash, « 1 » et « 1000000000000000000000 » pour la traduction' },
   { id: 'sprintf_imbrique', filter: 'mutate { add_field => { "k" => "%{[a][b]}/%{[a][c]}" } }', events: [{ a: { b: 'x', c: 2 } }] },
   { id: 'sprintf_date', filter: 'mutate { add_field => { "jour" => "%{+YYYY.MM.dd}" "heure" => "%{+HH:mm:ss}" } }', events: [{ '@timestamp': '2026-03-10T08:15:30.123Z' }, { '@timestamp': '2026-12-31T23:59:59.999Z' }] },

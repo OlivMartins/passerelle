@@ -12,4 +12,4 @@ transforms:
     inputs: [mutate]
     source: |
       # mutate
-      .k = (to_string(%cle) ?? "")
+      .k = (to_string(%cle) ?? join(%cle, ",") ?? encode_json(%cle))

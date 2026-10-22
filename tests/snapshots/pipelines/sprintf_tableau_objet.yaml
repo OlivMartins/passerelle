@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .k = (to_string(.n) ?? "")
+      .k = (to_string(.n) ?? join(.n, ",") ?? encode_json(.n))

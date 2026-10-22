@@ -103,7 +103,7 @@ transforms:
       }
       if is_string(.http.method) { .http.method = downcase!(.http.method) }
       .event.dataset = "nginx.access"
-      .kafka.source_topic = (to_string(%kafka.topic) ?? "")
+      .kafka.source_topic = (to_string(%kafka.topic) ?? join(%kafka.topic, ",") ?? encode_json(%kafka.topic))
       del(.message)
       del(.agent)
   condition_6:

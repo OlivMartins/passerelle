@@ -7,4 +7,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # fingerprint
-      .empreinte = sha2((to_string(.a) ?? "") + "|" + (to_string(.b) ?? ""), variant: "SHA-256")
+      .empreinte = sha2((to_string(.a) ?? join(.a, ",") ?? encode_json(.a)) + "|" + (to_string(.b) ?? join(.b, ",") ?? encode_json(.b)), variant: "SHA-256")

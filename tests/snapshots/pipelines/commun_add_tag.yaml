@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .tags = compact(flatten([.tags, "t1", "t-" + (to_string(.n) ?? "")]))
+      .tags = compact(flatten([.tags, "t1", "t-" + (to_string(.n) ?? join(.n, ",") ?? encode_json(.n))]))

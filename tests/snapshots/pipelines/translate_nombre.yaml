@@ -7,7 +7,7 @@ transforms:
     source: |
       # translate
       if exists(.code) && !exists(.libelle) {
-        key = (to_string(.code) ?? "")
+        key = (to_string(.code) ?? join(.code, ",") ?? encode_json(.code))
         if key == "200" {
           .libelle = "OK"
         } else if key == "404" {

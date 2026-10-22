@@ -207,7 +207,7 @@ class VrlGen {
   present(p) { const t = this.tget(p); return t !== 'any' && t !== 'null'; }
   tset(p, t) { for (const k of [...this.types.keys()]) if (k !== '.' && (k === p || k.startsWith(p + '.'))) this.types.delete(k); if (t && t !== 'any') this.types.set(p, t); }
   treset() { const r = this.types.get('.'); this.types.clear(); if (r) this.types.set('.', r); }
-  asStr(p) { const t = this.tget(p); if (t === 'str') return p; if (t === 'null') return '""'; if (t === 'arr') return `(join(${p}, ",") ?? "")`; return `(to_string(${p}) ?? "")`; }
+  asStr(p) { const t = this.tget(p); if (t === 'str') return p; if (t === 'null') return '""'; if (t === 'arr') return `(join(${p}, ",") ?? "")`; return `(to_string(${p}) ?? join(${p}, ",") ?? encode_json(${p}))`; }
   sprintf(s) {
     s = String(s);
     const parts = []; let last = 0; const re = /%\{([^}]+)\}/g; let m; let dyn = false;

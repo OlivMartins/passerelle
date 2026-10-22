@@ -67,7 +67,7 @@ transforms:
     source: |
       # translate
       if exists(.data.country) && !exists(.data.region) {
-        key = (to_string(.data.country) ?? "")
+        key = (to_string(.data.country) ?? join(.data.country, ",") ?? encode_json(.data.country))
         if key == "FR" {
           .data.region = "EMEA"
         } else if key == "DE" {
@@ -85,7 +85,7 @@ transforms:
     inputs: [translate]
     source: |
       # fingerprint
-      if exists(.data.user_id) { .data.user_hash = sha2((to_string(.data.user_id) ?? ""), variant: "SHA-256") }
+      if exists(.data.user_id) { .data.user_hash = sha2((to_string(.data.user_id) ?? join(.data.user_id, ",") ?? encode_json(.data.user_id)), variant: "SHA-256") }
   condition_5:
     type: remap
     inputs: [fingerprint]

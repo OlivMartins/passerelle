@@ -7,4 +7,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      . = remove!(., split(replace((to_string(.nom) ?? ""), r'^\[|\]$$', ""), "]["))
+      . = remove!(., split(replace((to_string(.nom) ?? join(.nom, ",") ?? encode_json(.nom)), r'^\[|\]$$', ""), "]["))

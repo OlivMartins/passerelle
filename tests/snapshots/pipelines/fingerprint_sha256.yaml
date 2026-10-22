@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # fingerprint
-      if exists(.message) { .empreinte = sha2((to_string(.message) ?? ""), variant: "SHA-256") }
+      if exists(.message) { .empreinte = sha2((to_string(.message) ?? join(.message, ",") ?? encode_json(.message)), variant: "SHA-256") }

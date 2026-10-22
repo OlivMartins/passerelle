@@ -53,7 +53,7 @@ transforms:
     inputs: [dissect]
     source: |
       # mutate
-      .date_time = (to_string(.date) ?? "") + " " + (to_string(.time) ?? "")
+      .date_time = (to_string(.date) ?? join(.date, ",") ?? encode_json(.date)) + " " + (to_string(.time) ?? join(.time, ",") ?? encode_json(.time))
   date:
     type: remap
     inputs: [mutate]
