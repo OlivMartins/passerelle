@@ -4,6 +4,17 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Non publié]
 
+## [1.1.1] - 2026-10-22
+
+Correctifs de sécurité du service et de la ligne de commande, et écarts de traduction DSL → SQL résolus : 578 cas du banc différentiel donnent le même résultat qu’Elasticsearch, contre 494 en 1.1.0. Mise à jour recommandée pour tout service exposé.
+
+### À savoir avant de mettre à jour
+
+- **Configuration stricte.** Une clé inconnue dans `passerelle.yaml` est refusée : `check-config` sort en 1 et le service ne démarre pas. Lancez `passerelle check-config` avant de redémarrer.
+- **Ligne de commande stricte.** Une option inconnue ou sans valeur est une erreur, et `--fail-on` n’accepte que `todo`. Les scripts d’intégration continue qui passaient une option erronée sans effet échoueront désormais.
+- **Secrets.** `install.sh` passe `passerelle.env` en 0600 root:root, installation existante comprise. Si un secret a pu apparaître dans une réponse de validation Vector, changez-le.
+- **SQL généré.** Il change pour les cas listés ci-dessous (tri des égalités, champs texte, dates, multivalués). Les scripts qui exploitent la sortie de l’API ou de la CLI sont à vérifier.
+
 ### Sécurité
 
 - Serveur : une requête sur l’adresse `//` arrêtait le processus. Elle reçoit désormais une réponse 400.
@@ -141,6 +152,7 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
-[Non publié]: https://github.com/OlivMartins/passerelle/compare/v1.1.0...HEAD
+[Non publié]: https://github.com/OlivMartins/passerelle/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/OlivMartins/passerelle/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/OlivMartins/passerelle/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/OlivMartins/passerelle/releases/tag/v1.0.0
