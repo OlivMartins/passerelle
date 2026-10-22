@@ -4,6 +4,10 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Non publié]
 
+### À savoir avant de mettre à jour
+
+- **Vector 0.57 et suivants.** Une configuration générée qui utilise des variables `${VAR}`, ou des `$` doublés dans son VRL, doit être lancée avec `--dangerously-allow-env-var-interpolation`, ce que rappelle son en-tête.
+
 ### Ajouté
 
 - Banc d’équivalence Logstash / Vector (`npm run test:pipelines`) : chaque cas est joué dans Logstash, sa traduction dans Vector, et les événements produits sont comparés champ par champ, dans les deux modes de compatibilité ECS de Logstash. Les écarts connus sont inventoriés dans `tests/pipelines/cases.mjs`. Il demande Docker ; la CI épingle Logstash 9.5.5 et Vector 0.59.0.
@@ -22,6 +26,29 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 - `date` : le format `UNIX` garde les décimales, en nombre comme en chaîne, et refuse ce que Logstash refuse (notation scientifique, booléen) ; un champ cible autre que `@timestamp` s’écrit à la milliseconde, en UTC, comme `@timestamp`. Une option `locale` autre que l’anglais avec des noms de mois ou de jours est maintenant signalée « à vérifier ».
 - `date`, format sans année (`MMM dd HH:mm:ss`, celui de syslog) : la date n’est plus refusée. Comme Logstash, la traduction prend l’année en cours, celle d’avant pour un événement de décembre lu en janvier, celle d’après pour un événement de janvier lu en décembre.
 - `remove_field` avec un nom calculé (`%{nom}`) : le champ désigné est retiré, que la valeur obtenue s’écrive `a` ou `[a][b]`. Le nom n’était pas résolu, et rien n’était retiré.
+- Codec `json` :
+  - une ligne invalide est gardée dans `message` avec `_jsonparsefailure`, au lieu d’être perdue ;
+  - la source `file` avec ce codec n’est plus refusée par Vector.
+- `@timestamp` venu du document (codec ou filtre `json`) : converti en UTC à la milliseconde ; une valeur illisible est rangée dans `_@timestamp` avec `_timestampparsefailure`.
+- `add_field` et les captures `grok` sur un champ qui existe déjà : la valeur est ajoutée et le champ devient un tableau, sauf `overwrite`.
+- Dans un motif grok à alternative (`HTTPD_ERRORLOG`), la capture de la seconde branche garde son nom.
+- `%{champ}` sur un tableau ou un objet : « a,b » ou le JSON de l’objet, au lieu d’une chaîne vide.
+- `csv` :
+  - colonnes `column<n>` au-delà de `columns`, ou sans `columns` ;
+  - valeur vide à null, colonne sans valeur absente ;
+  - `target` appliqué.
+- `date` en `ISO8601` : jour seul, heure sans secondes et virgule décimale sont lus.
+- `mutate convert` lit les nombres comme Logstash (espaces, séparateurs « , » et « _ », décimales tronquées, `1e3`, `0x1A`).
+- `fingerprint` :
+  - avec plusieurs sources, la chaîne hachée est celle de Logstash ;
+  - `MURMUR3`, qui n’existe pas en VRL, est déclaré « à reprendre » au lieu d’être remplacé par un autre hachage.
+- Comparaison à un nombre sur un champ absent ou qui n’est pas un nombre : la condition est fausse, et la traduction signale que Logstash, lui, jette l’événement.
+- `topic_id => "%{type}"` : le sink Kafka reçoit `dangerously_allow_unconfined_template_resolution`, sans lequel Vector 0.57 refuse la configuration.
+- Remarques ajoutées pour les écarts gardés volontairement :
+  - un tableau n’est pas traité élément par élément dans `mutate` et `truncate` ;
+  - une conversion ratée ne pose pas `_mutate_error` ;
+  - `%{champ}` absent donne une chaîne vide ;
+  - la forme de l’objet `xml` est à vérifier.
 
 ## [1.1.1] - 2026-10-22
 
