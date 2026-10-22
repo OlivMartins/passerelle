@@ -391,8 +391,7 @@ class VrlGen {
         // Formes ISO8601 que Logstash lit : avec ou sans fuseau, espace ou T, secondes et décimales facultatives
         // (point ou virgule), ou le jour seul, à minuit
         this.emit(`iso = replace(${this.tget(src) === 'str' ? src : `string(${src}) ?? ""`}, ",", ".")`);
-        const forms = ['%+', '%Y-%m-%dT%H:%M:%S%.f', '%Y-%m-%d %H:%M:%S%.f', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M'].map(x => `parse_timestamp(iso, ${vq(x)}${tz})`);
-        this.emit(`ts = ${forms.join(' ?? ')} ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S"${tz}) ?? null`);
+        this.emit(`ts = ${isoParse('iso', tz)}`);
       }
       else if (l.yearless) {
         // Format sans année : l’année en cours, corrigée d’un an quand décembre et janvier se croisent
@@ -737,6 +736,12 @@ function kafkaSecurity(v, s, cfg, obj) {
     if (s.ssl_truststore_location) v.note('warn', 'Truststore Java', `${s.ssl_truststore_location} (JKS) doit être converti en PEM pour Vector : keytool -exportcert -rfc.`);
   }
 }
+// Lecture ISO8601 à la façon de Logstash : avec ou sans fuseau, espace ou T, secondes et décimales facultatives,
+// ou le jour seul (à minuit) ; null si rien ne convient. x : variable VRL contenant la chaîne, virgule décimale déjà ramenée à un point.
+function isoParse(x, tz) {
+  const forms = ['%+', '%Y-%m-%dT%H:%M:%S%.f', '%Y-%m-%d %H:%M:%S%.f', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M'].map(f => `parse_timestamp(${x}, ${vq(f)}${tz || ''})`);
+  return `${forms.join(' ?? ')} ?? parse_timestamp(${x} + "T00:00:00", "%Y-%m-%dT%H:%M:%S"${tz || ''}) ?? null`;
+}
 function codecOf(c) { if (!c) return null; if (typeof c === 'string') return c; if (isObj(c)) return c.__plugin; return null; }
 function buildSource(v, st, cfg, idx, used) {
   const s = lsSettings(st); const name = uniq(used, compName(s.id || (st.name === 'kafka' ? 'kafka_in' : st.name + '_in')));
@@ -921,6 +926,16 @@ function translateLogstash(src, cfg) {
   const fin = new VrlGen(v);
   pending.forEach(l => fin.lines.push(l));
   if (cfg.vector.logstash_compat) {
+    // @timestamp venu du document (codec ou filtre json) : Logstash le convertit, ou range une valeur illisible dans
+    // _@timestamp avec _timestampparsefailure et garde l’horodatage d’ingestion
+    fin.comment('@timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp');
+    fin.open('if exists(."@timestamp") && !is_timestamp(."@timestamp")');
+    fin.emit('iso = replace(string(."@timestamp") ?? "", ",", ".")');
+    fin.emit(`ts = ${isoParse('iso')}`);
+    fin.open('if ts == null');
+    fin.emit('."_@timestamp" = ."@timestamp"'); fin.emit('."@timestamp" = now()'); fin.failTags(['_timestampparsefailure']);
+    fin.close('} else {'); fin.ind++; fin.emit('."@timestamp" = ts'); fin.close();
+    fin.close();
     fin.comment('Format de date identique à Logstash (millisecondes, UTC)');
     fin.open('if is_timestamp(."@timestamp")'); fin.emit('."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")'); fin.close();
   }

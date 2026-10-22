@@ -35,6 +35,18 @@ transforms:
     type: remap
     inputs: [stdin_in_init]
     source: |
+      # @timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp
+      if exists(."@timestamp") && !is_timestamp(."@timestamp") {
+        iso = replace(string(."@timestamp") ?? "", ",", ".")
+        ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
+        if ts == null {
+          ."_@timestamp" = ."@timestamp"
+          ."@timestamp" = now()
+          .tags = compact(flatten([.tags, "_timestampparsefailure"]))
+        } else {
+          ."@timestamp" = ts
+        }
+      }
       # Format de date identique à Logstash (millisecondes, UTC)
       if is_timestamp(."@timestamp") {
         ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")

@@ -33,6 +33,7 @@ export const CASES = [
   { id: 'transport_ligne', filter: '', lines: ['une ligne', 'une autre, avec des accents : été'] },
   { id: 'transport_objet', filter: '', events: [{ a: 1, b: 'deux', c: [3, 4.5], d: { e: null, f: true } }] },
   { id: 'transport_json_invalide', filter: '', codec: 'json', lines: ['{"a":1}', 'ligne non json', '{"a":2}'] },
+  { id: 'transport_horodatage_document', filter: '', codec: 'json', lines: ['{"@timestamp":"2026-03-10T09:15:30+01:00","a":1}', '{"@timestamp":"pas une date","a":2}'] },
   { id: 'transport_event_original', filter: '', lines: ['une ligne'], exact: ['original'], known: { v8: 'la traduction ne pose pas [event][original], que les codecs de Logstash ajoutent en mode ECS' } },
   { id: 'transport_horodatage_ingestion', filter: '', lines: ['une ligne'], exact: ['horodatage'], known: 'Logstash écrit l’horodatage d’ingestion à la nanoseconde, la traduction à la milliseconde' },
 
@@ -207,7 +208,8 @@ export const CASES = [
   { id: 'json_source_non_chaine', filter: 'json { source => "charge" }', events: [{ charge: 42 }, { charge: { deja: 'objet' } }] },
   { id: 'json_source_absente', filter: 'json { source => "charge" }', events: [{ n: 1 }, { charge: null }] },
   { id: 'json_horodatage', filter: 'json { source => "message" }', lines: ['{"@timestamp":"2026-03-10T08:15:30.123Z","a":1}'] },
-  { id: 'json_horodatage_invalide', filter: 'json { source => "message" }', lines: ['{"@timestamp":"pas une date","a":2}'], known: 'Logstash garde l’horodatage d’ingestion, range la valeur dans _@timestamp et pose _timestampparsefailure ; la traduction écrit la chaîne dans @timestamp' },
+  { id: 'json_horodatage_fuseau', filter: 'json { source => "message" }', lines: ['{"@timestamp":"2026-03-10T09:15:30+01:00","a":1}', '{"@timestamp":"2026-03-10T08:15:30Z","a":2}'] },
+  { id: 'json_horodatage_invalide', filter: 'json { source => "message" }', lines: ['{"@timestamp":"pas une date","a":2}'] },
   { id: 'json_etiquette_echec', filter: 'json { source => "message" tag_on_failure => ["json_illisible"] }', lines: ['pas du json', '[1,2]'] },
 
   // kv
