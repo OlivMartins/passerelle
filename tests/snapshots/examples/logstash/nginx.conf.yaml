@@ -1,5 +1,6 @@
 # Couverture : 8 directs, 1 à vérifier, 0 à reprendre
 # À vérifier : useragent → parse_user_agent
+# À vérifier : Comparaison à un nombre
 
 # Configuration Vector générée par Passerelle depuis un pipeline Logstash
 # Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
@@ -116,7 +117,7 @@ transforms:
     type: remap
     inputs: [mutate]
     source: |
-      if (to_float(.http.status) ?? 0.0) >= 500 {
+      if ((is_integer(.http.status) || is_float(.http.status)) && (to_float(.http.status) ?? 0.0) >= 500) {
         # mutate
         .tags = compact(flatten([.tags, "erreur_serveur"]))
       } else if (match(.url.path, r'^/health') ?? false) {

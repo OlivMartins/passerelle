@@ -299,7 +299,15 @@ class VrlGen {
       case 'cmp': {
         if (c.cmp === '==' || c.cmp === '!=') return `${this.rv(c.l)} ${c.cmp} ${this.rv(c.r)}`;
         const numeric = c.l.t === 'num' || c.r.t === 'num';
-        if (numeric) return `${this.numOf(c.l)} ${c.cmp} ${this.numOf(c.r)}`;
+        if (numeric) {
+          // Un champ absent ou qui n’est pas un nombre : Logstash jette l’événement (avertissement dans son journal).
+          // La traduction le garde et tient la condition pour fausse.
+          const guards = [c.l, c.r].filter(x => x.t === 'field').map(x => this.rv(x)).filter(p => !['int', 'float'].includes(this.tget(p))).map(p => `(is_integer(${p}) || is_float(${p}))`);
+          const cmp = `${this.numOf(c.l)} ${c.cmp} ${this.numOf(c.r)}`;
+          if (!guards.length) return cmp;
+          this.v.note('warn', 'Comparaison à un nombre', 'Quand le champ comparé est absent ou n’est pas un nombre, Logstash jette l’événement (avec un avertissement dans son journal). La traduction le garde et tient la condition pour fausse.');
+          return `(${guards.join(' && ')} && ${cmp})`;
+        }
         const st = x => (x.t === 'field' ? this.asStr(this.rv(x)) : this.rv(x));
         return `${st(c.l)} ${c.cmp} ${st(c.r)}`;
       }
