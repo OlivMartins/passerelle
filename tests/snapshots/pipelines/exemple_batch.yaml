@@ -1,5 +1,6 @@
 # Couverture : 8 directs, 0 à vérifier, 1 à reprendre
 # À reprendre : Filtre ruby non traduit (ligne 10)
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
 
 transforms:
   dissect:

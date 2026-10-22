@@ -142,6 +142,11 @@ for (const q of ['status:500) AND service:api', 'status:(500', '(status:500', 's
 // Les secrets passent par des variables d’environnement, jamais par la configuration générée
 const ls = E.translateLogstash(rd('examples/logstash/routage.conf'), E.DEFAULT_CONFIG);
 check(ls.yaml.includes("'${KAFKA_PASSWORD}'") && ls.env.includes('KAFKA_PASSWORD'), 'routage.conf : identifiants Kafka référencés par variable d’environnement');
+// Vector 0.57 et suivants : interpolation à demander, et pas de ${…} dans les commentaires, que Vector interpole aussi
+check(/^# .*--dangerously-allow-env-var-interpolation/m.test(ls.yaml) && !/^#.*\$\{/m.test(ls.yaml), 'routage.conf : en-tête qui demande l’interpolation, sans ${…} dans les commentaires');
+// Topic tiré entièrement d’un champ : Vector 0.57 et suivants l’exigent explicitement
+const topicDyn = E.translateLogstash('input { stdin {} } output { kafka { topic_id => "%{type}" } }', E.DEFAULT_CONFIG);
+check(/topic: '\{\{ type \}\}'\n\s+dangerously_allow_unconfined_template_resolution: true/.test(topicDyn.yaml), 'topic_id « %{type} » : dangerously_allow_unconfined_template_resolution posé');
 // Le VRL de préparation suppose le namespace de logs : chaque source doit le déclarer, Kafka ou non
 const everyInput = 'input { kafka { topics => ["t"] } stdin { } file { path => "/var/log/app.log" } tcp { port => 5000 } udp { port => 5001 } http { port => 8080 } beats { port => 5044 } generator { } } output { stdout { } }';
 const namespaced = cfg => Object.values(E.translateLogstash(everyInput, cfg).config.sources).filter(s => s.log_namespace === true).length;

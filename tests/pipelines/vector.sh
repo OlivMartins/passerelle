@@ -9,8 +9,10 @@ DIR="${1:?usage : $0 <dossier>}"
 NAME="passerelle-pipelines-vector"
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
-# data/ tient lieu de /var/lib/vector : le conteneur tourne avec l'utilisateur courant, pas en root
-exec docker run --rm --name "$NAME" --user "$(id -u):$(id -g)" \
+# data/ tient lieu de /var/lib/vector : le conteneur tourne avec l'utilisateur courant, pas en root.
+# Vector 0.57 et suivants n'interpolent ${VAR} (et ne ramènent $$ à $) qu'avec l'option demandée par
+# l'en-tête des configurations générées : le banc la donne, comme le fera l'utilisateur.
+exec docker run --rm --name "$NAME" --user "$(id -u):$(id -g)" -e VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true \
   -v "$DIR:/work" -v "$DIR/data:/var/lib/vector" --entrypoint /bin/sh \
   "timberio/vector:${VECTOR_VERSION}-debian" -c '
     vector --version

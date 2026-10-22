@@ -1,4 +1,5 @@
 # Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
 
 transforms:
   dissect:

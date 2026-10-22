@@ -1,8 +1,10 @@
 # Couverture : 8 directs, 0 à vérifier, 1 à reprendre
 # À reprendre : Filtre ruby non traduit (ligne 17)
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
 
 # Configuration Vector générée par Passerelle depuis un pipeline Logstash
 # Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+# Vector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)
 
 data_dir: /var/lib/vector
 api:

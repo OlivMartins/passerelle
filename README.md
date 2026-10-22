@@ -164,7 +164,7 @@ Passerelle signale aussi que `heure` gagnerait à être une colonne matérialis�
 
 - **Chaque filtre devient une étape VRL nommée** : grok, dissect, date, mutate, json, kv, geoip, translate, fingerprint, et neuf autres. Le code est typé selon les règles du compilateur VRL : aucune erreur ignorée en silence.
 - **Les sorties conditionnelles deviennent un aiguillage** `route`, avec une destination par branche.
-- **Kafka reste au cœur du flux** : mêmes topics, groupe de consommateurs, SASL et TLS. Les identifiants sont référencés par des variables d’environnement plutôt qu’écrits en clair.
+- **Kafka reste au cœur du flux** : mêmes topics, groupe de consommateurs, SASL et TLS. Les identifiants sont référencés par des variables d’environnement plutôt qu’écrits en clair ; depuis la 0.57, Vector ne les remplace qu’avec l’option `--dangerously-allow-env-var-interpolation`, que rappelle l’en-tête du fichier généré.
 - **Rien ne change pour les consommateurs** : `@timestamp`, `@version` et le format de date de Logstash sont reproduits.
 - **Bascule sans risque** : en mode shadow, Vector lit avec son propre groupe et écrit dans des topics `-shadow`, à côté de Logstash, le temps de comparer.
 

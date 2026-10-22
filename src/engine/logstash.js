@@ -786,6 +786,11 @@ function buildSink(v, st, cfg, used, singleKafka) {
     let topic = singleKafka && cfg.kafka.output_topic ? cfg.kafka.output_topic : tplOf(s.topic_id || 'logstash');
     if (cfg.vector.shadow_mode) topic += '-shadow';
     sink = { type: 'kafka', inputs: [], bootstrap_servers: cfg.kafka.bootstrap_servers || s.bootstrap_servers || 'localhost:9092', topic };
+    // Vector 0.57 et suivants refusent un nom de topic tiré entièrement d’un champ, sans préfixe littéral
+    if (/^\{\{/.test(topic)) {
+      sink.dangerously_allow_unconfined_template_resolution = true;
+      v.note('warn', 'Topic tiré d’un champ', `Le topic « ${topic} » vient entièrement de l’événement : Vector 0.57 et suivants l’exigent explicitement (dangerously_allow_unconfined_template_resolution). Un événement peut ainsi écrire dans n’importe quel topic ; ajoutez un préfixe fixe si possible.`);
+    }
     if (s.message_key) { const m = /^%\{([^}]+)\}$/.exec(String(s.message_key)); if (m) sink.key_field = vPathOf(fieldSegs(m[1]), v.ns).replace(/^\./, ''); else v.note('warn', 'message_key', 'Une clé mixte (texte + champ) n’est pas reprise : Vector utilise un champ comme clé.'); }
     const codec = codecOf(s.codec);
     if (!codec) v.note('warn', 'Codec de sortie absent', 'Logstash utilise le codec plain par défaut ; Vector écrit ici en JSON, format le plus courant pour Kafka → Kafka.');
@@ -937,6 +942,9 @@ function translateLogstash(src, cfg) {
     if (t.route) for (const k of Object.keys(t.route)) t.route[k] = esc(t.route[k]);
   }
   if (dollar) v.note('info', 'Symbole $ doublé', 'Vector remplace $VAR et ${VAR} par des variables d’environnement dans tout le fichier : les $ du code VRL sont écrits $$ pour rester littéraux.');
+  // Depuis Vector 0.57, ce remplacement n’a lieu qu’avec une option explicite : sans elle, ${VAR} reste tel quel et $$ n’est pas ramené à $
+  const interpolation = dollar || v.env.size > 0;
+  if (interpolation) v.note('warn', 'Vector 0.57 et suivants : interpolation à activer', 'Ce fichier utilise des variables d’environnement ${VAR} ou des $ doublés. Lancez Vector avec --dangerously-allow-env-var-interpolation, ou VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true dans son environnement.');
   // L’API de Vector n’a pas d’authentification : elle n’écoute que sur la boucle locale, ce qui suffit à « vector top »
   const config = { data_dir: '/var/lib/vector', api: { enabled: true, address: '127.0.0.1:8686' } };
   v.note('info', 'API Vector sur la boucle locale', 'L’API de Vector (vector top, santé) écoute sur 127.0.0.1:8686 : elle n’a pas d’authentification et ne doit pas être joignable du réseau. Dans un conteneur, pour l’atteindre depuis l’hôte, remplacez l’adresse par 0.0.0.0:8686 et ne publiez le port que sur une interface de confiance.');
@@ -946,7 +954,7 @@ function translateLogstash(src, cfg) {
   if (cfg.vector.acknowledgements) v.note('opt', 'Accusés de réception de bout en bout', 'Les offsets Kafka ne sont validés qu’après l’écriture dans le topic de sortie : aucun message perdu en cas d’arrêt brutal.');
   if (cfg.vector.shadow_mode) v.note('info', 'Mode shadow', 'Le groupe de consommateurs et les topics de sortie sont suffixés par -shadow : Vector tourne en parallèle de Logstash sans lui prendre de partitions.');
   if (v.ns) v.note('info', 'Namespace de logs', 'log_namespace isole les métadonnées Kafka (topic, offset, clé) de la charge utile : les messages écrits restent identiques à ceux de Logstash.');
-  const header = `Configuration Vector générée par Passerelle depuis un pipeline Logstash\nVérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>${v.env.size ? `\nVariables d’environnement attendues : ${[...v.env].join(', ')}` : ''}`;
+  const header = `Configuration Vector générée par Passerelle depuis un pipeline Logstash\nVérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>${interpolation ? '\nVector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)' : ''}${v.env.size ? `\nVariables d’environnement attendues : ${[...v.env].join(', ')}` : ''}`;
   const yaml = header.split('\n').map(l => '# ' + l).join('\n') + '\n\n' + toYAML(config) + '\n';
   const toml = header.split('\n').map(l => '# ' + l).join('\n') + '\n\n' + toTOML(config) + '\n';
   const order = { err: 0, warn: 1, opt: 2, info: 3 };

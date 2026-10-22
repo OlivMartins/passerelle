@@ -60,7 +60,7 @@ export const CASES = [
 
   // mutate : chaînes
   { id: 'mutate_gsub', filter: 'mutate { gsub => ["a", "[0-9]+", "#"] }', events: [{ a: 'abc123def45' }, { a: 42 }] },
-  { id: 'mutate_gsub_groupes', filter: 'mutate { gsub => ["a", "(\\w+)@(\\w+)", "\\2 at \\1"] }', events: [{ a: 'alice@example' }], known: 'les groupes \\1 et \\2 sont bien traduits en ${1} et ${2}, mais le moteur double chaque « $ » du VRL pour l’interpolation des variables d’environnement, que Vector ne fait plus par défaut depuis la 0.58 au moins : le texte « ${2} at ${1} » est écrit tel quel' },
+  { id: 'mutate_gsub_groupes', filter: 'mutate { gsub => ["a", "(\\w+)@(\\w+)", "\\2 at \\1"] }', events: [{ a: 'alice@example' }] },
   { id: 'mutate_majuscules', filter: 'mutate { uppercase => ["a"] }', events: [{ a: 'été Abc ß' }, { a: 42 }] },
   { id: 'mutate_minuscules', filter: 'mutate { lowercase => ["a"] }', events: [{ a: 'ÉTÉ Abc' }, { a: 42 }] },
   { id: 'mutate_capitalize', filter: 'mutate { capitalize => ["a"] }', events: [{ a: 'abc DEF' }, { a: 'x' }, { a: 42 }] },
