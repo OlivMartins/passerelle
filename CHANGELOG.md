@@ -6,10 +6,17 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### À savoir avant de mettre à jour
 
+- **Compatibilité ECS, `v8` par défaut.** Comme Logstash 8 et suivants, la traduction Logstash → Vector suit désormais les conventions ECS :
+  - `[event][original]` sur chaque événement ;
+  - noms ECS des captures des motifs grok composites ;
+  - cible `[event][hash]` de `fingerprint` et traduction sur place de `translate`.
+
+  Pour des pipelines d’avant ECS, réglez `vector.ecs_compatibility: disabled`. Un réglage `ecs_compatibility` écrit dans le pipeline l’emporte.
 - **Vector 0.57 et suivants.** Une configuration générée qui utilise des variables `${VAR}`, ou des `$` doublés dans son VRL, doit être lancée avec `--dangerously-allow-env-var-interpolation`, ce que rappelle son en-tête.
 
 ### Ajouté
 
+- Option `vector.ecs_compatibility` (`v8` ou `disabled`), dans la configuration et dans l’interface.
 - Banc d’équivalence Logstash / Vector (`npm run test:pipelines`) : chaque cas est joué dans Logstash, sa traduction dans Vector, et les événements produits sont comparés champ par champ, dans les deux modes de compatibilité ECS de Logstash. Les écarts connus sont inventoriés dans `tests/pipelines/cases.mjs`. Il demande Docker ; la CI épingle Logstash 9.5.5 et Vector 0.59.0.
 - Instantanés de la traduction de chaque cas de ce banc (`tests/snapshots/pipelines`), comparés par `npm test`.
 

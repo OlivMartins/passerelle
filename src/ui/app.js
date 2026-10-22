@@ -342,7 +342,8 @@ const CFG_FORM = [
     ['vector.logstash_compat', 'Compatibilité Logstash', 'Ajoute @timestamp et @version et reproduit le format de date de Logstash, pour ne rien changer côté consommateurs.'],
     ['vector.acknowledgements', 'Accusés de réception de bout en bout', 'L’offset Kafka n’est validé qu’une fois l’événement écrit dans le topic de sortie.'],
     ['vector.shadow_mode', 'Mode shadow', 'Suffixe -shadow sur le groupe et les topics de sortie : Vector tourne à côté de Logstash sans lui prendre de partitions, le temps de comparer.']
-  ], fields: [['vector.format', 'Format de sortie', 'select', '', ['yaml', 'toml']]] }
+  ], fields: [['vector.format', 'Format de sortie', 'select', '', ['yaml', 'toml']],
+    ['vector.ecs_compatibility', 'Compatibilité ECS', 'select', 'v8 : comme Logstash 8 et suivants ([event][original], noms ECS des motifs grok, cibles de fingerprint et translate). disabled : pipelines d’avant ECS. Un réglage ecs_compatibility écrit dans le pipeline l’emporte.', ['v8', 'disabled']]] }
 ];
 const getPath = (o, p) => p.split('.').reduce((a, k) => (a ? a[k] : undefined), o);
 const setPath = (o, p, v) => { const ks = p.split('.'); const last = ks.pop(); ks.reduce((a, k) => (a[k] = a[k] || {}), o)[last] = v; };
