@@ -35,13 +35,8 @@ transforms:
           ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S,%3f", timezone: "Europe/Paris") ?? null
         }
         if ts == null {
-          ts = parse_timestamp(.date_time, "%+", timezone: "Europe/Paris") ?? null
-        }
-        if ts == null {
-          ts = parse_timestamp(.date_time, "%Y-%m-%dT%H:%M:%S%.f", timezone: "Europe/Paris") ?? null
-        }
-        if ts == null {
-          ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S%.f", timezone: "Europe/Paris") ?? null
+          iso = replace(string(.date_time) ?? "", ",", ".")
+          ts = parse_timestamp(iso, "%+", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M", timezone: "Europe/Paris") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S", timezone: "Europe/Paris") ?? null
         }
         if ts != null {
           ."@timestamp" = ts

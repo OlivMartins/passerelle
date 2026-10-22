@@ -167,7 +167,8 @@ export const CASES = [
   // date
   { id: 'date_iso8601', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ ts: '2026-03-10T08:15:30.123Z' }, { ts: '2026-03-10T09:15:30+01:00' }, { ts: '2026-03-10T08:15:30Z' }] },
   { id: 'date_iso8601_formes', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ ts: '2026-03-10 08:15:30' }, { ts: '2026-03-10T08:15:30' }, { ts: '2026-03-10T08:15:30.123456Z' }] },
-  { id: 'date_iso8601_jour_seul', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ ts: '2026-03-10' }], known: 'une date sans heure est lue par Logstash, à minuit ; la traduction la refuse' },
+  { id: 'date_iso8601_minutes_virgule', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ ts: '2026-03-10T08:15' }, { ts: '2026-03-10 08:15' }, { ts: '2026-03-10T08:15:30,123Z' }, { ts: '2026-03-10T08:15:30,5' }] },
+  { id: 'date_iso8601_jour_seul', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ ts: '2026-03-10' }] },
   { id: 'date_echec', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ ts: 'pas une date' }, { ts: '' }] },
   { id: 'date_champ_absent', filter: 'date { match => ["ts", "ISO8601"] }', events: [{ n: 1 }, { ts: null }] },
   { id: 'date_unix_champ_absent', filter: 'date { match => ["ts", "UNIX"] }', events: [{ n: 1 }, { ts: null }] },

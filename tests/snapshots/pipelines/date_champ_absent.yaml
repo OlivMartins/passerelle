@@ -9,13 +9,8 @@ transforms:
       if .ts != null {
         ts = null
         if ts == null {
-          ts = parse_timestamp(.ts, "%+") ?? null
-        }
-        if ts == null {
-          ts = parse_timestamp(.ts, "%Y-%m-%dT%H:%M:%S%.f") ?? null
-        }
-        if ts == null {
-          ts = parse_timestamp(.ts, "%Y-%m-%d %H:%M:%S%.f") ?? null
+          iso = replace(string(.ts) ?? "", ",", ".")
+          ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
         }
         if ts != null {
           ."@timestamp" = ts

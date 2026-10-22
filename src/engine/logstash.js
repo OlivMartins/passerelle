@@ -371,7 +371,7 @@ class VrlGen {
     const tz = s.timezone ? `, timezone: ${vq(s.timezone)}` : '';
     const lines = [];
     for (const f of m.slice(1)) {
-      if (f === 'ISO8601') ['%+', '%Y-%m-%dT%H:%M:%S%.f', '%Y-%m-%d %H:%M:%S%.f'].forEach(x => lines.push(`ts = parse_timestamp(${src}, ${vq(x)}${tz}) ?? null`));
+      if (f === 'ISO8601') lines.push({ iso: true });
       else if (f === 'UNIX' || f === 'UNIX_MS') { lines.push({ unix: f }); }
       else if (f === 'TAI64N') { this.approx('Format TAI64N', 'Non pris en charge par parse_timestamp : format ignoré.'); }
       else {
@@ -387,6 +387,13 @@ class VrlGen {
     lines.forEach(l => {
       this.open('if ts == null');
       if (typeof l === 'string') this.emit(l);
+      else if (l.iso) {
+        // Formes ISO8601 que Logstash lit : avec ou sans fuseau, espace ou T, secondes et décimales facultatives
+        // (point ou virgule), ou le jour seul, à minuit
+        this.emit(`iso = replace(${this.tget(src) === 'str' ? src : `string(${src}) ?? ""`}, ",", ".")`);
+        const forms = ['%+', '%Y-%m-%dT%H:%M:%S%.f', '%Y-%m-%d %H:%M:%S%.f', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M'].map(x => `parse_timestamp(iso, ${vq(x)}${tz})`);
+        this.emit(`ts = ${forms.join(' ?? ')} ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S"${tz}) ?? null`);
+      }
       else if (l.yearless) {
         // Format sans année : l’année en cours, corrigée d’un an quand décembre et janvier se croisent
         const zone = s.timezone ? tz : ', timezone: "local"';
