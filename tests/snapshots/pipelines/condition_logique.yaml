@@ -1,0 +1,15 @@
+# Couverture : 4 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Comparaison à un nombre
+
+transforms:
+  condition_1:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      if .a == "x" && (((is_integer(.n) || is_float(.n)) && (to_float(.n) ?? 0.0) > 5) || .b != "y") {
+        # mutate
+        .tags = compact(flatten([.tags, "oui"]))
+      } else {
+        # mutate
+        .tags = compact(flatten([.tags, "non"]))
+      }

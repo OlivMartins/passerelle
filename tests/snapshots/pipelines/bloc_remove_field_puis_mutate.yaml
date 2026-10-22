@@ -1,0 +1,25 @@
+# Couverture : 4 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Tableaux dans mutate
+
+transforms:
+  condition_1:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      if .t == "x" {
+        # grok
+        parsed, err = parse_grok(.message, s'%{IP:ip}')
+        if err == null {
+          dup = {}
+          for_each(parsed) -> |k, val| {
+            old = get!(., [k])
+            if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+          }
+          . = merge(object!(.), merge(parsed, dup))
+          del(.message)
+        } else {
+          .tags = compact(flatten([.tags, "_grokparsefailure"]))
+        }
+        # mutate
+        if is_string(.message) { .message = upcase!(.message) }
+      }

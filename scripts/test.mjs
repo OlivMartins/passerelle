@@ -2,7 +2,7 @@
 /*
  * Tests de non-régression : chaque exemple doit se traduire sans erreur,
  * avec au moins la couverture attendue, et sans recopier de secret.
- * La sortie de chaque exemple et de chaque cas du banc différentiel est aussi comparée
+ * La sortie de chaque exemple et de chaque cas des deux bancs est aussi comparée
  * à son instantané (tests/snapshots) : tout changement du SQL ou du YAML généré se voit en revue.
  *   node scripts/test.mjs            compare
  *   node scripts/test.mjs --update   réécrit les instantanés après un changement voulu
@@ -12,12 +12,14 @@ import { join, dirname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CASES } from '../tests/differential/cases.mjs';
 import { INDEX, configOverride } from '../tests/differential/dataset.mjs';
+import { CASES as PIPELINE_CASES } from '../tests/pipelines/cases.mjs';
+import { translatedPipeline } from '../tests/pipelines/transport.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const UPDATE = process.argv.includes('--update');
 const rd = p => readFileSync(join(ROOT, p), 'utf8');
 const engine = ['src/engine/base.js', 'src/engine/dsl.js', 'src/engine/logstash.js'].map(rd).join('');
-const E = new Function(`'use strict';\n${engine}\nreturn { translateDSL, translateLogstash, DEFAULT_CONFIG, mergeConfig };`)();
+const E = new Function(`'use strict';\n${engine}\nreturn { translateDSL, translateLogstash, toYAML, DEFAULT_CONFIG, mergeConfig };`)();
 
 // Éléments « à reprendre » attendus : le filtre ruby de batch.conf n’a pas d’équivalent automatique
 const EXPECTED_TODO = { 'logstash/batch.conf': 1 };
@@ -68,6 +70,16 @@ const benchConfig = E.mergeConfig(E.DEFAULT_CONFIG, configOverride());
 for (const c of CASES) {
   const r = E.translateDSL(JSON.stringify(c.dsl), c.config ? E.mergeConfig(benchConfig, c.config) : benchConfig, { index: INDEX });
   snapshot(`cases/${c.id}.sql`, r.error ? `-- Erreur : ${r.error}\n` : withHeader(r, '--') + r.sql + '\n');
+}
+// Cas du banc d’équivalence Logstash / Vector : la traduction de leurs filtres est figée ici, les événements qu’elle produit
+// sont comparés à ceux de Logstash par « npm run test:pipelines ». Le transport du banc, le même dans chaque configuration,
+// n’est gardé que pour les cas qui n’ont rien d’autre.
+const isTransport = name => name === 'stdin_in_init' || name === 'logstash_finalize';
+for (const c of PIPELINE_CASES) {
+  const r = E.translateLogstash(translatedPipeline(c), E.DEFAULT_CONFIG);
+  if (r.error) { snapshot(`pipelines/${c.id}.yaml`, `# Erreur : ${r.error}\n`); continue; }
+  const own = Object.fromEntries(Object.entries(r.config.transforms).filter(([name]) => !isTransport(name)));
+  snapshot(`pipelines/${c.id}.yaml`, withHeader(r, '#') + (Object.keys(own).length ? E.toYAML({ transforms: own }) : r.yaml).trimEnd() + '\n');
 }
 // Un instantané sans cas ni exemple correspondant est un reste : supprimé par --update, signalé sinon
 for (const rel of readdirSync(join(ROOT, 'tests/snapshots'), { recursive: true }).map(p => p.split(sep).join('/'))) {
@@ -130,6 +142,15 @@ for (const q of ['status:500) AND service:api', 'status:(500', '(status:500', 's
 // Les secrets passent par des variables d’environnement, jamais par la configuration générée
 const ls = E.translateLogstash(rd('examples/logstash/routage.conf'), E.DEFAULT_CONFIG);
 check(ls.yaml.includes("'${KAFKA_PASSWORD}'") && ls.env.includes('KAFKA_PASSWORD'), 'routage.conf : identifiants Kafka référencés par variable d’environnement');
+// Vector 0.57 et suivants : interpolation à demander, et pas de ${…} dans les commentaires, que Vector interpole aussi
+check(/^# .*--dangerously-allow-env-var-interpolation/m.test(ls.yaml) && !/^#.*\$\{/m.test(ls.yaml), 'routage.conf : en-tête qui demande l’interpolation, sans ${…} dans les commentaires');
+// Topic tiré entièrement d’un champ : Vector 0.57 et suivants l’exigent explicitement
+const topicDyn = E.translateLogstash('input { stdin {} } output { kafka { topic_id => "%{type}" } }', E.DEFAULT_CONFIG);
+check(/topic: '\{\{ type \}\}'\n\s+dangerously_allow_unconfined_template_resolution: true/.test(topicDyn.yaml), 'topic_id « %{type} » : dangerously_allow_unconfined_template_resolution posé');
+// Le VRL de préparation suppose le namespace de logs : chaque source doit le déclarer, Kafka ou non
+const everyInput = 'input { kafka { topics => ["t"] } stdin { } file { path => "/var/log/app.log" } tcp { port => 5000 } udp { port => 5001 } http { port => 8080 } beats { port => 5044 } generator { } } output { stdout { } }';
+const namespaced = cfg => Object.values(E.translateLogstash(everyInput, cfg).config.sources).filter(s => s.log_namespace === true).length;
+check(namespaced(E.DEFAULT_CONFIG) === 8 && namespaced(E.mergeConfig(E.DEFAULT_CONFIG, { vector: { log_namespace: false } })) === 0, 'entrées : chaque source déclare le namespace de logs que suppose le VRL généré');
 
 process.stdout.write(failures ? `\n${failures} échec(s)\n` : '\nTous les tests passent.\n');
 process.exit(failures ? 1 : 0);

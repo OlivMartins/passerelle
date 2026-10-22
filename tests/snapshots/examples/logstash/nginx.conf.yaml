@@ -1,5 +1,8 @@
 # Couverture : 8 directs, 1 à vérifier, 0 à reprendre
 # À vérifier : useragent → parse_user_agent
+# À vérifier : Tableaux dans mutate
+# À vérifier : Référence %{champ}
+# À vérifier : Comparaison à un nombre
 
 # Configuration Vector générée par Passerelle depuis un pipeline Logstash
 # Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
@@ -20,15 +23,21 @@ sources:
     topics: [nginx-raw]
     auto_offset_reset: earliest
     decoding:
-      codec: json
+      codec: bytes
     log_namespace: true
 transforms:
   kafka_in_init:
     type: remap
     inputs: [kafka_in]
     source: |
-      # Garantit un objet à la racine (un JSON scalaire est rangé dans message)
-      . = object(.) ?? { "message": . }
+      # Codec json : décodage de la ligne (invalide : gardée dans message, avec _jsonparsefailure)
+      raw = string(.) ?? ""
+      parsed, err = parse_json(raw)
+      if err == null {
+        . = object(parsed) ?? { "message": parsed }
+      } else {
+        . = { "message": raw, "tags": ["_jsonparsefailure"] }
+      }
       # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
       if !exists(."@timestamp") {
         ."@timestamp" = now()
@@ -43,7 +52,12 @@ transforms:
       # grok · parse_access
       parsed, err = parse_grok(.message, s'%{IPORHOST:ls__client__ip} - %{DATA:ls__user__name} \[%{HTTPDATE:ts}\] "%{WORD:ls__http__method} %{DATA:ls__url__path} HTTP/%{NUMBER:ls__http__version}" %{NUMBER:ls__http__status} %{NUMBER:ls__http__bytes} "%{DATA:referrer}" "%{DATA:agent}"')
       if err == null {
-        . = merge(object!(.), parsed)
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
         .client.ip = del(.ls__client__ip)
         .user.name = del(.ls__user__name)
         .http.method = del(.ls__http__method)
@@ -61,15 +75,17 @@ transforms:
     inputs: [parse_access]
     source: |
       # date
-      ts = null
-      if ts == null {
-        ts = parse_timestamp(.ts, "%d/%b/%Y:%H:%M:%S %z") ?? null
-      }
-      if ts != null {
-        ."@timestamp" = ts
-        del(.ts)
-      } else {
-        .tags = compact(flatten([.tags, "_dateparsefailure"]))
+      if .ts != null {
+        ts = null
+        if ts == null {
+          ts = parse_timestamp(.ts, "%d/%b/%Y:%H:%M:%S %z") ?? null
+        }
+        if ts != null {
+          ."@timestamp" = ts
+          del(.ts)
+        } else {
+          .tags = compact(flatten([.tags, "_dateparsefailure"]))
+        }
       }
   useragent:
     type: remap
@@ -99,16 +115,16 @@ transforms:
       if exists(.referrer) {
         .http.referrer = del(.referrer)
       }
-      .http.method = downcase(.http.method) ?? .http.method
-      .event.dataset = "nginx.access"
-      .kafka.source_topic = (to_string(%kafka.topic) ?? "")
+      if is_string(.http.method) { .http.method = downcase!(.http.method) }
+      if exists(.event.dataset) { .event.dataset = push(array(.event.dataset) ?? [.event.dataset], "nginx.access") } else { .event.dataset = "nginx.access" }
+      if exists(.kafka.source_topic) { .kafka.source_topic = push(array(.kafka.source_topic) ?? [.kafka.source_topic], (to_string(%kafka.topic) ?? join(%kafka.topic, ",") ?? encode_json(%kafka.topic))) } else { .kafka.source_topic = (to_string(%kafka.topic) ?? join(%kafka.topic, ",") ?? encode_json(%kafka.topic)) }
       del(.message)
       del(.agent)
   condition_6:
     type: remap
     inputs: [mutate]
     source: |
-      if (to_float(.http.status) ?? 0.0) >= 500 {
+      if ((is_integer(.http.status) || is_float(.http.status)) && (to_float(.http.status) ?? 0.0) >= 500) {
         # mutate
         .tags = compact(flatten([.tags, "erreur_serveur"]))
       } else if (match(.url.path, r'^/health') ?? false) {
@@ -120,6 +136,18 @@ transforms:
     type: remap
     inputs: [condition_6]
     source: |
+      # @timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp
+      if exists(."@timestamp") && !is_timestamp(."@timestamp") {
+        iso = replace(string(."@timestamp") ?? "", ",", ".")
+        ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
+        if ts == null {
+          ."_@timestamp" = ."@timestamp"
+          ."@timestamp" = now()
+          .tags = compact(flatten([.tags, "_timestampparsefailure"]))
+        } else {
+          ."@timestamp" = ts
+        }
+      }
       # Format de date identique à Logstash (millisecondes, UTC)
       if is_timestamp(."@timestamp") {
         ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")

@@ -1,0 +1,16 @@
+# Couverture : 4 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Référence %{champ}
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      if exists(%cle) { %cle = push(array(%cle) ?? [%cle], "valeur") } else { %cle = "valeur" }
+  mutate_2:
+    type: remap
+    inputs: [mutate]
+    source: |
+      # mutate
+      if exists(.k) { .k = push(array(.k) ?? [.k], (to_string(%cle) ?? join(%cle, ",") ?? encode_json(%cle))) } else { .k = (to_string(%cle) ?? join(%cle, ",") ?? encode_json(%cle)) }

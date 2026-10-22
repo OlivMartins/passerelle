@@ -1,0 +1,11 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  cidr:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # cidr
+      if (ip_cidr_contains("10.0.0.0/8", .ip) ?? false) || (ip_cidr_contains("192.168.0.0/16", .ip) ?? false) {
+        .tags = compact(flatten([.tags, "interne"]))
+      }

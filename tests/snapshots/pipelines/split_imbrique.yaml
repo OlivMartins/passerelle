@@ -1,0 +1,21 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  split:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # split
+      parts = null
+      if is_string(.corps.articles) {
+        parts = split!(.corps.articles, "\n")
+        if length(parts) == 1 && .corps.articles != "" { parts = null }
+      } else if is_array(.corps.articles) {
+        parts = .corps.articles
+      } else {
+        .tags = compact(flatten([.tags, "_split_type_failure"]))
+      }
+      if parts != null {
+        .corps.articles = filter(array!(parts)) -> |_index, value| { value != null && value != "" }
+        . = unnest!(.corps.articles)
+      }

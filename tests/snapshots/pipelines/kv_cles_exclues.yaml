@@ -1,0 +1,14 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  kv:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # kv
+      kv, err = parse_key_value(.message, key_value_delimiter: "=", field_delimiter: " ")
+      if err == null {
+        kv = filter(kv) -> |_key, value| { value != true }
+        kv = filter(kv) -> |key, _value| { !includes(["b"], key) }
+        . = merge(object!(.), kv)
+      }

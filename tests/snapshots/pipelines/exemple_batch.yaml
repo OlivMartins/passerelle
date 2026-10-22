@@ -1,0 +1,92 @@
+# Couverture : 8 directs, 0 à vérifier, 1 à reprendre
+# À reprendre : Filtre ruby non traduit (ligne 10)
+# À vérifier : Référence %{champ}
+# À vérifier : Tableaux dans mutate
+# À vérifier : Conversion impossible dans mutate
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
+
+transforms:
+  dissect:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # dissect
+      parsed, err = parse_regex(.message, r'^(?P<date>.*?) (?P<time>.*?) \[(?P<level>.*?)\] (?P<service>.*?): (?P<payload>.*)$$')
+      if err == null {
+        .date = parsed.date
+        .time = parsed.time
+        .level = parsed.level
+        .service = parsed.service
+        .payload = parsed.payload
+      } else if exists(.message) {
+        .tags = compact(flatten([.tags, "_dissectfailure"]))
+      }
+  mutate:
+    type: remap
+    inputs: [dissect]
+    source: |
+      # mutate
+      if exists(.date_time) { .date_time = push(array(.date_time) ?? [.date_time], (to_string(.date) ?? join(.date, ",") ?? encode_json(.date)) + " " + (to_string(.time) ?? join(.time, ",") ?? encode_json(.time))) } else { .date_time = (to_string(.date) ?? join(.date, ",") ?? encode_json(.date)) + " " + (to_string(.time) ?? join(.time, ",") ?? encode_json(.time)) }
+  date:
+    type: remap
+    inputs: [mutate]
+    source: |
+      # date
+      if .date_time != null {
+        ts = null
+        if ts == null {
+          ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S,%3f", timezone: "Europe/Paris") ?? null
+        }
+        if ts == null {
+          iso = replace(string(.date_time) ?? "", ",", ".")
+          ts = parse_timestamp(iso, "%+", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M", timezone: "Europe/Paris") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S", timezone: "Europe/Paris") ?? null
+        }
+        if ts != null {
+          ."@timestamp" = ts
+          del(.date)
+          del(.time)
+          del(.date_time)
+        } else {
+          .tags = compact(flatten([.tags, "_dateparsefailure"]))
+        }
+      }
+  json:
+    type: remap
+    inputs: [date]
+    source: |
+      # json
+      parsed, err = parse_json(.payload)
+      if err == null {
+        .body = parsed
+        del(.payload)
+      } else if .payload != null {
+        .tags = compact(flatten([.tags, "_jsonparsefailure"]))
+      }
+  split:
+    type: remap
+    inputs: [json]
+    source: |
+      # split
+      parts = null
+      if is_string(.body.items) {
+        parts = split!(.body.items, "\n")
+        if length(parts) == 1 && .body.items != "" { parts = null }
+      } else if is_array(.body.items) {
+        parts = .body.items
+      } else {
+        .tags = compact(flatten([.tags, "_split_type_failure"]))
+      }
+      if parts != null {
+        .body.items = filter(array!(parts)) -> |_index, value| { value != null && value != "" }
+        . = unnest!(.body.items)
+      }
+  mutate_2:
+    type: remap
+    inputs: [split]
+    source: |
+      # mutate
+      if .body.items.qty != null {
+        num = replace(replace(strip_whitespace(string(.body.items.qty) ?? ""), ",", ""), "_", "")
+        .body.items.qty = to_int(.body.items.qty) ?? parse_int(num) ?? to_int(to_float(num) ?? .body.items.qty) ?? .body.items.qty
+      }
+      if is_string(.service) { .service = replace!(.service, r'[^a-z0-9]+', "_") }

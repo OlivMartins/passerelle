@@ -164,7 +164,7 @@ Passerelle signale aussi que `heure` gagnerait à être une colonne matérialis�
 
 - **Chaque filtre devient une étape VRL nommée** : grok, dissect, date, mutate, json, kv, geoip, translate, fingerprint, et neuf autres. Le code est typé selon les règles du compilateur VRL : aucune erreur ignorée en silence.
 - **Les sorties conditionnelles deviennent un aiguillage** `route`, avec une destination par branche.
-- **Kafka reste au cœur du flux** : mêmes topics, groupe de consommateurs, SASL et TLS. Les identifiants sont référencés par des variables d’environnement plutôt qu’écrits en clair.
+- **Kafka reste au cœur du flux** : mêmes topics, groupe de consommateurs, SASL et TLS. Les identifiants sont référencés par des variables d’environnement plutôt qu’écrits en clair ; depuis la 0.57, Vector ne les remplace qu’avec l’option `--dangerously-allow-env-var-interpolation`, que rappelle l’en-tête du fichier généré.
 - **Rien ne change pour les consommateurs** : `@timestamp`, `@version` et le format de date de Logstash sont reproduits.
 - **Bascule sans risque** : en mode shadow, Vector lit avec son propre groupe et écrit dans des topics `-shadow`, à côté de Logstash, le temps de comparer.
 
@@ -378,10 +378,11 @@ Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc diffé
 
 ```bash
 npm ci
-npm test            # traduit chaque exemple et vérifie le résultat
-npm run test:diff   # compare les résultats de ClickHouse à ceux d’Elasticsearch (voir tests/README.md)
-npm run build:ui    # dist/passerelle.html : l’interface autonome
-npm run build       # interface, binaire Linux x86_64 et archive de release
+npm test                 # traduit chaque exemple et vérifie le résultat
+npm run test:diff        # compare les résultats de ClickHouse à ceux d’Elasticsearch (voir tests/README.md)
+npm run test:pipelines   # compare les événements de Vector à ceux de Logstash (voir tests/README.md)
+npm run build:ui         # dist/passerelle.html : l’interface autonome
+npm run build            # interface, binaire Linux x86_64 et archive de release
 ```
 
 Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction, `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur.

@@ -1,0 +1,21 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  grok:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # grok
+      parsed, err = parse_grok(.message, s'%{WORD:verb} %{URIPATH:path} %{NUMBER:status} %{NUMBER:bytes}')
+      if err == null {
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
+        .status = to_int(.status) ?? .status
+        .bytes = to_int(.bytes) ?? .bytes
+      } else {
+        .tags = compact(flatten([.tags, "_grokparsefailure"]))
+      }

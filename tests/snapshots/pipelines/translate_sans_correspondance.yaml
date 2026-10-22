@@ -1,0 +1,22 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  translate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # translate
+      if exists(.code) && !exists(.libelle) {
+        key = (to_string(.code) ?? join(.code, ",") ?? encode_json(.code))
+        found = true
+        if key == "200" {
+          .libelle = "OK"
+        } else if key == "404" {
+          .libelle = "Introuvable"
+        } else {
+          found = false
+        }
+        if found {
+          .tags = compact(flatten([.tags, "traduit"]))
+        }
+      }

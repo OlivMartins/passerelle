@@ -1,0 +1,22 @@
+# Couverture : 4 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  condition_1:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      if .t == "x" {
+        # json
+        parsed, err = parse_json(.message)
+        if err == null && is_object(parsed) {
+          . = merge(object!(.), object!(parsed))
+        } else if .message != null {
+          .tags = compact(flatten([.tags, "_jsonparsefailure"]))
+        }
+        # kv
+        kv, err = parse_key_value(.extra, key_value_delimiter: "=", field_delimiter: " ")
+        if err == null {
+          kv = filter(kv) -> |_key, value| { value != true }
+          . = merge(object!(.), kv)
+        }
+      }

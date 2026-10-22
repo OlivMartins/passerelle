@@ -1,0 +1,17 @@
+# Couverture : 3 directs, 1 à vérifier, 0 à reprendre
+# À vérifier : dissect
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
+
+transforms:
+  dissect:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # dissect
+      parsed, err = parse_regex(.message, r'^(?P<quand>.*?) (?:.*?) (?P<texte>.*)$$')
+      if err == null {
+        .quand = parsed.quand
+        .texte = parsed.texte
+      } else if exists(.message) {
+        .tags = compact(flatten([.tags, "_dissectfailure"]))
+      }

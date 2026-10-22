@@ -1,0 +1,18 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Tableaux dans mutate
+# À vérifier : Conversion impossible dans mutate
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      if .n != null {
+        num = replace(replace(strip_whitespace(string(.n) ?? ""), ",", ""), "_", "")
+        .n = to_int(.n) ?? parse_int(num) ?? to_int(to_float(num) ?? .n) ?? .n
+      }
+      if .f != null {
+        num = replace(replace(strip_whitespace(string(.f) ?? ""), ",", ""), "_", "")
+        .f = to_float(.f) ?? to_float(num) ?? .f
+      }

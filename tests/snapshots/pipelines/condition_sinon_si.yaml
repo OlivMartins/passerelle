@@ -1,0 +1,18 @@
+# Couverture : 5 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Comparaison à un nombre
+
+transforms:
+  condition_1:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      if ((is_integer(.n) || is_float(.n)) && (to_float(.n) ?? 0.0) < 10) {
+        # mutate
+        if exists(.classe) { .classe = push(array(.classe) ?? [.classe], "petit") } else { .classe = "petit" }
+      } else if ((is_integer(.n) || is_float(.n)) && (to_float(.n) ?? 0.0) < 100) {
+        # mutate
+        if exists(.classe) { .classe = push(array(.classe) ?? [.classe], "moyen") } else { .classe = "moyen" }
+      } else {
+        # mutate
+        if exists(.classe) { .classe = push(array(.classe) ?? [.classe], "grand") } else { .classe = "grand" }
+      }

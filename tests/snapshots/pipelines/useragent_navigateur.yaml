@@ -1,0 +1,13 @@
+# Couverture : 2 directs, 1 à vérifier, 0 à reprendre
+# À vérifier : useragent → parse_user_agent
+
+transforms:
+  useragent:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # useragent
+      ua, err = parse_user_agent(.ua)
+      if err == null {
+        .navigateur = ua
+      }

@@ -1,0 +1,10 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  routage:
+    type: route
+    inputs: [logstash_finalize]
+    reroute_unmatched: false
+    route:
+      file: .niveau == "erreur"
+      file_b: '!(.niveau == "erreur")'

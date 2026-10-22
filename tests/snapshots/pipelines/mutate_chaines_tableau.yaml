@@ -1,0 +1,13 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Tableaux dans mutate
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      if is_string(.a) { .a = replace!(.a, r'[0-9]+', "#") }
+      if is_string(.b) { .b = upcase!(.b) }
+      if is_string(.c) { .c = downcase!(.c) }
+      if is_string(.d) { .d = strip_whitespace!(.d) }

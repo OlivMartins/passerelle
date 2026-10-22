@@ -1,0 +1,10 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Référence %{champ}
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      .tags = compact(flatten([.tags, "t1", "t-" + (to_string(.n) ?? join(.n, ",") ?? encode_json(.n))]))

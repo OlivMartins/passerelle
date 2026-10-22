@@ -1,0 +1,21 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  split:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # split
+      parts = null
+      if is_string(.message) {
+        parts = split!(.message, "\n")
+        if length(parts) == 1 && .message != "" { parts = null }
+      } else if is_array(.message) {
+        parts = .message
+      } else {
+        .tags = compact(flatten([.tags, "_split_type_failure"]))
+      }
+      if parts != null {
+        .message = filter(array!(parts)) -> |_index, value| { value != null && value != "" }
+        . = unnest!(.message)
+      }

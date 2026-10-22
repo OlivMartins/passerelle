@@ -1,7 +1,9 @@
 # Couverture : 10 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
 
 # Configuration Vector générée par Passerelle depuis un pipeline Logstash
 # Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+# Vector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)
 # Variables d’environnement attendues : KAFKA_USERNAME, KAFKA_PASSWORD
 
 data_dir: /var/lib/vector
@@ -23,15 +25,21 @@ sources:
       enabled: true
       ca_file: /etc/vector/certs/ca.pem
     decoding:
-      codec: json
+      codec: bytes
     log_namespace: true
 transforms:
   kafka_in_init:
     type: remap
     inputs: [kafka_in]
     source: |
-      # Garantit un objet à la racine (un JSON scalaire est rangé dans message)
-      . = object(.) ?? { "message": . }
+      # Codec json : décodage de la ligne (invalide : gardée dans message, avec _jsonparsefailure)
+      raw = string(.) ?? ""
+      parsed, err = parse_json(raw)
+      if err == null {
+        . = object(parsed) ?? { "message": parsed }
+      } else {
+        . = { "message": raw, "tags": ["_jsonparsefailure"] }
+      }
       # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
       if !exists(."@timestamp") {
         ."@timestamp" = now()
@@ -39,7 +47,7 @@ transforms:
       if !exists(."@version") {
         ."@version" = "1"
       }
-      .pipeline.name = "router"
+      if exists(.pipeline.name) { .pipeline.name = push(array(.pipeline.name) ?? [.pipeline.name], "router") } else { .pipeline.name = "router" }
   json:
     type: remap
     inputs: [kafka_in_init]
@@ -56,6 +64,7 @@ transforms:
       # kv
       kv, err = parse_key_value(.data.extra, key_value_delimiter: "=", field_delimiter: "&")
       if err == null {
+        kv = filter(kv) -> |_key, value| { value != true }
         .extra = kv
       }
   translate:
@@ -63,24 +72,26 @@ transforms:
     inputs: [kv]
     source: |
       # translate
-      key = (to_string(.data.country) ?? "")
-      if key == "FR" {
-        .data.region = "EMEA"
-      } else if key == "DE" {
-        .data.region = "EMEA"
-      } else if key == "US" {
-        .data.region = "AMER"
-      } else if key == "JP" {
-        .data.region = "APAC"
-      } else {
-        .data.region = "AUTRE"
+      if exists(.data.country) && !exists(.data.region) {
+        key = (to_string(.data.country) ?? join(.data.country, ",") ?? encode_json(.data.country))
+        if key == "FR" {
+          .data.region = "EMEA"
+        } else if key == "DE" {
+          .data.region = "EMEA"
+        } else if key == "US" {
+          .data.region = "AMER"
+        } else if key == "JP" {
+          .data.region = "APAC"
+        } else {
+          .data.region = "AUTRE"
+        }
       }
   fingerprint:
     type: remap
     inputs: [translate]
     source: |
       # fingerprint
-      .data.user_hash = sha2((to_string(.data.user_id) ?? ""), variant: "SHA-256")
+      if exists(.data.user_id) { .data.user_hash = sha2((to_string(.data.user_id) ?? join(.data.user_id, ",") ?? encode_json(.data.user_id)), variant: "SHA-256") }
   condition_5:
     type: remap
     inputs: [fingerprint]
@@ -102,6 +113,18 @@ transforms:
     type: remap
     inputs: [condition_6]
     source: |
+      # @timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp
+      if exists(."@timestamp") && !is_timestamp(."@timestamp") {
+        iso = replace(string(."@timestamp") ?? "", ",", ".")
+        ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
+        if ts == null {
+          ."_@timestamp" = ."@timestamp"
+          ."@timestamp" = now()
+          .tags = compact(flatten([.tags, "_timestampparsefailure"]))
+        } else {
+          ."@timestamp" = ts
+        }
+      }
       # Format de date identique à Logstash (millisecondes, UTC)
       if is_timestamp(."@timestamp") {
         ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")

@@ -1,0 +1,14 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Tableaux dans truncate
+
+transforms:
+  truncate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # truncate
+      if is_string(.a) && length!(.a) > 5 {
+        chars = strlen!(slice!(.a, 0, 5))
+        .a = truncate!(.a, chars)
+        if length(.a) > 5 { .a = truncate(.a, chars - 1) }
+      }

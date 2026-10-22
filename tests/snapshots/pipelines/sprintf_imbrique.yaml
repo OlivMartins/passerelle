@@ -1,0 +1,10 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Référence %{champ}
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      if exists(.k) { .k = push(array(.k) ?? [.k], (to_string(.a.b) ?? join(.a.b, ",") ?? encode_json(.a.b)) + "/" + (to_string(.a.c) ?? join(.a.c, ",") ?? encode_json(.a.c))) } else { .k = (to_string(.a.b) ?? join(.a.b, ",") ?? encode_json(.a.b)) + "/" + (to_string(.a.c) ?? join(.a.c, ",") ?? encode_json(.a.c)) }

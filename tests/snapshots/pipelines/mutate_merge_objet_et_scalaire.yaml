@@ -1,0 +1,13 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      if is_object(.a) {
+        .a = merge(.a, .b) ?? .a
+      } else if !is_object(.b) {
+        .a = compact(flatten([.a, .b]))
+      }

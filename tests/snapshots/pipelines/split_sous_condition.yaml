@@ -1,0 +1,24 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : split dans une condition
+
+transforms:
+  condition_1:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      if .type == "lot" {
+        # split
+        parts = null
+        if is_string(.articles) {
+          parts = split!(.articles, "\n")
+          if length(parts) == 1 && .articles != "" { parts = null }
+        } else if is_array(.articles) {
+          parts = .articles
+        } else {
+          .tags = compact(flatten([.tags, "_split_type_failure"]))
+        }
+        if parts != null {
+          .articles = filter(array!(parts)) -> |_index, value| { value != null && value != "" }
+          . = unnest!(.articles)
+        }
+      }

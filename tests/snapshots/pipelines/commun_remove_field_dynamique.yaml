@@ -1,0 +1,11 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Référence %{champ}
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      . = remove!(., split(replace((to_string(.nom) ?? join(.nom, ",") ?? encode_json(.nom)), r'^\[|\]$$', ""), "]["))

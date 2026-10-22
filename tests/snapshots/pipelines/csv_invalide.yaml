@@ -1,0 +1,20 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  csv:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # csv
+      row, err = parse_csv(.message, delimiter: ",")
+      if err == null {
+        names = ["a", "b"]
+        cols = {}
+        for_each(row) -> |i, v| {
+          name = string(get(names, [i]) ?? null) ?? "column" + to_string(i + 1)
+          val = v
+          if val == "" { val = null }
+          cols = set!(cols, [name], val)
+        }
+        . = merge!(., cols)
+      }

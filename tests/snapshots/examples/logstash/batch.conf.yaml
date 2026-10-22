@@ -1,8 +1,13 @@
 # Couverture : 8 directs, 0 à vérifier, 1 à reprendre
 # À reprendre : Filtre ruby non traduit (ligne 17)
+# À vérifier : Référence %{champ}
+# À vérifier : Tableaux dans mutate
+# À vérifier : Conversion impossible dans mutate
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
 
 # Configuration Vector générée par Passerelle depuis un pipeline Logstash
 # Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+# Vector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)
 
 data_dir: /var/lib/vector
 api:
@@ -43,7 +48,7 @@ transforms:
         .level = parsed.level
         .service = parsed.service
         .payload = parsed.payload
-      } else {
+      } else if exists(.message) {
         .tags = compact(flatten([.tags, "_dissectfailure"]))
       }
   mutate:
@@ -51,32 +56,29 @@ transforms:
     inputs: [dissect]
     source: |
       # mutate
-      .date_time = (to_string(.date) ?? "") + " " + (to_string(.time) ?? "")
+      if exists(.date_time) { .date_time = push(array(.date_time) ?? [.date_time], (to_string(.date) ?? join(.date, ",") ?? encode_json(.date)) + " " + (to_string(.time) ?? join(.time, ",") ?? encode_json(.time))) } else { .date_time = (to_string(.date) ?? join(.date, ",") ?? encode_json(.date)) + " " + (to_string(.time) ?? join(.time, ",") ?? encode_json(.time)) }
   date:
     type: remap
     inputs: [mutate]
     source: |
       # date
-      ts = null
-      if ts == null {
-        ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S,%3f", timezone: "Europe/Paris") ?? null
-      }
-      if ts == null {
-        ts = parse_timestamp(.date_time, "%+", timezone: "Europe/Paris") ?? null
-      }
-      if ts == null {
-        ts = parse_timestamp(.date_time, "%Y-%m-%dT%H:%M:%S%.f", timezone: "Europe/Paris") ?? null
-      }
-      if ts == null {
-        ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S%.f", timezone: "Europe/Paris") ?? null
-      }
-      if ts != null {
-        ."@timestamp" = ts
-        del(.date)
-        del(.time)
-        del(.date_time)
-      } else {
-        .tags = compact(flatten([.tags, "_dateparsefailure"]))
+      if .date_time != null {
+        ts = null
+        if ts == null {
+          ts = parse_timestamp(.date_time, "%Y-%m-%d %H:%M:%S,%3f", timezone: "Europe/Paris") ?? null
+        }
+        if ts == null {
+          iso = replace(string(.date_time) ?? "", ",", ".")
+          ts = parse_timestamp(iso, "%+", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M", timezone: "Europe/Paris") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M", timezone: "Europe/Paris") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S", timezone: "Europe/Paris") ?? null
+        }
+        if ts != null {
+          ."@timestamp" = ts
+          del(.date)
+          del(.time)
+          del(.date_time)
+        } else {
+          .tags = compact(flatten([.tags, "_dateparsefailure"]))
+        }
       }
   json:
     type: remap
@@ -87,7 +89,7 @@ transforms:
       if err == null {
         .body = parsed
         del(.payload)
-      } else {
+      } else if .payload != null {
         .tags = compact(flatten([.tags, "_jsonparsefailure"]))
       }
   split:
@@ -95,17 +97,29 @@ transforms:
     inputs: [json]
     source: |
       # split
+      parts = null
       if is_string(.body.items) {
-        .body.items = split(string!(.body.items), "\n")
+        parts = split!(.body.items, "\n")
+        if length(parts) == 1 && .body.items != "" { parts = null }
+      } else if is_array(.body.items) {
+        parts = .body.items
+      } else {
+        .tags = compact(flatten([.tags, "_split_type_failure"]))
       }
-      . = unnest(.body.items) ?? [.]
+      if parts != null {
+        .body.items = filter(array!(parts)) -> |_index, value| { value != null && value != "" }
+        . = unnest!(.body.items)
+      }
   mutate_2:
     type: remap
     inputs: [split]
     source: |
       # mutate
-      .body.items.qty = to_int(.body.items.qty) ?? .body.items.qty
-      .service = replace(.service, r'[^a-z0-9]+', "_") ?? .service
+      if .body.items.qty != null {
+        num = replace(replace(strip_whitespace(string(.body.items.qty) ?? ""), ",", ""), "_", "")
+        .body.items.qty = to_int(.body.items.qty) ?? parse_int(num) ?? to_int(to_float(num) ?? .body.items.qty) ?? .body.items.qty
+      }
+      if is_string(.service) { .service = replace!(.service, r'[^a-z0-9]+', "_") }
   logstash_finalize:
     type: remap
     inputs: [mutate_2]
@@ -113,6 +127,18 @@ transforms:
       # ruby
       # À TRADUIRE : filtre ruby, ligne 17 du pipeline Logstash
       #   event.set('computed', event.get('[body][items][qty]').to_i * 2)
+      # @timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp
+      if exists(."@timestamp") && !is_timestamp(."@timestamp") {
+        iso = replace(string(."@timestamp") ?? "", ",", ".")
+        ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
+        if ts == null {
+          ."_@timestamp" = ."@timestamp"
+          ."@timestamp" = now()
+          .tags = compact(flatten([.tags, "_timestampparsefailure"]))
+        } else {
+          ."@timestamp" = ts
+        }
+      }
       # Format de date identique à Logstash (millisecondes, UTC)
       if is_timestamp(."@timestamp") {
         ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")

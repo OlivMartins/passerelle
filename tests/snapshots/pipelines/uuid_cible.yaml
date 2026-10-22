@@ -1,0 +1,11 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  uuid:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # uuid
+      if !exists(.id) {
+        .id = uuid_v4()
+      }

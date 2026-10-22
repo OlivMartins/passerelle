@@ -1,0 +1,14 @@
+# Couverture : 4 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  condition_1:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      if .x.y == "v" {
+        # mutate
+        .tags = compact(flatten([.tags, "oui"]))
+      } else {
+        # mutate
+        .tags = compact(flatten([.tags, "non"]))
+      }

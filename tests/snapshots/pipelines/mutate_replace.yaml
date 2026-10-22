@@ -1,0 +1,10 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Référence %{champ}
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      .a = "v-" + (to_string(.b) ?? join(.b, ",") ?? encode_json(.b))

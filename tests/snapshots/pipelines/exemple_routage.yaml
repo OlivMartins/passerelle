@@ -1,0 +1,72 @@
+# Couverture : 10 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  json:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # json
+      parsed, err = parse_json(.payload)
+      if err == null {
+        .data = parsed
+      }
+  kv:
+    type: remap
+    inputs: [json]
+    source: |
+      # kv
+      kv, err = parse_key_value(.data.extra, key_value_delimiter: "=", field_delimiter: "&")
+      if err == null {
+        kv = filter(kv) -> |_key, value| { value != true }
+        .extra = kv
+      }
+  translate:
+    type: remap
+    inputs: [kv]
+    source: |
+      # translate
+      if exists(.data.country) && !exists(.data.region) {
+        key = (to_string(.data.country) ?? join(.data.country, ",") ?? encode_json(.data.country))
+        if key == "FR" {
+          .data.region = "EMEA"
+        } else if key == "DE" {
+          .data.region = "EMEA"
+        } else if key == "US" {
+          .data.region = "AMER"
+        } else if key == "JP" {
+          .data.region = "APAC"
+        } else {
+          .data.region = "AUTRE"
+        }
+      }
+  fingerprint:
+    type: remap
+    inputs: [translate]
+    source: |
+      # fingerprint
+      if exists(.data.user_id) { .data.user_hash = sha2((to_string(.data.user_id) ?? join(.data.user_id, ",") ?? encode_json(.data.user_id)), variant: "SHA-256") }
+  condition_5:
+    type: remap
+    inputs: [fingerprint]
+    source: |
+      if .level == "DEBUG" && .env != "prod" {
+        # drop
+        abort
+      }
+    drop_on_abort: true
+  condition_6:
+    type: remap
+    inputs: [condition_5]
+    source: |
+      if includes(["ERROR", "FATAL"], .level) {
+        # mutate
+        .tags = compact(flatten([.tags, "alerte"]))
+      }
+  routage:
+    type: route
+    inputs: [logstash_finalize]
+    reroute_unmatched: false
+    route:
+      file: '(includes(array(.tags) ?? [], "alerte") || contains(string(.tags) ?? "", "alerte"))'
+      file_b: '!((includes(array(.tags) ?? [], "alerte") || contains(string(.tags) ?? "", "alerte"))) && .data.region == "EMEA"'
+      file_b_b: '!((includes(array(.tags) ?? [], "alerte") || contains(string(.tags) ?? "", "alerte"))) && !(.data.region == "EMEA")'
