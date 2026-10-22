@@ -25,15 +25,21 @@ sources:
       enabled: true
       ca_file: /etc/vector/certs/ca.pem
     decoding:
-      codec: json
+      codec: bytes
     log_namespace: true
 transforms:
   kafka_in_init:
     type: remap
     inputs: [kafka_in]
     source: |
-      # Garantit un objet à la racine (un JSON scalaire est rangé dans message)
-      . = object(.) ?? { "message": . }
+      # Codec json : décodage de la ligne (invalide : gardée dans message, avec _jsonparsefailure)
+      raw = string(.) ?? ""
+      parsed, err = parse_json(raw)
+      if err == null {
+        . = object(parsed) ?? { "message": parsed }
+      } else {
+        . = { "message": raw, "tags": ["_jsonparsefailure"] }
+      }
       # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
       if !exists(."@timestamp") {
         ."@timestamp" = now()

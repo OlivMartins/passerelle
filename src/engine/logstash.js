@@ -757,7 +757,9 @@ function buildSource(v, st, cfg, idx, used) {
     if (Object.keys(lr).length) src.librdkafka_options = lr;
     kafkaSecurity(v, s, cfg, src);
     const codec = codecOf(s.codec) || 'plain';
-    src.decoding = { codec: /json/.test(codec) ? 'json' : 'bytes' };
+    // Codec json : avec le namespace de logs, décodé à l’étape de préparation (une ligne invalide y est gardée)
+    src.decoding = { codec: /json/.test(codec) && !v.ns ? 'json' : 'bytes' };
+    src.__json = /json/.test(codec);
     if (v.ns) src.log_namespace = true;
     else Object.assign(src, { topic_key: '_kafka_topic', partition_key: '_kafka_partition', offset_key: '_kafka_offset', key_field: '_kafka_message_key', headers_key: '_kafka_headers' });
     if (s.consumer_threads && +s.consumer_threads > 1) v.note('info', 'consumer_threads', `Logstash lisait avec ${s.consumer_threads} threads : avec Vector, le parallélisme vient du nombre de réplicas du même groupe (au plus une par partition).`);
@@ -778,7 +780,10 @@ function buildSource(v, st, cfg, idx, used) {
     };
     if (!map[st.name]) { v.stats.ko++; v.note('err', `Entrée ${st.name} non traduite (ligne ${st.line})`, 'Aucune source Vector équivalente n’a été choisie automatiquement.'); return null; }
     src = map[st.name](); src.__label = st.name; src.__detail = src.type; src.__plain = !/json/.test(codecOf(s.codec) || '');
-    if (/json/.test(codecOf(s.codec) || '')) src.decoding = { codec: 'json' };
+    // Codec json : avec le namespace de logs, décodé à l’étape de préparation, ce qui garde une ligne invalide
+    // et évite l’option decoding, que la source file ne connaît pas
+    src.__json = /json/.test(codecOf(s.codec) || '');
+    if (src.__json && !v.ns) src.decoding = { codec: 'json' };
     // Le VRL de préparation suppose le namespace de logs, quelle que soit la source
     if (v.ns) src.log_namespace = true;
     v.stats.ok++;
@@ -871,6 +876,14 @@ function translateLogstash(src, cfg) {
     // Étape d’initialisation propre à chaque source
     const g = new VrlGen(v);
     if (v.ns && r.src.__plain) { g.comment('Codec plain : le message brut devient le champ message, comme dans Logstash'); g.emit('. = { "message": . }'); }
+    else if (v.ns && r.src.__json) {
+      // Comme le codec json de Logstash : une ligne invalide est gardée dans message, avec _jsonparsefailure
+      g.comment('Codec json : décodage de la ligne (invalide : gardée dans message, avec _jsonparsefailure)');
+      g.emit('raw = string(.) ?? ""');
+      g.emit('parsed, err = parse_json(raw)');
+      g.open('if err == null'); g.emit('. = object(parsed) ?? { "message": parsed }');
+      g.close('} else {'); g.ind++; g.emit('. = { "message": raw, "tags": ["_jsonparsefailure"] }'); g.close();
+    }
     else if (v.ns) { g.comment('Garantit un objet à la racine (un JSON scalaire est rangé dans message)'); g.emit('. = object(.) ?? { "message": . }'); }
     if (cfg.vector.logstash_compat) {
       g.comment('Compatibilité Logstash : @timestamp et @version présents sur chaque événement');

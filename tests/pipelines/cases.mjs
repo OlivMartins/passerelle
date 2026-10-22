@@ -32,7 +32,7 @@ export const CASES = [
   // Sans filtre : ce que chaque moteur fait d’un événement qu’il ne transforme pas
   { id: 'transport_ligne', filter: '', lines: ['une ligne', 'une autre, avec des accents : été'] },
   { id: 'transport_objet', filter: '', events: [{ a: 1, b: 'deux', c: [3, 4.5], d: { e: null, f: true } }] },
-  { id: 'transport_json_invalide', filter: '', codec: 'json', lines: ['{"a":1}', 'ligne non json', '{"a":2}'], known: 'une ligne JSON invalide est perdue ; Logstash la garde dans message, avec _jsonparsefailure' },
+  { id: 'transport_json_invalide', filter: '', codec: 'json', lines: ['{"a":1}', 'ligne non json', '{"a":2}'] },
   { id: 'transport_event_original', filter: '', lines: ['une ligne'], exact: ['original'], known: { v8: 'la traduction ne pose pas [event][original], que les codecs de Logstash ajoutent en mode ECS' } },
   { id: 'transport_horodatage_ingestion', filter: '', lines: ['une ligne'], exact: ['horodatage'], known: 'Logstash écrit l’horodatage d’ingestion à la nanoseconde, la traduction à la milliseconde' },
 
