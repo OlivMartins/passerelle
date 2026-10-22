@@ -16,7 +16,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache%202.0-1E7A68?style=flat-square&labelColor=1B2A33" alt="Licence Apache 2.0"></a>
   <img src="https://img.shields.io/badge/Linux-x86__64-53636B?style=flat-square&labelColor=1B2A33" alt="Linux x86_64">
   <img src="https://img.shields.io/badge/test%C3%A9%20avec-ClickHouse%2026.9-53636B?style=flat-square&labelColor=1B2A33" alt="Testé avec ClickHouse 26.9">
-  <img src="https://img.shields.io/badge/test%C3%A9%20avec-Vector%200.49-53636B?style=flat-square&labelColor=1B2A33" alt="Testé avec Vector 0.49">
+  <img src="https://img.shields.io/badge/test%C3%A9%20avec-Vector%200.59-53636B?style=flat-square&labelColor=1B2A33" alt="Testé avec Vector 0.59">
 </p>
 
 <p align="center">
