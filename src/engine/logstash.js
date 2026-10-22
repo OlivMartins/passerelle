@@ -241,7 +241,10 @@ class VrlGen {
   common(s) {
     for (const [k, v] of lsPairs(s.add_field)) {
       if (/%\{/.test(k)) { this.v.note('warn', 'Nom de champ dynamique', `add_field « ${k} » : un nom calculé n’est pas pris en charge, champ ignoré.`); continue; }
-      this.assign(this.path(k), this.sprintfValue(v), typeof v === 'string' ? 'str' : 'any');
+      // Comme Logstash : sur un champ qui existe déjà, la valeur est ajoutée et le champ devient un tableau
+      const p = this.path(k); const val = this.sprintfValue(v);
+      if (this.tget(p) === 'null') this.assign(p, val, typeof v === 'string' ? 'str' : 'any');
+      else { this.emit(`if exists(${p}) { ${p} = push(array(${p}) ?? [${p}], ${val}) } else { ${p} = ${val} }`); this.tset(p, 'any'); }
     }
     lsList(s.remove_field).forEach(f => this.delField(f));
     if (s.add_tag) this.addTags(lsList(s.add_tag));
@@ -360,7 +363,17 @@ class VrlGen {
       // Avec target, les captures sont posées sous ce champ plutôt qu’à la racine
       const tgt = s.target ? this.path(s.target) : '';
       const under = f => (tgt ? `${tgt}.${fieldSegs(f).map(segName).join('.')}` : this.path(f));
-      const land = x => (tgt ? this.assign(tgt, `merge(object(${tgt}) ?? {}, ${x})`) : this.mergeRoot(x));
+      // Comme Logstash : une capture dont le champ existe déjà s’y ajoute, et le champ devient un tableau (sauf overwrite)
+      const overwrite = lsList(s.overwrite);
+      const landRoot = x => {
+        this.emit('dup = {}');
+        this.open(`for_each(${x}) -> |k, val|`);
+        this.emit('old = get!(., [k])');
+        this.emit(`if old != null${overwrite.length ? ` && !includes([${overwrite.map(vq).join(', ')}], k)` : ''} { dup = set!(dup, [k], push(array(old) ?? [old], val)) }`);
+        this.close();
+        this.mergeRoot(`merge(${x}, dup)`);
+      };
+      const land = x => (tgt ? this.assign(tgt, `merge(object(${tgt}) ?? {}, ${x})`) : landRoot(x));
       if (pats.length === 1) { this.emit(`parsed, err = parse_grok(${src}, ${vraw(pats[0], 's')})`); this.open('if err == null'); land('parsed'); }
       else { this.emit(`parsed = ${pats.map(x => `parse_grok(${src}, ${vraw(x, 's')})`).join(' ?? ')} ?? null`); this.open('if parsed != null'); land('object!(parsed)'); }
       for (const [tmp, f] of moves) this.assign(under(f), `del(${tgt}.${tmp})`);

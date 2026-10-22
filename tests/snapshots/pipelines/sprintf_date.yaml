@@ -6,5 +6,5 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .jour = (format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: "%Y.%m.%d") ?? "")
-      .heure = (format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: "%H:%M:%S") ?? "")
+      if exists(.jour) { .jour = push(array(.jour) ?? [.jour], (format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: "%Y.%m.%d") ?? "")) } else { .jour = (format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: "%Y.%m.%d") ?? "") }
+      if exists(.heure) { .heure = push(array(.heure) ?? [.heure], (format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: "%H:%M:%S") ?? "")) } else { .heure = (format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: "%H:%M:%S") ?? "") }

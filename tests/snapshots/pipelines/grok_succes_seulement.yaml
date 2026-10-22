@@ -8,8 +8,13 @@ transforms:
       # grok
       parsed, err = parse_grok(.message, s'%{IP:ip}')
       if err == null {
-        . = merge(object!(.), parsed)
-        .source = "grok"
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
+        if exists(.source) { .source = push(array(.source) ?? [.source], "grok") } else { .source = "grok" }
         .tags = compact(flatten([.tags, "analyse"]))
       } else {
         .tags = compact(flatten([.tags, "_grokparsefailure"]))

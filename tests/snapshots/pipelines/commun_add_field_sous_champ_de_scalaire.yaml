@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .x.y = "z"
+      if exists(.x.y) { .x.y = push(array(.x.y) ?? [.x.y], "z") } else { .x.y = "z" }

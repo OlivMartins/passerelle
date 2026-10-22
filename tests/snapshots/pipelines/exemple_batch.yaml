@@ -23,7 +23,7 @@ transforms:
     inputs: [dissect]
     source: |
       # mutate
-      .date_time = (to_string(.date) ?? join(.date, ",") ?? encode_json(.date)) + " " + (to_string(.time) ?? join(.time, ",") ?? encode_json(.time))
+      if exists(.date_time) { .date_time = push(array(.date_time) ?? [.date_time], (to_string(.date) ?? join(.date, ",") ?? encode_json(.date)) + " " + (to_string(.time) ?? join(.time, ",") ?? encode_json(.time))) } else { .date_time = (to_string(.date) ?? join(.date, ",") ?? encode_json(.date)) + " " + (to_string(.time) ?? join(.time, ",") ?? encode_json(.time)) }
   date:
     type: remap
     inputs: [mutate]

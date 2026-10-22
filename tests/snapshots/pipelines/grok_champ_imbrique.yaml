@@ -8,7 +8,12 @@ transforms:
       # grok
       parsed, err = parse_grok(.message, s'%{IP:ls__client__ip} %{NUMBER:ls__http__status}')
       if err == null {
-        . = merge(object!(.), parsed)
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
         .client.ip = del(.ls__client__ip)
         .http.status = del(.ls__http__status)
         .http.status = to_int(.http.status) ?? .http.status

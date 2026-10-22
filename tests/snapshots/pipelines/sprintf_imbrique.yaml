@@ -6,4 +6,4 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .k = (to_string(.a.b) ?? join(.a.b, ",") ?? encode_json(.a.b)) + "/" + (to_string(.a.c) ?? join(.a.c, ",") ?? encode_json(.a.c))
+      if exists(.k) { .k = push(array(.k) ?? [.k], (to_string(.a.b) ?? join(.a.b, ",") ?? encode_json(.a.b)) + "/" + (to_string(.a.c) ?? join(.a.c, ",") ?? encode_json(.a.c))) } else { .k = (to_string(.a.b) ?? join(.a.b, ",") ?? encode_json(.a.b)) + "/" + (to_string(.a.c) ?? join(.a.c, ",") ?? encode_json(.a.c)) }

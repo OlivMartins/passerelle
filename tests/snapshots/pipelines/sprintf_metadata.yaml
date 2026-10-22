@@ -6,10 +6,10 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      %cle = "valeur"
+      if exists(%cle) { %cle = push(array(%cle) ?? [%cle], "valeur") } else { %cle = "valeur" }
   mutate_2:
     type: remap
     inputs: [mutate]
     source: |
       # mutate
-      .k = (to_string(%cle) ?? join(%cle, ",") ?? encode_json(%cle))
+      if exists(.k) { .k = push(array(.k) ?? [.k], (to_string(%cle) ?? join(%cle, ",") ?? encode_json(%cle))) } else { .k = (to_string(%cle) ?? join(%cle, ",") ?? encode_json(%cle)) }

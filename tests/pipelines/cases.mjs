@@ -93,7 +93,7 @@ export const CASES = [
 
   // Options communes à tous les filtres
   { id: 'commun_add_field', filter: 'mutate { add_field => { "k" => "v" "[x][y]" => "z" } }', events: [{ n: 1 }, { x: { t: 1 } }] },
-  { id: 'commun_add_field_champ_existant', filter: 'mutate { add_field => { "k" => "v" "[x][y]" => "z" } }', events: [{ k: 'déjà' }, { x: { y: 'déjà' } }], known: 'sur un champ qui existe, Logstash ajoute la valeur et en fait un tableau ; la traduction écrase' },
+  { id: 'commun_add_field_champ_existant', filter: 'mutate { add_field => { "k" => "v" "[x][y]" => "z" } }', events: [{ k: 'déjà' }, { x: { y: 'déjà' } }] },
   { id: 'commun_add_field_sous_champ_de_scalaire', filter: 'mutate { add_field => { "[x][y]" => "z" } }', events: [{ x: 'scalaire' }], known: 'Logstash refuse d’écrire sous un champ scalaire et pose _mutate_error ; la traduction remplace le scalaire' },
   { id: 'commun_remove_field', filter: 'mutate { remove_field => ["a", "[x][y]"] }', events: [{ a: 1, b: 2 }, { x: { y: 1, z: 2 } }, { x: { y: 1 } }, { b: 2 }] },
   { id: 'commun_remove_field_dynamique', filter: 'mutate { remove_field => ["%{nom}"] }', events: [{ nom: 'a', a: 1 }, { nom: '[x][y]', x: { y: 1, z: 2 } }, { a: 1 }] },
@@ -144,7 +144,7 @@ export const CASES = [
   { id: 'grok_motif_defini', filter: 'grok { pattern_definitions => { "CODE" => "[A-Z]{3}-[0-9]+" } match => { "message" => "%{CODE:code} %{GREEDYDATA:reste}" } }', lines: ['ABC-123 le reste du message', 'abc-1 pas de code'] },
   { id: 'grok_champ_imbrique', filter: 'grok { match => { "message" => "%{IP:[client][ip]} %{NUMBER:[http][status]:int}" } }', lines: ['10.0.0.1 200'] },
   { id: 'grok_capture_anonyme', filter: 'grok { match => { "message" => "%{IP} %{WORD:action} (?<code>[A-Z]+)" } }', lines: ['10.0.0.1 connexion OK'] },
-  { id: 'grok_champ_existant', filter: 'grok { match => { "message" => "%{WORD:verb} %{URIPATH:chemin}" } }', events: [{ message: 'GET /a', verb: 'déjà' }], known: 'quand le champ capturé existe déjà, Logstash ajoute la capture et en fait un tableau ; la traduction écrase' },
+  { id: 'grok_champ_existant', filter: 'grok { match => { "message" => "%{WORD:verb} %{URIPATH:chemin}" } }', events: [{ message: 'GET /a', verb: 'déjà' }] },
   { id: 'grok_overwrite', filter: 'grok { match => { "message" => "%{TIMESTAMP_ISO8601:quand} %{GREEDYDATA:message}" } overwrite => ["message"] }', lines: ['2026-03-10T08:15:30Z le texte utile'] },
   { id: 'grok_source_absente', filter: 'grok { match => { "message" => "%{WORD:verb}" } }', events: [{ n: 1 }, { message: null }] },
   { id: 'grok_source_nombre', filter: 'grok { match => { "message" => "%{WORD:verb}" } }', events: [{ message: 42 }], known: 'Logstash lit un nombre comme du texte ; la traduction pose _grokparsefailure' },
@@ -153,7 +153,7 @@ export const CASES = [
   { id: 'grok_target', filter: 'grok { match => { "message" => "%{WORD:verb} %{URIPATH:chemin}" } target => "http" }', lines: ['GET /a'] },
   { id: 'grok_target_imbrique', filter: 'grok { match => { "message" => "%{WORD:verb} %{NUMBER:[n][v]:int}" } target => "http" }', events: [{ message: 'GET 5' }, { message: 'GET 5', http: { x: 1 } }, { message: 'rien' }] },
   { id: 'grok_journal_apache', filter: 'grok { match => { "message" => "%{COMBINEDAPACHELOG}" } }', lines: ['192.168.1.10 - alice [10/Mar/2026:08:15:30 +0000] "GET /index.html?x=1 HTTP/1.1" 200 5123 "https://exemple.fr/" "Mozilla/5.0 (X11; Linux x86_64)"'], known: { v8: 'en mode ECS, COMBINEDAPACHELOG capture sous les noms ECS ([source][address], [http][request][method]…) et type les nombres ; la traduction garde les noms historiques (clientip, verb…)' } },
-  { id: 'grok_ligne_syslog', filter: 'grok { match => { "message" => "%{SYSLOGLINE}" } }', lines: ['Mar 10 08:15:30 web-1 sshd[1234]: Accepted publickey for alice'], known: { v8: 'en mode ECS, SYSLOGLINE capture sous les noms ECS ; la traduction garde les noms historiques', disabled: 'le motif capture message, qui existe déjà : Logstash en fait un tableau, la traduction écrase' } },
+  { id: 'grok_ligne_syslog', filter: 'grok { match => { "message" => "%{SYSLOGLINE}" } }', lines: ['Mar 10 08:15:30 web-1 sshd[1234]: Accepted publickey for alice'], known: { v8: 'en mode ECS, SYSLOGLINE capture sous les noms ECS ; la traduction garde les noms historiques' } },
 
   // dissect
   { id: 'dissect_simple', filter: 'dissect { mapping => { "message" => "%{date} %{niveau} [%{service}] %{texte}" } }', lines: ['2026-03-10 INFO [api] démarrage terminé', 'ligne sans crochets'] },

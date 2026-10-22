@@ -8,7 +8,12 @@ transforms:
       # grok
       parsed, err = parse_grok(.message, s'%{WORD:verb}')
       if err == null {
-        . = merge(object!(.), parsed)
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
       } else {
         .tags = compact(flatten([.tags, "_grokparsefailure"]))
       }

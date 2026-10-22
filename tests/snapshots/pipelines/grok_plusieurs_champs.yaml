@@ -8,13 +8,23 @@ transforms:
       # grok
       parsed, err = parse_grok(.message, s'%{WORD:w}')
       if err == null {
-        . = merge(object!(.), parsed)
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
       } else {
         .tags = compact(flatten([.tags, "_grokparsefailure"]))
       }
       parsed, err = parse_grok(.autre, s'%{WORD:z}')
       if err == null {
-        . = merge(object!(.), parsed)
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
       } else {
         .tags = compact(flatten([.tags, "_grokparsefailure"]))
       }

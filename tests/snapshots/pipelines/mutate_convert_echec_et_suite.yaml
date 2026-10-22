@@ -7,5 +7,5 @@ transforms:
     source: |
       # mutate
       if .n != null { .n = to_int(.n) ?? .n }
-      .k = "v"
+      if exists(.k) { .k = push(array(.k) ?? [.k], "v") } else { .k = "v" }
       .tags = compact(flatten([.tags, "converti"]))

@@ -47,7 +47,7 @@ transforms:
       if !exists(."@version") {
         ."@version" = "1"
       }
-      .pipeline.name = "router"
+      if exists(.pipeline.name) { .pipeline.name = push(array(.pipeline.name) ?? [.pipeline.name], "router") } else { .pipeline.name = "router" }
   json:
     type: remap
     inputs: [kafka_in_init]

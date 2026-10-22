@@ -8,7 +8,12 @@ transforms:
       # grok
       parsed, err = parse_grok(.message, s'%{NUMBER:entier} %{NUMBER:flottant} %{NUMBER:texte}')
       if err == null {
-        . = merge(object!(.), parsed)
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
         .entier = to_int(.entier) ?? .entier
         .flottant = to_float(.flottant) ?? .flottant
       } else {

@@ -50,7 +50,12 @@ transforms:
       # grok · parse_access
       parsed, err = parse_grok(.message, s'%{IPORHOST:ls__client__ip} - %{DATA:ls__user__name} \[%{HTTPDATE:ts}\] "%{WORD:ls__http__method} %{DATA:ls__url__path} HTTP/%{NUMBER:ls__http__version}" %{NUMBER:ls__http__status} %{NUMBER:ls__http__bytes} "%{DATA:referrer}" "%{DATA:agent}"')
       if err == null {
-        . = merge(object!(.), parsed)
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
         .client.ip = del(.ls__client__ip)
         .user.name = del(.ls__user__name)
         .http.method = del(.ls__http__method)
@@ -109,8 +114,8 @@ transforms:
         .http.referrer = del(.referrer)
       }
       if is_string(.http.method) { .http.method = downcase!(.http.method) }
-      .event.dataset = "nginx.access"
-      .kafka.source_topic = (to_string(%kafka.topic) ?? join(%kafka.topic, ",") ?? encode_json(%kafka.topic))
+      if exists(.event.dataset) { .event.dataset = push(array(.event.dataset) ?? [.event.dataset], "nginx.access") } else { .event.dataset = "nginx.access" }
+      if exists(.kafka.source_topic) { .kafka.source_topic = push(array(.kafka.source_topic) ?? [.kafka.source_topic], (to_string(%kafka.topic) ?? join(%kafka.topic, ",") ?? encode_json(%kafka.topic))) } else { .kafka.source_topic = (to_string(%kafka.topic) ?? join(%kafka.topic, ",") ?? encode_json(%kafka.topic)) }
       del(.message)
       del(.agent)
   condition_6:
