@@ -6,15 +6,33 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### À savoir avant de mettre à jour
 
+- **Requêtes DSL lues comme Elasticsearch les lit.** Une clé inconnue (corps de recherche, `bool`, définition d’agrégation, deux clauses ou deux champs dans un même objet) fait refuser la requête (HTTP 422, code 1 de la CLI). Un paramètre inconnu, ou une option connue qui change le résultat sans être traduite (`knn`, `min_score`, `terminate_after`…), la rend « à reprendre » : son SQL s’arrête sur `throwIf`. Des requêtes jusqu’ici traduites en silence peuvent donc changer de statut.
+- **Verdict.** Les réponses de traduction portent un champ `verdict` (`ready`, `review`, `todo`, `unrecognized`) et, pour le DSL, `parameters`. Le pourcentage de couverture est arrondi vers le bas : une clause à reprendre ne laisse plus afficher 100 %.
+- **Ligne de commande.** `--fail-on` accepte aussi `review` (code 2 dès qu’un fichier n’est pas prêt). Le résumé de chaque fichier commence par son verdict, et le SQL écrit par `dsl2sql` le rappelle en en-tête.
+- **Validation SQL.** Une requête qui lit une table absente de la configuration (`index_mapping`, `default_table`, `lists.table`), une fonction de table ou un dictionnaire est refusée (HTTP 400). Restreignez aussi le compte ClickHouse du service : voir « Compte ClickHouse de validation » dans le guide d’installation.
 - **Vector 0.57 et suivants.** Une configuration générée qui utilise des variables `${VAR}`, ou des `$` doublés dans son VRL, doit être lancée avec `--dangerously-allow-env-var-interpolation`, ce que rappelle son en-tête.
 
 ### Ajouté
 
+- Verdict par traduction, du pire au meilleur : non reconnue, à reprendre, à vérifier, prête. Affiché avant le pourcentage dans l’interface, renvoyé par l’API, imprimé par la CLI.
+- Modèles de requête traduits en paramètres ClickHouse `{nom:String}` : `{{…}}` (Watcher, alertes Kibana, modèles de recherche), `$__macro`, `${var}`, `[[var]]` et `$var` (Grafana). Une borne de date en modèle est lue par `parseDateTime64BestEffort`, ou en epoch selon son `format`. Un modèle placé là où une valeur fixe est nécessaire (recherche plein texte, intervalle) rend la requête « à reprendre ».
+- `/v1/validate/sql` transmet à ClickHouse les paramètres `param_*` de l’adresse.
+- Sortie `elasticsearch` : utilisateur et mot de passe (`user`, `password`, `cloud_auth`), clé d’API, TLS (`ssl_enabled`, autorité de certification, certificat client, vérification), `data_stream` et ses options, `action`, `document_id`, `pipeline`, `http_compression`, `timeout`, `custom_headers`, `proxy`. Les secrets écrits en clair sont remplacés par des variables d’environnement.
+- Sorties `http` et `file` : méthode, en-têtes et compression repris ; toute option de sortie sans équivalent est signalée « à vérifier ».
+- Image conteneur (`Dockerfile`) et `npm run build:server`, qui construit l’interface et le serveur sans binaire autonome.
+- CI : banc différentiel joué sur Elasticsearch 7.17, 8.19 et 9.5 ; image construite et démarrée. La release rejoue toute la CI sur son étiquette avant de joindre ses fichiers.
 - Banc d’équivalence Logstash / Vector (`npm run test:pipelines`) : chaque cas est joué dans Logstash, sa traduction dans Vector, et les événements produits sont comparés champ par champ, dans les deux modes de compatibilité ECS de Logstash. Les écarts connus sont inventoriés dans `tests/pipelines/cases.mjs`. Il demande Docker ; la CI épingle Logstash 9.5.5 et Vector 0.59.0.
 - Instantanés de la traduction de chaque cas de ce banc (`tests/snapshots/pipelines`), comparés par `npm test`.
 
 ### Corrigé
 
+- `fields` et `docvalue_fields` à motif : `*`, envoyé par Discover avec `_source: false`, donnait une colonne nommée « * » que ClickHouse refuse ; il donne `SELECT *`, et `http.*` donne `COLUMNS('^http\..*$')`.
+- Options du corps de recherche ignorées en silence (`knn`, `retriever`, `min_score`, `terminate_after`, `suggest`, `slice`…) : déclarées à reprendre. Les options sans effet sur le résultat (`highlight`, `profile`, `version`…) sont signalées une fois.
+- Objet sauvegardé Kibana, ou requête KQL de Kibana, soumis à la place d’une requête DSL : refusés avec un message qui dit quoi copier, au lieu d’un `SELECT *` sans remarque.
+- `query_string` : une liste de quelques milliers de `OR` épuisait la pile (« Maximum call stack size exceeded »). Les suites d’opérateurs sont analysées sans récursion ; parenthèses, négations et requêtes imbriquées à l’excès sont refusées avec un message clair, côté DSL comme côté Logstash.
+- Sortie `elasticsearch` : un index tiré d’une métadonnée (`%{[@metadata][index]}-%{+YYYY.MM.dd}`) donnait une configuration refusée par Vector 0.57 et suivants ; les identifiants, le TLS et `data_stream` étaient perdus sans remarque.
+- La remarque « Métadonnée dans un modèle » est retirée : Vector lit une métadonnée dans un modèle (`{{ %index }}`), vérifié avec Vector 0.59.
+- `passerelle.env.example` annonçait des droits 0640 root:passerelle ; `install.sh` pose 0600 root:root.
 - Pipelines dont l’entrée n’est pas Kafka (`stdin`, `file`, `tcp`, `udp`, `http`, `beats`, `generator`) : la source Vector déclare désormais `log_namespace: true`, que suppose le VRL généré. Sans ce réglage, Vector refusait la configuration d’une entrée `stdin` en JSON, et rangeait sinon l’événement entier dans `message`.
 - Champ absent ou nul : la traduction ne crée plus le champ et ne signale plus d’échec là où Logstash ne fait rien. Sont concernés `mutate` (`gsub`, `uppercase`, `lowercase`, `capitalize`, `strip`, `split`, `join`, `copy`, `convert`, `coerce`), `remove_tag`, `truncate`, `dissect`, `date`, `json`, `xml`, `fingerprint` et `translate`. Au passage : une date `UNIX` sur un champ absent ne pose plus `@timestamp` au 1er janvier 1970, `capitalize` ne vide plus un champ qui n’est pas une chaîne, `convert` ne change plus un champ nul en 0, et `remove_tag` garde une étiquette écrite en chaîne plutôt qu’en tableau.
 - Valeurs qui différaient de celles de Logstash : `capitalize` ne coupe plus en deux une première lettre accentuée ; `split` écarte les éléments vides de fin et découpe sur les blancs quand son séparateur est une espace ; `merge` réunit les clés de deux objets au lieu d’en faire un tableau, et ne fait rien d’un objet et d’une autre valeur ; `truncate` compte des octets, sans couper un caractère ; une condition `if [champ]` est fausse pour une chaîne vide et pour la chaîne « false ».
@@ -49,6 +67,10 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
   - une conversion ratée ne pose pas `_mutate_error` ;
   - `%{champ}` absent donne une chaîne vide ;
   - la forme de l’objet `xml` est à vérifier.
+
+### Sécurité
+
+- Validation SQL : `EXPLAIN indexes = 1` évalue les sous-requêtes scalaires et imprime leur valeur dans le plan. Une requête soumise pouvait donc lire toute table accessible au compte du service. La requête est désormais analysée par `EXPLAIN AST`, qui ne lit aucune donnée, et refusée si elle lit une table hors de la configuration, une fonction de table ou un dictionnaire.
 
 ## [1.1.1] - 2026-10-22
 

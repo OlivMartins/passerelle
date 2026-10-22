@@ -14,7 +14,7 @@ Passerelle traduit les requêtes DSL Elasticsearch en SQL ClickHouse et les pipe
 
 Facultatif, selon les fonctions utilisées :
 
-- **Validation SQL** (`/v1/validate/sql`) : un accès HTTP(S) à un ClickHouse de recette et un compte en lecture seule.
+- **Validation SQL** (`/v1/validate/sql`) : un accès HTTP(S) à un ClickHouse de recette et un compte limité aux tables traduites (voir [Compte ClickHouse de validation](#compte-clickhouse-de-validation)).
 - **Validation Vector** (`/v1/validate/vector`) : le binaire `vector` installé sur la machine. Les fichiers cités par les configurations testées (certificat CA, base GeoIP, dictionnaires CSV) doivent y être présents.
 - **Publication** : un reverse proxy TLS (nginx, HAProxy) pour exposer l’interface aux utilisateurs.
 
@@ -56,6 +56,23 @@ passerelle check-config --config /etc/passerelle/passerelle.yaml
 sudo systemctl reload passerelle      # rechargement à chaud (SIGHUP), sans coupure
 ```
 
+### Compte ClickHouse de validation
+
+`/v1/validate/sql` soumet le SQL à `EXPLAIN indexes = 1`. Or ClickHouse évalue alors les sous-requêtes scalaires et imprime leur valeur dans le plan : une requête de validation peut donc lire des données. Deux barrières s’en chargent.
+
+1. **Passerelle** analyse d’abord la requête par `EXPLAIN AST`, qui ne lit rien, et refuse toute table absente de la configuration (`index_mapping`, `default_table`, `lists.table`), toute fonction de table (`url`, `file`, `remote`…) et toute lecture de dictionnaire (`dictGet`, `joinGet`).
+2. **ClickHouse** n’accorde au compte du service que la lecture de ces mêmes tables. C’est la barrière qui compte : un droit absent ne se contourne pas.
+
+```sql
+CREATE USER passerelle IDENTIFIED WITH sha256_password BY '…';
+GRANT SELECT ON logs.events TO passerelle;
+GRANT SELECT ON logs.passerelle_lists TO passerelle;     -- listes nommées, si clickhouse.lists est utilisé
+-- Plafond que la requête ne peut pas lever
+CREATE SETTINGS PROFILE passerelle_validation SETTINGS max_execution_time = 15 MAX 15 TO passerelle;
+```
+
+Une table par entrée de `index_mapping`. Aucun autre droit : sans `CREATE TEMPORARY TABLE` ni droit sur les sources (`URL`, `REMOTE`, `FILE`), les fonctions de table sont refusées par ClickHouse lui-même. Le compte se déclare dans `passerelle.env` (`CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`).
+
 ## Accès à l’interface
 
 Le service n’écoute que sur `127.0.0.1:8080`. Deux options :
@@ -88,9 +105,9 @@ Toutes les routes `/v1/*` exigent l’en-tête `Authorization: Bearer <PASSERELL
 |---|---|---|
 | GET | `/healthz` | État du service (sans jeton) |
 | GET | `/v1/config` | Configuration active, secrets masqués |
-| POST | `/v1/translate/dsl?index=logs-*` | DSL (JSON ou format console Kibana) vers SQL |
-| POST | `/v1/translate/logstash?format=yaml` | Pipeline `.conf` vers configuration Vector (`yaml` ou `toml`) |
-| POST | `/v1/validate/sql` | `EXPLAIN indexes = 1` sur le ClickHouse configuré (SELECT seul, `readonly=1`) |
+| POST | `/v1/translate/dsl?index=logs-*` | DSL (JSON ou format console Kibana) vers SQL, avec verdict, paramètres et remarques |
+| POST | `/v1/translate/logstash?format=yaml` | Pipeline `.conf` vers configuration Vector (`yaml` ou `toml`), avec verdict |
+| POST | `/v1/validate/sql?param_nom=…` | Tables vérifiées par `EXPLAIN AST`, puis `EXPLAIN indexes = 1` sur le ClickHouse configuré (SELECT seul, `readonly=1`). Les `param_*` renseignent les paramètres `{nom:Type}` |
 | POST | `/v1/validate/vector?format=yaml` | Compilation complète de la configuration et du VRL par `vector validate` |
 
 ```bash
@@ -98,6 +115,8 @@ TOKEN=$(sudo sed -n 's/^PASSERELLE_TOKEN=//p' /etc/passerelle/passerelle.env)
 curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
   -H "Authorization: Bearer $TOKEN" --data-binary @requete.json | jq -r .sql
 ```
+
+Chaque traduction porte un `verdict` : `ready` (prête), `review` (à vérifier), `todo` (à reprendre : le SQL s’arrête sur `throwIf`). Une entrée que Passerelle refuse, comme Elasticsearch la refuserait, répond 422 avec `verdict: "unrecognized"`.
 
 Les corps de requête sont limités à 2 Mio. Au plus deux validations, Vector et SQL confondues, tournent en parallèle.
 
@@ -107,10 +126,10 @@ Un navigateur ne peut pas appeler l’API depuis un autre site : `/v1/*` refuse 
 
 ```bash
 passerelle dsl2sql requetes/ --config passerelle.yaml --out build/sql --fail-on todo
-passerelle ls2vector pipelines/ --config passerelle.yaml --format yaml --out build/vector --fail-on todo
+passerelle ls2vector pipelines/ --config passerelle.yaml --format yaml --out build/vector --fail-on review
 ```
 
-Codes de sortie : `0` succès, `1` erreur, `2` éléments « à reprendre » détectés avec `--fail-on todo`. `--verbose` affiche les remarques de chaque fichier.
+Chaque fichier reçoit un verdict : prête, à vérifier, à reprendre ou non reconnue. Codes de sortie : `0` succès, `1` erreur ou fichier non reconnu, `2` fichier à reprendre (`--fail-on todo`), ou à vérifier ou à reprendre (`--fail-on review`). `--verbose` affiche les remarques de chaque fichier.
 
 ## Sécurité
 
@@ -118,7 +137,7 @@ Codes de sortie : `0` succès, `1` erreur, `2` éléments « à reprendre » dé
 - Un filtre seccomp restreint les appels système au groupe `@system-service`. Les appels réellement utilisés, y compris l’exécution de `vector validate`, ont été relevés et sont tous couverts.
 - Score `systemd-analyze security passerelle` : **1.2 (OK)**. Les points restants sont inhérents à la fonction : accès réseau, et pages exécutables nécessaires au JIT de V8.
 - En-têtes HTTP : politique CSP stricte (script autorisé par empreinte SHA-256, aucun `unsafe-eval`), `X-Frame-Options: DENY`, `nosniff`, `no-referrer`.
-- Le jeton est comparé en temps constant. La validation SQL n’accepte qu’un seul SELECT et s’exécute en `readonly=1`, qui interdit aussi de modifier les réglages, dont la limite de 15 s.
+- Le jeton est comparé en temps constant. La validation SQL n’accepte qu’un seul SELECT, sur les seules tables de la configuration vérifiées par `EXPLAIN AST`, et s’exécute en `readonly=1`, qui interdit aussi de modifier les réglages, dont la limite de 15 s.
 - `passerelle.env` n’est lisible que par root (0600) : systemd le lit au démarrage. `vector validate` ne reçoit aucune variable d’environnement du service, secrets compris.
 - Les traductions faites dans l’interface restent dans le navigateur. Seuls les appels explicites à l’API passent par le serveur.
 - L’interface ne charge aucune ressource externe (polices système, aucun CDN) : aucune donnée de navigation ne sort vers un tiers.
