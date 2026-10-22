@@ -53,7 +53,14 @@ export function dataset() {
       user,
       tags: i % 4 === 0 ? undefined : i % 4 === 1 ? [] : i % 4 === 2 ? ['a'] : pick([['a', 'b'], ['b', 'c', 'a'], ['c']]),
       method: pick(['GET', 'POST', 'PUT']),
-      message: messages[i % 10]
+      message: messages[i % 10],
+      // Les champs suivants sont tirés de i et non de rnd() : les valeurs des champs précédents ne bougent pas.
+      // Tableau numérique : absent, vide, une ou deux valeurs
+      nums: i % 6 === 0 ? undefined : i % 6 === 1 ? [] : i % 6 === 2 ? [i % 13] : [i % 13, (i * 7) % 29],
+      // Entier facultatif, 0 compris : avec des valeurs par défaut, 0 ne se distingue plus d’un absent
+      retries: i % 4 === 0 ? undefined : (i * 3) % 5,
+      // Second champ plein texte : un mot peut être dans message et l’autre dans title
+      title: ['payment failed', 'upstream timeout', 'cart updated', 'Payment Timeout', 'user login', 'disk alert', 'retry scheduled'][i % 7]
     });
   }
   return docs;
@@ -75,7 +82,10 @@ export const ES_INDEX = {
       user: { type: 'keyword' },
       tags: { type: 'keyword' },
       http: { properties: { method: { type: 'keyword' } } },
-      message: { type: 'text', fields: { keyword: { type: 'keyword', ignore_above: 1024 } } }
+      message: { type: 'text', fields: { keyword: { type: 'keyword', ignore_above: 1024 } } },
+      nums: { type: 'long' },
+      retries: { type: 'long' },
+      title: { type: 'text' }
     }
   }
 };
@@ -103,7 +113,10 @@ export function columns(variant) {
     user: variant === 'N' ? 'Nullable(String)' : 'String',
     tags: 'Array(String)',
     'http.method': 'LowCardinality(String)',
-    message: 'String'
+    message: 'String',
+    nums: 'Array(Int64)',
+    retries: variant === 'N' ? 'Nullable(Int64)' : 'Int64',
+    title: 'String'
   };
 }
 
@@ -124,7 +137,7 @@ export function configOverride(variant = 'N') {
     clickhouse: {
       default_table: TABLE,
       time_field: 'timestamp',
-      text_fields: ['message'],
+      text_fields: ['message', 'title'],
       index_mapping: { 'logs-*': TABLE },
       field_mapping: { '@timestamp': 'timestamp' },
       columns: columns(variant),

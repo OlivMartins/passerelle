@@ -40,7 +40,7 @@ SELECT
     service.name AS par_service,
     toStartOfInterval(timestamp, INTERVAL 1 HOUR, 'Europe/Paris') AS par_heure,
     count() AS doc_count,
-    quantilesTDigest(0.95)(latency_ms) AS latence_p95,
+    arrayMap(v -> if(isNaN(v), NULL, v), quantilesTDigest(0.95)(latency_ms)) AS latence_p95,
     avgOrNull(latency_ms) AS latence_moy,
     sum(count()) OVER (PARTITION BY par_service) AS par_service_doc_count
 FROM base

@@ -15,8 +15,9 @@
  *   composite  nom de l’agrégation composite à paginer jusqu’au bout des deux côtés
  *   tol        tolérance relative pour les mesures approchées (cardinality, percentiles)
  *   config     options de configuration propres au cas, fusionnées avec celles du banc
+ *   pit        requête jouée sous un point-in-time côté Elasticsearch (tri sur _shard_doc)
  */
-import { BASE, DAY } from './dataset.mjs';
+import { BASE, DAY, dataset } from './dataset.mjs';
 
 const TS = '@timestamp';
 const T10 = BASE + 2 * DAY; // 2026-03-10T00:00:00Z
@@ -24,7 +25,8 @@ const PARIS = ['UTC', 'Europe/Paris'];
 const STRICT = { clickhouse: { text_match: 'strict' } };
 const total = query => ({ size: 0, track_total_hits: true, query });
 const perDay = aggs => ({ size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day' }, aggs } } });
-const CLASSE = "if (doc['latency_ms'].value < 100) { emit('rapide'); } else if (doc['latency_ms'].value < 1000) { emit('normal'); } else { emit('lent'); }";
+const EPOCH = k => Date.parse(dataset()[k]['@timestamp']); // horodatage exact du document k
+const CLASSE ="if (doc['latency_ms'].value < 100) { emit('rapide'); } else if (doc['latency_ms'].value < 1000) { emit('normal'); } else { emit('lent'); }";
 
 export const CASES = [
   /* ---------- Regroupements ---------- */
@@ -287,5 +289,66 @@ export const CASES = [
   { id: 'composite_page_simple', dsl: { size: 0, aggs: { c: { composite: { size: 10, after: { svc: 'cart', h: 'web-3' }, sources: [{ svc: { terms: { field: 'service' } } }, { h: { terms: { field: 'host' } } }] } } } } },
   { id: 'composite_histogramme', composite: 'c', dsl: { size: 0, aggs: { c: { composite: { size: 9, sources: [{ tranche: { histogram: { field: 'latency_ms', interval: 500 } } }, { svc: { terms: { field: 'service', order: 'desc' } } }] } } } } },
   { id: 'composite_export_complet', composite: 'c', config: { clickhouse: { composite_mode: 'stream' } }, dsl: { size: 0, aggs: { c: { composite: { size: 400, sources: [{ svc: { terms: { field: 'service' } } }, { h: { terms: { field: 'host' } } }, { lvl: { terms: { field: 'level' } } }, { st: { terms: { field: 'status' } } }, { m: { terms: { field: 'http.method' } } }] }, aggs: { lat: { avg: { field: 'latency_ms' } } } } } } },
-  { id: 'composite_multivalue', composite: 'c', dsl: { size: 0, aggs: { c: { composite: { size: 10, sources: [{ t: { terms: { field: 'tags' } } }, { svc: { terms: { field: 'service' } } }] } } } } }
+  { id: 'composite_multivalue', composite: 'c', dsl: { size: 0, aggs: { c: { composite: { size: 10, sources: [{ t: { terms: { field: 'tags' } } }, { svc: { terms: { field: 'service' } } }] } } } } },
+
+  /* ---------- Écarts relevés par l’audit du 2026-10-21 : filtres et texte ---------- */
+  // term, prefix et regexp sur un champ texte portent sur les mots analysés, pas sur la valeur entière
+  { id: 'audit_term_champ_texte', dsl: total({ term: { message: 'timeout' } }) },
+  { id: 'audit_prefix_champ_texte', dsl: total({ prefix: { message: 'time' } }) },
+  // Valeur non analysée : les mots du champ sont en minuscules, une majuscule ne trouve rien
+  { id: 'audit_term_champ_texte_majuscule', dsl: total({ term: { message: 'Timeout' } }) },
+  { id: 'audit_prefix_champ_texte_majuscule', dsl: total({ prefix: { message: 'Time' } }) },
+  { id: 'audit_regexp_champ_texte', dsl: total({ regexp: { message: 'time.*' } }) },
+  // best_fields (défaut) avec operator and : tous les mots dans un même champ
+  { id: 'audit_multi_match_et_deux_champs', dsl: total({ multi_match: { query: 'timeout payment', fields: ['message', 'title'], operator: 'and' } }) },
+  // bool_prefix : le dernier mot est un préfixe, « upstr » doit trouver « upstream » dans title
+  { id: 'audit_multi_match_bool_prefix', dsl: total({ multi_match: { query: 'connection upstr', type: 'bool_prefix', fields: ['message', 'title'] } }) },
+  // « Connection reset by peer » : peer est à deux positions de l’endroit attendu
+  { id: 'audit_phrase_slop', dsl: total({ match_phrase: { message: { query: 'connection peer', slop: 2 } } }) },
+  { id: 'audit_phrase_slop_un', dsl: total({ match_phrase: { message: { query: 'reset peer', slop: 1 } } }) },
+  { id: 'audit_phrase_slop_inversion', known: 'proximité : les mots inversés ne sont pas trouvés (signalé « à vérifier »)', dsl: total({ match_phrase: { message: { query: 'peer connection', slop: 6 } } }) },
+  { id: 'audit_query_string_proximite', dsl: total({ query_string: { query: 'message:"connection peer"~2' } }) },
+  // Aucun mot après analyse : zero_terms_query vaut none par défaut, aucun document
+  { id: 'audit_match_sans_mot', dsl: total({ match: { message: '!!!' } }) },
+  // Deux lettres inversées comptent pour une seule modification (transpositions: true par défaut)
+  { id: 'audit_flou_transposition', dsl: total({ fuzzy: { message: { value: 'tiemout', fuzziness: 1 } } }) },
+  { id: 'audit_term_epoch', dsl: total({ term: { [TS]: EPOCH(5) } }) },
+  { id: 'audit_terms_epoch', dsl: total({ terms: { [TS]: [EPOCH(5), EPOCH(6)] } }) },
+  { id: 'audit_plage_format', dsl: total({ range: { [TS]: { gte: '09/03/2026', lt: '10/03/2026', format: 'dd/MM/yyyy' } } }) },
+  // Sans heure dans le motif, lte va jusqu’à la fin du jour
+  { id: 'audit_plage_format_borne_incluse', tz: PARIS, dsl: total({ range: { [TS]: { gt: '08/03/2026', lte: '09/03/2026', format: 'dd/MM/yyyy' } } }) },
+  { id: 'audit_plage_format_heure', dsl: total({ range: { [TS]: { gte: '09/03/2026 06:30', lt: '09/03/2026 18:00', format: 'dd/MM/yyyy HH:mm' } } }) },
+  { id: 'audit_ids',dsl: { size: 5, sort: [{ [TS]: 'asc' }], query: { ids: { values: ['3', '10', '2999', 'abc'] } } } },
+  { id: 'audit_ids_vide', dsl: total({ ids: { values: [] } }) },
+
+  /* ---------- Écarts relevés par l’audit du 2026-10-21 : agrégations ---------- */
+  // Les cinq valeurs de retries ont exactement 450 documents : Elasticsearch départage par clé croissante
+  { id: 'audit_terms_ordre_explicite_egalites', known: { D: 'valeur par défaut : 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } } } } } },
+  { id: 'audit_terms_imbrique_egalites', known: { D: 'valeur par défaut : 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } }, aggs: { lvl: { terms: { field: 'level', size: 2 } } } } } } },
+  // 5 h ne divise pas 24 : Elasticsearch aligne les tranches sur l’epoch, pas sur minuit
+  { id: 'audit_date_5h', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, fixed_interval: '5h' } } } } },
+  { id: 'audit_date_offset', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day', offset: '+6h' } } } } },
+  { id: 'audit_date_fuseau_decalage', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day', time_zone: '+01:00' } } } } },
+  { id: 'audit_plage_fuseau_decalage', tz: PARIS, dsl: { size: 3, sort: [{ [TS]: 'asc' }], query: { range: { [TS]: { gte: '2026-03-10||/d', lt: '2026-03-10||+1d/d', time_zone: '+09:00' } } } } },
+  // Elasticsearch refuse un intervalle calendaire multiple : la traduction doit le refuser aussi
+  { id: 'audit_date_intervalle_invalide', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: '2d' } } } } },
+  { id: 'audit_mesures_tableau', dsl: { size: 0, aggs: { s: { stats: { field: 'nums' } } } } },
+  { id: 'audit_extended_stats_tableau', dsl: { size: 0, query: { range: { status: { gte: 500 } } }, aggs: { s: { extended_stats: { field: 'nums' } } } } },
+  { id: 'audit_mesures_tableau_par_groupe', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { s: { stats: { field: 'nums' } }, p: { percentiles: { field: 'nums', percents: [50] } } } } } }, tol: 0.05 },
+  { id: 'audit_percentiles_tableau', tol: 0.05, dsl: { size: 0, aggs: { p: { percentiles: { field: 'nums', percents: [50, 90] } } } } },
+  { id: 'audit_histogramme_tableau', dsl: { size: 0, aggs: { h: { histogram: { field: 'nums', interval: 5 } } } } },
+  { id: 'audit_percentiles_sans_document', dsl: { size: 0, query: { term: { service: 'inconnu' } }, aggs: { p: { percentiles: { field: 'latency_ms', percents: [50] } } } } },
+  { id: 'audit_multi_terms_absent', dsl: { size: 0, aggs: { m: { multi_terms: { terms: [{ field: 'service' }, { field: 'env' }], size: 30 } } } } },
+  /* ---------- Écarts relevés par l’audit du 2026-10-21 : tri et pagination ---------- */
+  { id: 'audit_search_after_deux_cles', dsl: { size: 10, sort: [{ status: 'asc' }, { [TS]: 'asc' }], search_after: [404, T10] } },
+  { id: 'audit_search_after_sens_mixtes', dsl: { size: 10, sort: [{ [TS]: 'desc' }, { host: 'asc' }], search_after: [T10, 'web-3'] } },
+  // Forme recommandée par Elasticsearch : point-in-time et départage par _shard_doc
+  { id: 'audit_search_after_shard_doc', pit: true, dsl: { size: 10, sort: [{ [TS]: 'desc' }, { _shard_doc: 'asc' }], search_after: [T10, 100] } },
+  // Tri sur un champ multivalué : Elasticsearch prend le minimum en croissant ; un document sans valeur va à la fin
+  { id: 'audit_tri_tableau', dsl: { size: 10, sort: [{ nums: 'asc' }, { [TS]: 'asc' }] } },
+  { id: 'audit_tri_tableau_desc', dsl: { size: 10, sort: [{ nums: 'desc' }, { [TS]: 'asc' }] } },
+  { id: 'audit_top_metrics_size_croissant', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { t: { top_metrics: { metrics: { field: 'bytes' }, sort: { latency_ms: 'asc' }, size: 2 } } } } } } },
+  // Elasticsearch refuse un tri de top_metrics sur un champ keyword : la traduction aussi
+  { id: 'audit_top_metrics_size_chaine', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { host: 'desc' }, size: 3 } } } } },
+  { id: 'audit_top_metrics_size', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { [TS]: 'desc' }, size: 3 } } } } }
 ];

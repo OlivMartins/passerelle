@@ -533,7 +533,19 @@ function rangeClause(ctx, field, spec0) {
     if (v === undefined || v === null) continue;
     let sql, s = sym, date = false;
     const dm = parseDateMath(v);
-    if (dm) {
+    const pattern = customDateFormat(fmt);
+    if (pattern && typeof v === 'string') {
+      // Format personnalisé (dd/MM/yyyy) : ClickHouse lit la date avec le même motif. Sans heure dans le motif,
+      // gt et lte vont jusqu’à la fin du jour, comme Elasticsearch.
+      if (/\|\||^now/.test(v)) throw new Error(`calcul de date avec le format ${fmt} : à traduire à la main (${v})`);
+      const zone = zoneOf(ctx.cfg, tz);
+      sql = `parseDateTime64InJodaSyntax(${chStr(v)}, ${chStr(pattern)}${zone ? `, ${chStr(zone)}` : ''})`;
+      if ((op === 'gt' || op === 'lte') && !/[Hhkms]/.test(pattern)) {
+        if (!/d/.test(pattern)) throw new Error(`borne ${op} avec le format ${fmt} : l’arrondi au mois ou à l’année est à traduire à la main`);
+        sql += ' + INTERVAL 1 DAY'; s = op === 'gt' ? '>=' : '<';
+      }
+      date = true;
+    } else if (dm) {
       // Bornes « gt » et « lte » : Elasticsearch arrondit vers le haut, jusqu’à la fin de l’unité arrondie (now/d)
       // ou jusqu’à la fin du jour quand la date est écrite sans heure (2026-03-10).
       const upper2 = op === 'gt' || op === 'lte';
@@ -564,6 +576,16 @@ function rangeClause(ctx, field, spec0) {
   if (multi) return `arrayExists(x -> ${parts.join(' AND ')}, ${f})`;
   if (parts.length === 2 && spec.gte !== undefined && spec.lte !== undefined && !isDate) return `${f} BETWEEN ${chVal(spec.gte)} AND ${chVal(spec.lte)}`;
   return andJoin(parts);
+}
+// Motif de date personnalisé (dd/MM/yyyy), par opposition aux formats nommés d’Elasticsearch
+// (strict_date_optional_time, epoch_millis…) ; null s’il n’y en a pas
+function customDateFormat(fmt) {
+  if (!fmt) return null;
+  const parts = String(fmt).split('||');
+  const custom = parts.filter(p => !/^[a-z_]+$/.test(p) || /yy|dd|HH|mm|ss/.test(p));
+  if (!custom.length) return null;
+  if (parts.length > 1) throw new Error(`plusieurs formats de date (${fmt}) : à traduire à la main`);
+  return custom[0];
 }
 /* ---------- Recherche plein texte ---------- */
 /*
@@ -605,7 +627,7 @@ const strictText = ctx => ctx.cfg.clickhouse.text_match === 'strict';
  * « user » n’est pas trouvé dans « user_id » ni dans « user.name », « 3.14 » ne l’est pas dans « 3.14s ».
  * prefix : le dernier mot peut se prolonger (match_phrase_prefix).
  */
-function wordsRegex(tokens, strict, prefix) {
+function wordsRegex(tokens, strict, prefix, slop) {
   const W = '\\p{L}\\p{N}_';
   const first = tokens[0]; const last = tokens[tokens.length - 1];
   const digitFirst = /^\p{N}/u.test(first); const digitLast = /\p{N}$/u.test(last);
@@ -615,7 +637,9 @@ function wordsRegex(tokens, strict, prefix) {
     right = digitLast ? `(?:$|[^${W}.,']|[.,'](?:$|[^\\p{N}]))` : `(?:$|[^${W}.'’]|[.'’](?:$|[^\\p{L}_]))`;
     sep = `(?:[^${W}.,'’]|[.,'’](?:$|[^${W}]))[^${W}]*`;
   }
-  return `(?i)${left}${tokens.map(escRe).join(sep)}${prefix ? '' : right}`;
+  // slop : jusqu’à slop mots entre deux mots cherchés, dans l’ordre
+  const join = slop ? `${sep}(?:[${W}]+${sep}){0,${slop}}` : sep;
+  return `(?i)${left}${tokens.map(escRe).join(join)}${prefix ? '' : right}`;
 }
 // Le document contient ce mot (au sens d’Elasticsearch)
 function wordCond(ctx, f, token) {
@@ -626,11 +650,11 @@ function wordCond(ctx, f, token) {
   return parts.length === 1 && parts[0] === token ? pre[0] : andJoin(pre.concat([`positionCaseInsensitiveUTF8(${f}, ${chStr(token)}) > 0`]));
 }
 // Le document contient ces mots à la suite ; prefix : le dernier n’est qu’un début de mot
-function phraseCond(ctx, f, tokens, prefix) {
+function phraseCond(ctx, f, tokens, prefix, slop) {
   if (tokens.length === 1 && !prefix) return wordCond(ctx, f, tokens[0]);
   const complete = prefix ? tokens.slice(0, -1) : tokens;
   const pre = [...new Set(complete.flatMap(hasTokenParts))].map(p => hasTok(f, p));
-  return andJoin(pre.concat([`match(${f}, ${chStr(wordsRegex(tokens, strictText(ctx), prefix))})`]));
+  return andJoin(pre.concat([`match(${f}, ${chStr(wordsRegex(tokens, strictText(ctx), prefix, slop))})`]));
 }
 function matchClause(ctx, field, o, type) {
   const q = o.query;
@@ -644,7 +668,8 @@ function matchClause(ctx, field, o, type) {
   }
   textIndexNote(ctx, f);
   const words = esTokens(q);
-  if (!words.length) { ctx.stats.ok++; return null; }
+  // Aucun mot après analyse : aucun document, sauf zero_terms_query: all
+  if (!words.length) { ctx.stats.ok++; return o.zero_terms_query === 'all' ? null : 'false'; }
   if (!strictText(ctx)) ctx.notes.add('info', 'Recherche plein texte par tokens', 'Chaque mot est cherché par hasToken() dans la colonne mise en minuscules, ce qu’un index text sait exploiter. Un mot simple trouve aussi ses occurrences collées à un autre par « _ », « . » ou une apostrophe (user dans user_id), ce qu’Elasticsearch ne fait pas. Pour une équivalence stricte, clickhouse.text_match: strict ajoute à chaque mot une vérification par expression régulière.');
   if (type === 'match') {
     if (o.fuzziness !== undefined && String(o.fuzziness) !== '0') {
@@ -663,7 +688,14 @@ function matchClause(ctx, field, o, type) {
   ctx.stats.ok++;
   if (type === 'match_phrase') {
     H(ctx, 'text', `${field} contient « ${String(q).trim()} »`);
-    return phraseCond(ctx, f, words, false);
+    const slop = o.slop !== undefined ? chInt(o.slop, 'slop') : 0;
+    // Mots dans l’ordre, avec au plus slop mots entre deux : exact pour deux mots et slop 1. Elasticsearch accepte
+    // aussi les mots inversés (dès slop 2), et compte le slop sur toute la phrase, pas entre chaque paire.
+    if (slop && words.length > 1 && (slop >= 2 || words.length > 2)) {
+      ctx.stats.ok--; ctx.stats.approx++;
+      ctx.notes.add('warn', `Proximité (slop ${slop}) sur ${field}`, 'Les mots sont cherchés dans l’ordre, avec au plus ' + slop + ' mots entre deux. Elasticsearch trouve aussi les mots inversés et répartit le slop sur toute la phrase.');
+    }
+    return phraseCond(ctx, f, words, false, slop);
   }
   H(ctx, 'text', `${field} contient « ${String(q).trim()}… »`);
   if (type === 'match_phrase_prefix') return phraseCond(ctx, f, words, true);
@@ -691,7 +723,11 @@ function clauseSQL(ctx, q) {
       const sources = ci ? undefined : runtimeFilter(ctx, field, [v]);
       if (sources !== undefined) { ctx.stats.ok++; return sources; }
       const f = mapField(ctx, field); ctx.stats.ok++;
+      // Champ texte : term compare la valeur, sans l’analyser, à chacun des mots (en minuscules) du champ
+      if (isTextField(ctx, field) && !ci) { textIndexNote(ctx, f); const t = esTokens(String(v)); return t.length === 1 && t[0] === String(v) ? wordCond(ctx, f, t[0]) : 'false'; }
       if (ci) return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(v))}`);
+      // Date donnée en epoch millis, comme dans range
+      if (typeof v === 'number' && isDateField(ctx, field)) return `${f} = ${epochMillisSQL(v)}`;
       return isArrayField(ctx, field) ? `has(${f}, ${chVal(v)})` : `${f} = ${chVal(v)}`;
     }
     case 'terms': {
@@ -702,7 +738,7 @@ function clauseSQL(ctx, q) {
       if (sources !== undefined) { ctx.stats.ok++; return sources; }
       const f = mapField(ctx, field); ctx.stats.ok++;
       if (isArrayField(ctx, field)) return vals.length === 1 ? `has(${f}, ${chVal(vals[0])})` : `hasAny(${f}, [${vals.map(chVal).join(', ')}])`;
-      return inList(ctx, f, vals.map(chVal));
+      return inList(ctx, f, vals.map(v => (typeof v === 'number' && isDateField(ctx, field) ? epochMillisSQL(v) : chVal(v))));
     }
     case 'range': { const [field, spec] = fieldEntry(body); return rangeClause(ctx, field, spec); }
     case 'exists': {
@@ -725,6 +761,8 @@ function clauseSQL(ctx, q) {
       const v = isObj(raw) ? raw.value : raw; const ci = isObj(raw) && raw.case_insensitive;
       ctx.stats.ok++;
       H(ctx, 'filters', `${field} commence par « ${v} »`);
+      // Champ texte : l’un des mots commence par la valeur, comme pour fuzzy
+      if (isTextField(ctx, field)) { const f = mapField(ctx, field); return `arrayExists(t -> startsWith(t, ${chStr(ci ? asciiLower(v) : v)}), tokens(lowerUTF8(${f})))`; }
       return onValues(ctx, field, x => (ci ? `startsWith(lower(${x}), ${chStr(asciiLower(v))})` : `startsWith(${x}, ${chStr(v)})`));
     }
     case 'wildcard': {
@@ -761,7 +799,10 @@ function clauseSQL(ctx, q) {
       else if (ci && /[^\x00-\x7f]/.test(v)) { ctx.stats.approx++; ctx.notes.add('warn', 'regexp insensible à la casse', 'ClickHouse replie la casse des lettres accentuées du motif. Elasticsearch le fait selon sa version : oui en 9.5, non en 7.17 et 8.19, où « É » ne trouve pas « é ».'); }
       else ctx.stats.ok++;
       H(ctx, 'filters', `${field} correspond à /${v}/`);
-      return onValues(ctx, field, x => `match(${x}, ${chStr('^(?:' + (ci ? regexFoldCase(v) : v) + ')$')})`);
+      const re = chStr('^(?:' + (ci ? regexFoldCase(v) : v) + ')$');
+      // Champ texte : l’expression porte sur chacun des mots, comme pour fuzzy
+      if (isTextField(ctx, field)) return `arrayExists(t -> match(t, ${re}), tokens(lowerUTF8(${f})))`;
+      return onValues(ctx, field, x => `match(${x}, ${re})`);
     }
     case 'fuzzy': {
       const [field, raw] = fieldEntry(body);
@@ -769,10 +810,14 @@ function clauseSQL(ctx, q) {
       let fz = isObj(raw) && raw.fuzziness !== undefined ? raw.fuzziness : 'AUTO';
       const d = /^\d+$/.test(String(fz)) ? +fz : v.length <= 2 ? 0 : v.length <= 5 ? 1 : 2;
       const f = mapField(ctx, field); ctx.stats.approx++;
-      ctx.notes.add('info', 'fuzzy → editDistanceUTF8', 'Distance d’édition calculée à la volée : coûteux sur de gros volumes, à combiner avec un filtre sélectif. Nécessite une version récente de ClickHouse.');
+      ctx.notes.add('info', 'fuzzy → distance d’édition', 'Distance calculée à la volée (editDistanceUTF8 et damerauLevenshteinDistance) : coûteux sur de gros volumes, à combiner avec un filtre sélectif. L’inversion de deux lettres accentuées compte pour deux modifications, pour une seule chez Elasticsearch.');
       H(ctx, 'filters', `${field} ≈ ${v}`);
-      if (isTextField(ctx, field)) return `arrayExists(t -> editDistanceUTF8(t, ${chStr(v.toLowerCase())}) <= ${d}, tokens(lowerUTF8(${f})))`;
-      return `editDistanceUTF8(${f}, ${chStr(v)}) <= ${d}`;
+      // Elasticsearch compte l’inversion de deux lettres voisines pour une modification (transpositions: true par défaut).
+      // damerauLevenshteinDistance le fait mais compte en octets : least() garde editDistanceUTF8 pour les lettres
+      // accentuées, où une transposition reste comptée deux fois.
+      const dist = (a, b) => (isObj(raw) && raw.transpositions === false ? `editDistanceUTF8(${a}, ${b})` : `least(editDistanceUTF8(${a}, ${b}), damerauLevenshteinDistance(${a}, ${b}))`);
+      if (isTextField(ctx, field)) return `arrayExists(t -> ${dist('t', chStr(v.toLowerCase()))} <= ${d}, tokens(lowerUTF8(${f})))`;
+      return `${dist(f, chStr(v))} <= ${d}`;
     }
     case 'ids': {
       ctx.stats.ok++; mapField(ctx, '_id');
@@ -789,7 +834,11 @@ function clauseSQL(ctx, q) {
       const mtype = body.type || 'best_fields';
       const op = String(body.operator || 'or').toLowerCase();
       if (/phrase/.test(mtype)) return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query }, mtype === 'phrase' ? 'match_phrase' : 'match_phrase_prefix')));
-      if (op === 'and' || type === 'combined_fields') {
+      // bool_prefix : chaque mot peut suffire, dans n’importe quel champ, le dernier n’étant qu’un début de mot
+      if (mtype === 'bool_prefix') return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query }, 'match_bool_prefix')));
+      // cross_fields et combined_fields : les mots peuvent se répartir entre les champs.
+      // best_fields et most_fields avec and : tous les mots dans un même champ (branche finale).
+      if (type === 'combined_fields' || (op === 'and' && mtype === 'cross_fields')) {
         const toks = [...new Set(esTokens(body.query))];
         const tf = fields.filter(f => isTextField(ctx, f)); const kf = fields.filter(f => !isTextField(ctx, f));
         ctx.stats.ok++;
@@ -798,7 +847,7 @@ function clauseSQL(ctx, q) {
         const tokConds = tf.length ? andJoin(toks.map(t => orJoin(tf.map(f => wordCond(ctx, mapField(ctx, f), t))))) : null;
         return orJoin([tokConds].concat(kf.map(f => `${mapField(ctx, f)} = ${chVal(body.query)}`)).filter(x => x !== null));
       }
-      return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query, minimum_should_match: body.minimum_should_match, fuzziness: body.fuzziness }, 'match')));
+      return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query, operator: body.operator, minimum_should_match: body.minimum_should_match, fuzziness: body.fuzziness, zero_terms_query: body.zero_terms_query }, 'match')));
     }
     case 'query_string': case 'simple_query_string': {
       const defFields = body.default_field ? (body.default_field === '*' ? textFieldsOr(ctx) : [body.default_field]) : body.fields ? body.fields.map(f => String(f).replace(/\^[\d.]+$/, '')) : textFieldsOr(ctx);
@@ -858,7 +907,7 @@ function luceneSQL(ctx, n, defFields, leaf) {
 }
 // Terme d’une requête simple_query_string : pas de syntaxe champ:valeur, d’intervalle ni de joker interne
 function simpleLeaf(ctx, field, tok, defaultOp) {
-  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.v } });
+  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.slop ? { query: tok.v, slop: tok.slop } : tok.v } });
   if (tok.t === 'fuzzy') return tq(ctx, { fuzzy: { [field]: tok.n === null ? { value: tok.v } : { value: tok.v, fuzziness: tok.n } } });
   if (tok.t === 'prefix') return tq(ctx, { wildcard: { [field]: { value: tok.v + '*' } } });
   if (isTextField(ctx, field)) return tq(ctx, { match: { [field]: { query: tok.v, operator: defaultOp || 'or' } } });
@@ -866,7 +915,7 @@ function simpleLeaf(ctx, field, tok, defaultOp) {
 }
 function luceneLeaf(ctx, field, tok) {
   if (field === '_exists_') return tq(ctx, { exists: { field: tok.v } });
-  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.v } });
+  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.slop ? { query: tok.v, slop: tok.slop } : tok.v } });
   if (tok.t === 'regex') return tq(ctx, { regexp: { [field]: tok.v } });
   if (tok.t === 'range') {
     const m = /^\s*(\S+)\s+TO\s+(\S+)\s*$/i.exec(tok.v);
@@ -947,7 +996,7 @@ const HM = { avg: 'moyenne', sum: 'somme', min: 'minimum', max: 'maximum', value
  */
 const NULL_WHEN_EMPTY = new Set(['min', 'max', 'avg', 'varPop', 'stddevPop', 'avgWeighted']);
 function aggCall(fn, args, cond, mayBeEmpty) {
-  const orNull = mayBeEmpty && NULL_WHEN_EMPTY.has(fn) ? 'OrNull' : '';
+  const orNull = mayBeEmpty && NULL_WHEN_EMPTY.has(fn.replace(/Array$/, '')) ? 'OrNull' : '';
   return cond ? `${fn}If${orNull}(${args}, ${cond})` : `${fn}${orNull}(${args})`;
 }
 /* Renvoie [{alias, render(cond, mayBeEmpty)}] */
@@ -975,18 +1024,23 @@ function metricDef(ctx, name, type, body) {
       return simple('uniq', valueExpr(ctx, body));
     case 'stats': case 'extended_stats': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
+      // Champ multivalué : chaque valeur compte (combinateur -Array), count est le nombre de valeurs
+      const arr = !!(colType && colType.array);
       const cols = [['count', 'count'], ['min', 'min'], ['max', 'max'], ['avg', 'avg'], ['sum', 'sum']];
       if (type === 'extended_stats') cols.push(['varPop', 'variance'], ['stddevPop', 'std_deviation']);
-      const out = cols.map(([fn, suf]) => ({ alias: aliasOf(`${name}_${suf}`), render: (c, e) => aggCall(fn, x, c, e) }));
+      const out = cols.map(([fn, suf]) => ({ alias: aliasOf(`${name}_${suf}`), render: (c, e) => (arr && fn === 'count' ? aggCall('sum', `length(${x})`, c) : aggCall(arr ? `${fn}Array` : fn, x, c, e)) }));
       // Sans document, Elasticsearch renvoie 0 pour sum mais null pour sum_of_squares
-      if (type === 'extended_stats') out.push({ alias: aliasOf(`${name}_sum_of_squares`), render: (c, e) => aggCall(e ? 'sumOrNull' : 'sum', `${pArg(x)} * ${pArg(x)}`, c, false) });
+      const square = arr ? `arrayMap(v -> v * v, ${x})` : `${pArg(x)} * ${pArg(x)}`;
+      if (type === 'extended_stats') out.push({ alias: aliasOf(`${name}_sum_of_squares`), render: (c, e) => aggCall(`${arr ? 'sumArray' : 'sum'}${e ? 'OrNull' : ''}`, square, c, false) });
       return out;
     }
     case 'percentiles': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
       const ps = (body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => +(chNum(p, 'percentiles.percents') / 100).toFixed(4));
       ctx.notes.add('info', 'percentiles → quantilesTDigest()', 'Même algorithme (t-digest) qu’Elasticsearch : résultats comparables. Le résultat est un tableau dans l’ordre des percentiles demandés.');
-      return [{ alias: A, render: c => (c ? `quantilesTDigestIf(${ps.join(', ')})(${x}, ${c})` : `quantilesTDigest(${ps.join(', ')})(${x})`) }];
+      const fnq = colType && colType.array ? 'quantilesTDigestArray' : 'quantilesTDigest';
+      // Groupe qui peut être vide (mesure globale ou filtrée) : quantilesTDigest rend nan là où Elasticsearch rend null
+      return [{ alias: A, render: (c, e) => { const q = c ? `${fnq}If(${ps.join(', ')})(${x}, ${c})` : `${fnq}(${ps.join(', ')})(${x})`; return e ? `arrayMap(v -> if(isNaN(v), NULL, v), ${q})` : q; } }];
     }
     case 'percentile_ranks': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
@@ -1002,7 +1056,18 @@ function metricDef(ctx, name, type, body) {
       const sf = isObj(sort) ? Object.keys(sort)[0] : String(sort);
       const dir = isObj(sort) ? String(isObj(sort[sf]) ? sort[sf].order : sort[sf]).toLowerCase() : 'asc';
       const s = mapField(ctx, sf); const fn = dir === 'desc' ? 'argMax' : 'argMin';
-      return ms.map(m => { const f = mapField(ctx, m.field); return { alias: aliasOf(ms.length > 1 ? `${name}_${m.field}` : name), render: c => (c ? `${fn}If(${f}, ${s}, ${c})` : `${fn}(${f}, ${s})`) }; });
+      const n = body.size !== undefined ? chInt(body.size, 'top_metrics.size') : 1;
+      // size > 1 : les n valeurs, dans l’ordre du tri. groupArraySorted garde les n plus petites clés sans charger
+      // le groupe ; pour un tri décroissant, la clé (nombre ou date) change de signe. Clé de type inconnu : groupArray trié.
+      const st = fieldType(ctx, sf); const kind = isDateField(ctx, sf) ? 'date' : st && (st.kind === 'int' || st.kind === 'float') ? 'num' : null;
+      if (st && !kind) throw new Error(`top_metrics : tri sur ${sf}, qui n’est ni un nombre ni une date (Elasticsearch le refuse aussi)`);
+      const key = kind === 'date' ? `toUnixTimestamp64Milli(toDateTime64(${s}, 3))` : s;
+      const topN = (f, c) => {
+        const tuple = `(${dir === 'desc' && kind ? `-${pArg(key)}` : s}, ${f})`;
+        if (kind) return `arrayMap(t -> t.2, groupArraySorted${c ? 'If' : ''}(${n})(${tuple}${c ? `, ${c}` : ''}))`;
+        return `arrayMap(t -> t.2, arraySlice(${dir === 'desc' ? 'arrayReverseSort' : 'arraySort'}(t -> t.1, groupArray${c ? 'If' : ''}(${tuple}${c ? `, ${c}` : ''})), 1, ${n}))`;
+      };
+      return ms.map(m => { const f = mapField(ctx, m.field); return { alias: aliasOf(ms.length > 1 ? `${name}_${m.field}` : name), render: c => (n > 1 ? topN(f, c) : c ? `${fn}If(${f}, ${s}, ${c})` : `${fn}(${f}, ${s})`) }; });
     }
     case 'boxplot': {
       ctx.stats.ok++; const x = valueExpr(ctx, body);
@@ -1034,6 +1099,8 @@ function parseOrder(order, def) {
     return { by: k === '_term' ? '_key' : k, dir };
   });
 }
+// terms et multi_terms : Elasticsearch départage toujours les égalités par clé croissante, même avec un order explicite
+const withKeyTiebreak = order => order.some(o => o.by === '_key') ? order : [...order, { by: '_key', dir: 'asc' }];
 // Elasticsearch écrit les bornes d’une plage comme des doubles Java : 100 devient « 100.0 »
 function javaDouble(v) {
   const n = Number(v);
@@ -1100,7 +1167,7 @@ function buildLevel(ctx, name, def) {
         ctx.stats.ok++; H(ctx, 'groups', `valeurs rares de ${body.field}`);
       } else {
         L.size = body.size !== undefined ? chInt(body.size, 'terms.size') : 10; L.limitable = true;
-        L.order = parseOrder(body.order, L.order);
+        L.order = withKeyTiebreak(parseOrder(body.order, L.order));
         if ((body.min_doc_count || 1) > 1) L.having.push(`doc_count >= ${chInt(body.min_doc_count, 'min_doc_count')}`);
         if (body.min_doc_count === 0) ctx.notes.add('warn', 'min_doc_count: 0', 'Les valeurs sans document ne peuvent pas apparaître via GROUP BY : il faudrait une jointure avec la liste des valeurs attendues.');
         if (type !== 'terms') { ctx.stats.approx++; ctx.notes.add('warn', `${type} approximé`, 'Le score de significativité n’est pas calculé : regroupement simple par fréquence.'); } else ctx.stats.ok++;
@@ -1109,8 +1176,13 @@ function buildLevel(ctx, name, def) {
       break;
     }
     case 'multi_terms': {
-      (body.terms || []).forEach((t, i) => { const k = mapField(ctx, t.field); ctx.groupCols.add(k); L.keys.push({ sql: k, alias: aliasOf(`${name}_${t.field}`) }); });
-      L.size = body.size !== undefined ? chInt(body.size, 'multi_terms.size') : 10; L.limitable = true; L.order = parseOrder(body.order, L.order);
+      (body.terms || []).forEach(t => {
+        const k = mapField(ctx, t.field); const ct = fieldType(ctx, t.field); ctx.groupCols.add(k); L.keys.push({ sql: k, alias: aliasOf(`${name}_${t.field}`) });
+        // Comme terms : un document sans l’un des champs ne forme pas de groupe
+        if (ct && ct.nullable) L.where.push(`isNotNull(${k})`);
+        else if (emptyIsMissing(ctx, ct)) L.where.push(`${k} != ''`);
+      });
+      L.size = body.size !== undefined ? chInt(body.size, 'multi_terms.size') : 10; L.limitable = true; L.order = withKeyTiebreak(parseOrder(body.order, L.order));
       ctx.stats.ok++; H(ctx, 'groups', `par ${(body.terms || []).map(t => t.field).join(' + ')} (${L.size} premiers)`);
       break;
     }
@@ -1121,20 +1193,33 @@ function buildLevel(ctx, name, def) {
       if (type === 'auto_date_histogram') { ci = 'hour'; ctx.stats.approx++; ctx.notes.add('warn', 'auto_date_histogram', `L’intervalle automatique (${body.buckets || 10} tranches) est fixé à l’heure : ajustez selon la période.`); } else ctx.stats.ok++;
       // bucket(x) : début de la tranche qui contient x, pour la colonne comme pour les bornes de extended_bounds
       let bucket, step, hum;
+      // Un intervalle qu’Elasticsearch refuse ne devient pas une tranche d’une heure en silence
+      if (body.calendar_interval && !CAL[ci]) throw new Error(`intervalle calendaire inconnu : ${JSON.stringify(body.calendar_interval)} (minute, hour, day, week, month, quarter, year ou 1m, 1h, 1d, 1w, 1M, 1q, 1y)`);
       if (ci && CAL[ci]) { const [fn, unit, fr] = CAL[ci]; bucket = x => `${fn}(${x}${tzA})`; step = `INTERVAL 1 ${unit}`; hum = `par ${fr}`; }
       else {
         const m = /^(\d+)(ms|s|m|h|d)$/.exec(String(fi || '1h'));
-        const n = m ? m[1] : '1', u = m ? m[2] : 'h';
-        bucket = x => `toStartOfInterval(${x}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`; step = `INTERVAL ${n} ${FIXED_UNIT[u]}`; hum = `par tranche de ${n} ${FIXED_FR[u]}`;
+        if (!m) throw new Error(`intervalle fixe inconnu : ${JSON.stringify(fi)} (unités ms, s, m, h, d)`);
+        let n = +m[1], u = m[2];
+        hum = `par tranche de ${n} ${FIXED_FR[u]}`;
+        // toStartOfInterval repart de minuit pour les heures ; Elasticsearch aligne les tranches sur l’epoch.
+        // Un nombre d’heures qui ne divise pas 24 s’écrit donc en minutes, alignées sur l’epoch.
+        if (u === 'h' && 24 % n !== 0) { n *= 60; u = 'm'; }
+        bucket = x => `toStartOfInterval(${x}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`; step = `INTERVAL ${n} ${FIXED_UNIT[u]}`;
+      }
+      // offset : les tranches commencent plus tard (ou plus tôt) ; la clé est le début décalé de la tranche
+      const off = body.offset ? /^([+-]?)(\d+)(ms|s|m|h|d)$/.exec(String(body.offset)) : null;
+      if (body.offset && !off) throw new Error(`offset inconnu : ${JSON.stringify(body.offset)}`);
+      if (off) {
+        const base = bucket, by = `INTERVAL ${off[2]} ${FIXED_UNIT[off[3]]}`, [minus, plus] = off[1] === '-' ? ['+', '-'] : ['-', '+'];
+        bucket = x => `${base(`${x} ${minus} ${by}`)} ${plus} ${by}`;
       }
       const key = bucket(f);
-      if (body.offset) ctx.notes.add('warn', 'offset de date_histogram', `Le décalage « ${body.offset} » n’est pas appliqué : utilisez toStartOfInterval(…, origin) si besoin.`);
       if (body.hard_bounds) {
         if (body.hard_bounds.min !== undefined) L.where.push(`${f} >= ${dateBoundSQL(ctx, body.hard_bounds.min, tz)}`);
         if (body.hard_bounds.max !== undefined) L.where.push(`${f} <= ${dateBoundSQL(ctx, body.hard_bounds.max, tz)}`);
       }
       // Semaine, mois, trimestre et année donnent une clé de type Date ; les autres intervalles, un DateTime
-      L.keys.push({ sql: key, alias: A, date: { asDate: !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
+      L.keys.push({ sql: key, alias: A, date: { asDate: !off && !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
       L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) {
         L.fill = step;
@@ -1149,7 +1234,9 @@ function buildLevel(ctx, name, def) {
     case 'histogram': {
       const f = mapField(ctx, body.field); const iv = chNum(body.interval || 1, 'histogram.interval'); const off = chNum(body.offset || 0, 'histogram.offset');
       const bucket = x => (off ? `floor((${x} - ${off}) / ${iv}) * ${iv} + ${off}` : `floor(${x} / ${iv}) * ${iv}`);
-      const key = bucket(f);
+      // Champ multivalué : le document compte une fois dans chaque tranche où tombe au moins une de ses valeurs
+      const ft = typeof body.field === 'string' && !body.script ? fieldType(ctx, body.field) : null;
+      const key = ft && ft.array ? `arrayJoin(arrayDistinct(arrayMap(v -> ${bucket('v')}, ${f})))` : bucket(f);
       L.keys.push({ sql: key, alias: A }); L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) {
         L.fill = String(iv);
@@ -1605,7 +1692,7 @@ function selectList(ctx, dsl) {
 function sortList(ctx, sort) {
   if (!sort) return [];
   const arr = Array.isArray(sort) ? sort : [sort];
-  const out = [];
+  const out = []; out.keys = [];
   for (const s of arr) {
     let f, o = {};
     if (typeof s === 'string') { f = s; o = { order: s === '_score' ? 'desc' : 'asc' }; }
@@ -1616,14 +1703,24 @@ function sortList(ctx, sort) {
     const dir = String(o.order || 'asc').toLowerCase();
     if (dir !== 'asc' && dir !== 'desc') throw new Error(`sens de tri inconnu pour ${f} : ${JSON.stringify(o.order)}`);
     if (f === '_script') {
-      try { const sc = o.script; const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, { mode: 'expr', params: sc.params || {} }); out.push(`${r.sql} ${dir.toUpperCase()}`); ctx.stats.ok++; }
+      try { const sc = o.script; const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, { mode: 'expr', params: sc.params || {} }); out.push(`${r.sql} ${dir.toUpperCase()}`); out.keys.push({ expr: r.sql, desc: dir === 'desc', index: arr.indexOf(s), field: null }); ctx.stats.ok++; }
       catch (e) { todo(ctx, 'tri scripté', e.message); }
       continue;
     }
     if (f === '_geo_distance') { todo(ctx, 'tri _geo_distance', 'Utilisez ORDER BY geoDistance(lon, lat, x, y).'); continue; }
     let e = mapField(ctx, f);
+    // Champ multivalué : Elasticsearch trie sur le minimum en croissant, le maximum en décroissant (ou selon mode) ;
+    // un document sans valeur va à la fin
+    const ft = fieldType(ctx, f);
+    if (ft && ft.array) {
+      const mode = { min: 'arrayMin', max: 'arrayMax', avg: 'arrayAvg', sum: 'arraySum' }[o.mode || (dir === 'desc' ? 'max' : 'min')];
+      if (!mode) throw new Error(`mode de tri inconnu pour ${f} : ${JSON.stringify(o.mode)}`);
+      e = `if(empty(${e}), NULL, ${mode}(${e}))`;
+    }
     if (o.missing !== undefined && o.missing !== '_last' && o.missing !== '_first') e = `ifNull(${e}, ${chVal(o.missing)})`;
     out.push(`${e} ${dir.toUpperCase()}${o.missing === '_first' ? ' NULLS FIRST' : ''}`);
+    // Clé de tri et position de sa valeur dans search_after (_score, _doc et _shard_doc n’ont pas de colonne)
+    out.keys.push({ expr: e, desc: dir === 'desc', index: arr.indexOf(s), field: f });
   }
   return out;
 }
@@ -1637,15 +1734,17 @@ function hitsQuery(ctx, env, dsl, where) {
   if (!order.length && tf) { order = [`${tf} DESC`]; ctx.notes.add('info', 'Tri par défaut', `Sans tri explicite, Elasticsearch classe par pertinence. Ici : ${tf} décroissant, le plus proche d’un usage « logs récents ».`); }
   const w = where.slice(); let limitBy = null;
   if (dsl.search_after && dsl.sort) {
-    const arr = Array.isArray(dsl.sort) ? dsl.sort : [dsl.sort];
-    const dirs = order.map(o => /DESC/.test(o));
-    if (dirs.every(d => d === dirs[0])) {
-      const cols2 = order.map(o => o.replace(/\s+(ASC|DESC).*$/, ''));
-      // Elasticsearch renvoie la valeur de tri d’une date en epoch millis
-      const timeColumn = ctx.cfg.clickhouse.time_field ? chIdent(ctx.cfg.clickhouse.time_field) : null;
-      const vals = dsl.search_after.map((v, i) => (typeof v === 'number' && (cols2[i] === timeColumn || /time|date|timestamp/i.test(cols2[i] || '')) ? epochMillisSQL(v) : chVal(v)));
-      w.push(`(${cols2.join(', ')}) ${dirs[0] ? '<' : '>'} (${vals.join(', ')})`); ctx.stats.ok++;
-    } else todo(ctx, 'search_after à sens mixtes', 'Réécrivez la condition de curseur à la main pour des tris de sens différents.');
+    // Chaque valeur du curseur est rapportée à sa clé de tri : celles de _score, _doc et _shard_doc sont écartées avec leur clé
+    const keys = order.keys || [];
+    // Elasticsearch renvoie la valeur de tri d’une date en epoch millis
+    const val = k => { const v = dsl.search_after[k.index]; return typeof v === 'number' && k.field && isDateField(ctx, k.field) ? epochMillisSQL(v) : chVal(v); };
+    if (keys.length && keys.every(k => k.desc === keys[0].desc)) {
+      w.push(`(${keys.map(k => k.expr).join(', ')}) ${keys[0].desc ? '<' : '>'} (${keys.map(val).join(', ')})`);
+    } else if (keys.length) {
+      // Sens mélangés : la comparaison de tuples ne s’applique plus, on développe clé par clé
+      w.push(orJoin(keys.map((k, i) => andJoin(keys.slice(0, i).map(p => `${p.expr} = ${val(p)}`).concat([`${k.expr} ${k.desc ? '<' : '>'} ${val(k)}`])))));
+    }
+    ctx.stats.ok++;
   }
   if (dsl.collapse && dsl.collapse.field) {
     limitBy = { n: 1, by: [mapField(ctx, dsl.collapse.field)] }; ctx.stats.ok++;

@@ -7,5 +7,5 @@ SELECT
     avg(latency_ms) AS lat
 FROM logs.events
 GROUP BY h
-ORDER BY lat DESC
+ORDER BY lat DESC, h ASC
 LIMIT 5;

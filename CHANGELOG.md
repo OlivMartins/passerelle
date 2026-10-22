@@ -14,13 +14,48 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Corrigé
 
-- Ligne de commande : une option inconnue, ou sans sa valeur, est une erreur. `--fail-on` n’accepte que `todo` et `--format` que `yaml` ou `toml`. Avant, `--fail-on todos` sortait en 0, et `dsl2sql --verbose A.json B.json` ne traduisait que B.
+Écarts trouvés par un audit de la traduction DSL → SQL, rejoués dans le banc différentiel : 578 cas identiques au lieu de 494, sur Elasticsearch 7.17, 8.19 et 9.5.
+
+- `terms` et `multi_terms` : les égalités sont départagées par clé croissante, même avec un `order` explicite (celui qu’envoie Kibana). En limite du top N, les valeurs retenues pouvaient différer.
+- `date_histogram` :
+  - un intervalle fixe en heures qui ne divise pas 24 (`5h`) est aligné sur l’epoch ;
+  - `offset` est appliqué ;
+  - un fuseau écrit en décalage (`+01:00`) est accepté, partout où un fuseau l’est ;
+  - un intervalle refusé par Elasticsearch est refusé aussi.
+- Champs multivalués :
+  - `stats`, `extended_stats`, `percentiles` et `histogram` portent sur toutes les valeurs (SQL refusé auparavant) ;
+  - le tri porte sur le minimum en croissant et le maximum en décroissant.
+- Champs texte :
+  - `term`, `prefix` et `regexp` portent sur les mots, et non sur la valeur entière ;
+  - `multi_match` avec `operator: and` exige tous les mots dans un même champ (`best_fields`, `most_fields`) ;
+  - `bool_prefix` traite le dernier mot comme un début de mot ;
+  - un `match` sans mot exploitable ne trouve plus tous les documents ;
+  - `slop` et `"a b"~N` sont appliqués (mots dans l’ordre ; une inversion est signalée « à vérifier ») ;
+  - `fuzzy` compte une transposition pour une modification.
+- Dates :
+  - un epoch en millisecondes est converti dans `term` et `terms` ;
+  - `range` lit un format personnalisé (`dd/MM/yyyy`) par `parseDateTime64InJodaSyntax`.
+- `search_after` :
+  - les valeurs de `_shard_doc` (pagination par point-in-time) sont écartées avec leur clé ;
+  - des sens de tri mélangés sont pris en charge ;
+  - une date est reconnue par le schéma et non par le nom de la colonne.
+- `multi_terms` : un document sans l’un des champs ne forme pas de groupe.
+- `top_metrics` : `size` est appliqué (`groupArraySorted`).
+- `percentiles` : null, et non nan, sur un groupe vide.
+
+Ligne de commande et configuration :
+
+- Une option inconnue, ou sans sa valeur, est une erreur. `--fail-on` n’accepte que `todo` et `--format` que `yaml` ou `toml`. Avant, `--fail-on todos` sortait en 0, et `dsl2sql --verbose A.json B.json` ne traduisait que B.
 - `--format` l’emporte sur `vector.format` de la configuration.
-- Configuration : une clé inconnue est refusée au lieu d’être ignorée. `check-config` sort en 1 et le service ne démarre pas.
+- Une clé de configuration inconnue est refusée au lieu d’être ignorée. `check-config` sort en 1 et le service ne démarre pas.
 
 ### Ajouté
 
 - Tests du serveur et de la ligne de commande, lancés par `npm test`.
+- Banc différentiel :
+  - un tableau numérique, un entier facultatif et un second champ texte dans le jeu de données ;
+  - des requêtes jouées sous un point-in-time (option `pit` d’un cas) ;
+  - la comparaison de `multi_terms` et de `top_metrics`.
 
 ## [1.1.0] - 2026-10-11
 

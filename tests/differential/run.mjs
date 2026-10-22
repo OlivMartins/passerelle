@@ -45,6 +45,13 @@ async function es(path, body, method) {
   });
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }
+// Requête jouée sous un point-in-time, comme l’exige un tri sur _shard_doc ; la traduction reçoit la requête sans « pit »
+async function esWithPit(dsl) {
+  const open = await es(`/${INDEX}/_pit?keep_alive=1m`);
+  if (open.status !== 200) return open;
+  try { return await es('/_search', Object.assign({}, dsl, { pit: { id: open.body.id, keep_alive: '1m' } })); }
+  finally { await es('/_pit', { id: open.body.id }, 'DELETE'); }
+}
 function esError(r) {
   const e = r.body.error || {};
   const cause = (e.root_cause && e.root_cause[0]) || e;
@@ -126,6 +133,11 @@ function metricColumns(name, a, type) {
     if (Array.isArray(a.keys)) o[`${name}_key`] = a.keys[0];
     return o;
   }
+  // top_metrics avec une seule mesure : la valeur, ou la liste des valeurs quand size > 1
+  if (Array.isArray(a.top)) {
+    const vals = a.top.map(t => Object.values(t.metrics)[0]);
+    return { [name]: vals.length === 1 ? vals[0] : vals };
+  }
   if ('hits' in a || 'doc_count' in a) return null;
   return {};
 }
@@ -165,8 +177,11 @@ function walkBuckets(aggs, defs, path, onLeaf) {
     for (const [k, b] of buckets) {
       const next = Object.assign({}, keys);
       const nextLabels = Object.assign({}, labels);
+      const multi = curDefs && curDefs[name] && curDefs[name].multi_terms;
       if (k !== undefined) {
         if (k !== null && typeof k === 'object' && !Array.isArray(k)) Object.assign(next, k);
+        // multi_terms : une clé tableau, une colonne <nom>_<champ> par terme côté ClickHouse
+        else if (multi && Array.isArray(k)) multi.terms.forEach((t, j) => { next[`${name}_${t.field}`] = k[j]; });
         else { next[name] = k; if (typeof b.key_as_string === 'string') nextLabels[name] = b.key_as_string; }
       }
       if (i < path.length - 1) walk(b, children, i + 1, next, nextLabels);
@@ -270,7 +285,7 @@ async function runCase(c, ctx) {
     try { clickhouse(ctx.dir, ['--multiquery', '--query', list.sql]); }
     catch (e) { return { verdict: 'CH✗', detail: `liste ${list.name} : ${String(e.stderr || e.message).slice(0, 200)}`, t }; }
   }
-  const r = await es(`/${INDEX}/_search`, c.dsl);
+  const r = c.pit ? await esWithPit(c.dsl) : await es(`/${INDEX}/_search`, c.dsl);
   if (t.error) return { verdict: r.status === 200 ? 'TR✗' : '=', detail: `traducteur : ${t.error}${r.status === 200 ? '' : ` ; Elasticsearch refuse aussi (${esError(r)})`}` };
   if (r.status !== 200) {
     // Elasticsearch refuse la requête : la traduction doit le signaler (« à reprendre »), pas produire un SQL silencieux
