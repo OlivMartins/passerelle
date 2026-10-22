@@ -4,6 +4,8 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Non publié]
 
+## [1.2.0] - 2026-10-22
+
 ### À savoir avant de mettre à jour
 
 - **Requêtes DSL lues comme Elasticsearch les lit.** Une clé inconnue (corps de recherche, `bool`, définition d’agrégation, deux clauses ou deux champs dans un même objet) fait refuser la requête (HTTP 422, code 1 de la CLI). Un paramètre inconnu, ou une option connue qui change le résultat sans être traduite (`knn`, `min_score`, `terminate_after`…), la rend « à reprendre » : son SQL s’arrête sur `throwIf`. Des requêtes jusqu’ici traduites en silence peuvent donc changer de statut.
@@ -220,7 +222,8 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
-[Non publié]: https://github.com/OlivMartins/passerelle/compare/v1.1.1...HEAD
+[Non publié]: https://github.com/OlivMartins/passerelle/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/OlivMartins/passerelle/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/OlivMartins/passerelle/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/OlivMartins/passerelle/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/OlivMartins/passerelle/releases/tag/v1.0.0

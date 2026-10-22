@@ -1,4 +1,4 @@
-# Passerelle 1.1.1 — Linux x86_64
+# Passerelle 1.2.0 — Linux x86_64
 
 Passerelle traduit les requêtes DSL Elasticsearch en SQL ClickHouse et les pipelines Logstash (Kafka vers Kafka) en configurations Vector. Un seul binaire fournit l’interface web, l’API REST et la ligne de commande. Le moteur Node.js 24 LTS est embarqué : rien d’autre à installer.
 
@@ -34,9 +34,9 @@ SHA256SUMS                     sommes de contrôle
 ## Installation
 
 ```bash
-sha256sum -c passerelle-1.1.1-linux-x86_64.tar.gz.sha256
-tar xzf passerelle-1.1.1-linux-x86_64.tar.gz
-cd passerelle-1.1.1-linux-x86_64
+sha256sum -c passerelle-1.2.0-linux-x86_64.tar.gz.sha256
+tar xzf passerelle-1.2.0-linux-x86_64.tar.gz
+cd passerelle-1.2.0-linux-x86_64
 sudo ./install.sh
 ```
 
