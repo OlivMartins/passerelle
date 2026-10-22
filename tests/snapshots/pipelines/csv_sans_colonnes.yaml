@@ -1,5 +1,4 @@
 # Couverture : 3 directs, 0 à vérifier, 0 à reprendre
-# À vérifier : csv sans columns
 
 transforms:
   csv:
@@ -9,5 +8,13 @@ transforms:
       # csv
       row, err = parse_csv(.message, delimiter: ",")
       if err == null {
-        .csv = row
+        names = []
+        cols = {}
+        for_each(row) -> |i, v| {
+          name = string(get(names, [i]) ?? null) ?? "column" + to_string(i + 1)
+          val = v
+          if val == "" { val = null }
+          cols = set!(cols, [name], val)
+        }
+        . = merge!(., cols)
       }

@@ -223,14 +223,14 @@ export const CASES = [
 
   // csv
   { id: 'csv_colonnes', filter: 'csv { columns => ["a", "b", "c"] }', lines: ['x,y,z', 'x,"y, avec virgule",z'] },
-  { id: 'csv_champ_vide', filter: 'csv { columns => ["a", "b", "c"] }', lines: ['x,,z'], known: 'un champ vide vaut null pour Logstash, une chaîne vide pour la traduction' },
-  { id: 'csv_colonnes_manquantes', filter: 'csv { columns => ["a", "b", "c"] }', lines: ['x,y'], known: 'une colonne sans valeur est créée à null ; Logstash ne la crée pas' },
-  { id: 'csv_colonnes_en_trop', filter: 'csv { columns => ["a", "b", "c"] }', lines: ['x,y,z,t'], known: 'une valeur au-delà des colonnes nommées est perdue ; Logstash la range dans column4' },
+  { id: 'csv_champ_vide', filter: 'csv { columns => ["a", "b", "c"] }', lines: ['x,,z'] },
+  { id: 'csv_colonnes_manquantes', filter: 'csv { columns => ["a", "b", "c"] }', lines: ['x,y'] },
+  { id: 'csv_colonnes_en_trop', filter: 'csv { columns => ["a", "b", "c"] }', lines: ['x,y,z,t'] },
   { id: 'csv_separateur', filter: 'csv { separator => ";" columns => ["a", "b"] }', lines: ['x;y'] },
-  { id: 'csv_sans_colonnes', filter: 'csv { }', lines: ['x,y,z'], known: 'sans columns, Logstash nomme column1, column2… ; la traduction range les valeurs dans un tableau csv' },
+  { id: 'csv_sans_colonnes', filter: 'csv { }', lines: ['x,y,z'] },
   { id: 'csv_types', filter: 'csv { columns => ["a", "n"] convert => { "n" => "integer" } }', lines: ['x,42', 'x,y'] },
   { id: 'csv_invalide', filter: 'csv { columns => ["a", "b"] }', lines: ['x,"guillemet non fermé'], known: 'pour un guillemet non fermé, Logstash pose _csvparsefailure ; la traduction découpe quand même' },
-  { id: 'csv_cible', filter: 'csv { columns => ["a", "b"] target => "ligne" }', lines: ['x,y'], known: 'target n’est pas appliqué : les colonnes sont posées à la racine' },
+  { id: 'csv_cible', filter: 'csv { columns => ["a", "b"] target => "ligne" }', lines: ['x,y'] },
 
   // xml
   { id: 'xml_simple', filter: 'xml { source => "message" target => "doc" }', lines: ['<a><b>1</b><c x="2">3</c><c>4</c></a>'], known: 'l’objet n’a pas la même forme : Logstash retire la racine, range tout en tableaux de chaînes et nomme le texte « content » ; la traduction garde la racine, préfixe les attributs de « @ », nomme le texte « text » et lit les nombres' },

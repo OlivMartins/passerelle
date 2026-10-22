@@ -8,6 +8,13 @@ transforms:
       # csv
       row, err = parse_csv(.message, delimiter: ",")
       if err == null {
-        .a = row[0]
-        .b = row[1]
+        names = ["a", "b"]
+        cols = {}
+        for_each(row) -> |i, v| {
+          name = string(get(names, [i]) ?? null) ?? "column" + to_string(i + 1)
+          val = v
+          if val == "" { val = null }
+          cols = set!(cols, [name], val)
+        }
+        .ligne = cols
       }

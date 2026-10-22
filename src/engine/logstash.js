@@ -672,9 +672,17 @@ class VrlGen {
     const src = this.path(s.source || 'message');
     this.emit(`row, err = parse_csv(${src}, delimiter: ${vq(s.separator || ',')})`);
     this.open('if err == null');
-    const cols = lsList(s.columns);
-    if (cols.length) cols.forEach((c, i) => this.assign(this.path(c), `row[${i}]`));
-    else { this.assign(s.target ? this.path(s.target) : '.csv', 'row'); this.v.note('warn', 'csv sans columns', 'Logstash nomme les colonnes column1, column2… : ici la ligne est stockée telle quelle dans un tableau.'); }
+    // Comme Logstash : les colonnes nommées dans l’ordre, column<n> au-delà (ou sans columns), une valeur vide à null,
+    // rien pour une colonne sans valeur, le tout sous target s’il est donné
+    this.emit(`names = [${lsList(s.columns).map(vq).join(', ')}]`);
+    this.emit('cols = {}');
+    this.open('for_each(row) -> |i, v|');
+    this.emit('name = string(get(names, [i]) ?? null) ?? "column" + to_string(i + 1)');
+    this.emit('val = v');
+    this.emit('if val == "" { val = null }');
+    this.emit('cols = set!(cols, [name], val)');
+    this.close();
+    if (s.target) this.assign(this.path(s.target), 'cols'); else this.emit('. = merge!(., cols)');
     for (const [f, t] of lsPairs(s.convert)) { const x = this.path(f); this.assign(x, `${{ integer: 'to_int', float: 'to_float', boolean: 'to_bool' }[t] || 'to_string'}(${x}) ?? ${x}`); }
     this.common(s); this.close(); this.ok();
   }
