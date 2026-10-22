@@ -1,4 +1,5 @@
-# Couverture : 3 directs, 1 à vérifier, 0 à reprendre
+# Couverture : 3 directs, 2 à vérifier, 0 à reprendre
+# À vérifier : Forme de l’objet XML
 # À vérifier : xml xpath
 
 transforms:

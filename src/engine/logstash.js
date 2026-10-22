@@ -215,7 +215,10 @@ class VrlGen {
       if (m.index > last) parts.push(vq(s.slice(last, m.index)));
       const ref = m[1]; dyn = true;
       if (ref.startsWith('+')) parts.push(`(format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: ${vq(joda2strf(ref.slice(1)))}) ?? "")`);
-      else parts.push(this.asStr(this.path(ref)));
+      else {
+        const p = this.path(ref); parts.push(this.asStr(p));
+        if (this.tget(p) !== 'str') this.v.note('warn', 'Référence %{champ}', 'Pour un champ absent ou nul, Logstash laisse « %{champ} » tel quel dans la valeur ; la traduction écrit une chaîne vide.');
+      }
       last = re.lastIndex;
     }
     if (last < s.length) parts.push(vq(s.slice(last)));
@@ -449,7 +452,9 @@ class VrlGen {
   f_mutate(s, p) {
     const order = ['coerce', 'rename', 'update', 'replace', 'convert', 'gsub', 'uppercase', 'capitalize', 'lowercase', 'strip', 'remove', 'split', 'join', 'merge', 'copy'];
     // Une opération de chaîne ne touche qu’une chaîne : Logstash laisse tel quel un champ absent, nul ou d’un autre type
-    const onString = (x, call, type) => { const t = this.tget(x); if (t === 'null') return; if (t === 'str') this.assign(x, call(''), type); else this.assignIf(`is_string(${x})`, x, call('!')); };
+    // Un tableau n’est pas traité élément par élément (choix de lisibilité) : signalé quand le type du champ n’est pas connu
+    const arrayNote = () => this.v.note('warn', 'Tableaux dans mutate', 'Sur un champ qui contient un tableau, Logstash applique l’opération à chaque élément ; la traduction laisse le tableau tel quel.');
+    const onString = (x, call, type) => { const t = this.tget(x); if (t === 'null') return; if (t === 'str') this.assign(x, call(''), type); else { this.assignIf(`is_string(${x})`, x, call('!')); if (t !== 'arr') arrayNote(); } };
     const unary = (fields, fn) => lsList(fields).forEach(f => { const x = this.path(f); onString(x, bang => `${fn}${bang}(${x})`, 'str'); });
     for (const op of order) {
       const v = s[op]; if (v === undefined) continue;
@@ -465,6 +470,8 @@ class VrlGen {
           if (!fn) return this.v.note('warn', 'convert', `Type « ${ty} » inconnu pour ${f}.`);
           if (/_eu$/.test(ty)) this.v.note('warn', `convert ${ty}`, 'Le format numérique européen (virgule décimale) n’est pas géré : remplacez la virgule avant la conversion.');
           if (fn === 'to_string' && this.tget(x) === 'str') return;
+          if (!['int', 'float', 'str', 'bool'].includes(this.tget(x))) arrayNote();
+          if (fn !== 'to_string') this.v.note('warn', 'Conversion impossible dans mutate', 'Une valeur qui ne se convertit pas reste telle quelle. Logstash pose en plus _mutate_error et n’applique pas la suite du mutate (add_field, add_tag…) ; la traduction l’applique.');
           // Nombres lus comme Logstash : espaces autour, séparateurs « , » et « _ » ignorés ; pour un entier, aussi les
           // décimales (tronquées), la notation 1e3 et l’hexadécimal 0x1A
           const num = (ty === 'integer' || ty === 'float') && this.tget(x) !== 'int' && this.tget(x) !== 'float';
@@ -691,6 +698,7 @@ class VrlGen {
     // qui tient dans la limite. slice, lui, coupe à l’octet : son résultat ne sert qu’à compter.
     lsList(s.fields).forEach(f => {
       const x = this.path(f); const t = this.tget(x); if (t === 'null') return;
+      if (t !== 'str') this.v.note('warn', 'Tableaux dans truncate', 'Sur un champ qui contient un tableau, Logstash tronque chaque élément ; la traduction laisse le tableau tel quel.');
       this.open(t === 'str' ? `if length(${x}) > ${n}` : `if is_string(${x}) && length!(${x}) > ${n}`);
       this.emit(`chars = strlen!(slice!(${x}, 0, ${n}))`);
       this.emit(`${x} = truncate${t === 'str' ? '' : '!'}(${x}, chars)`);
@@ -724,6 +732,7 @@ class VrlGen {
     this.open(`if ${c}`); this.common(s); if (!(s.add_field || s.add_tag || s.remove_field || s.remove_tag)) this.emit('noop = true'); this.close(); this.ok();
   }
   f_xml(s) {
+    this.approx('Forme de l’objet XML', 'parse_xml de Vector ne rend pas l’objet comme Logstash (attributs, texte des éléments, valeurs en tableaux) : vérifiez la forme attendue par la suite du traitement.');
     const src = this.path(s.source || 'message'); const t = this.tget(src);
     this.emit(`parsed, err = parse_xml(${src})`);
     this.open('if err == null'); this.assign(this.path(s.target || 'xml'), 'parsed'); this.common(s);
