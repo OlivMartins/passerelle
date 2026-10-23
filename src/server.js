@@ -266,7 +266,7 @@ function serve(opts) {
   let cfg = loadConfig(cfgFile);
   let ui = buildUI(cfg);
   const { host, port } = parseListen(opts.listen || process.env.PASSERELLE_LISTEN || '127.0.0.1:8080');
-  const LIMIT = 2 * 1024 * 1024;
+  const LIMIT = 2 * 1024 * 1024; const INVENTORY_LIMIT = 32 * 1024 * 1024;
   configWarnings(cfg).forEach(w => log('warn', w));
   if (!process.env.PASSERELLE_TOKEN) log(isLoopback(host) ? 'info' : 'warn', 'PASSERELLE_TOKEN absent : l’API /v1 est accessible sans authentification, pour les seules requêtes adressées à localhost', { listen: `${host}:${port}` });
 
@@ -285,7 +285,8 @@ function serve(opts) {
       if (!authorized(req)) return json(res, 401, { error: 'jeton absent ou invalide (Authorization: Bearer …)' });
       if (req.method === 'GET' && url.pathname === '/v1/config') return json(res, 200, publicConfig(cfg));
       if (req.method !== 'POST') return json(res, 405, { error: 'méthode non autorisée' });
-      const body = await readBody(req, LIMIT);
+      // Un export Kibana complet dépasse vite 2 Mio : sa route accepte davantage
+      const body = await readBody(req, url.pathname === '/v1/inventory/kibana' ? INVENTORY_LIMIT : LIMIT);
       switch (url.pathname) {
         case '/v1/translate/dsl': {
           const r = translateDSL(body, cfg, { index: url.searchParams.get('index') || '' });
@@ -299,6 +300,18 @@ function serve(opts) {
           if (r.empty) return json(res, 400, { error: 'pipeline vide', verdict: 'unrecognized' });
           if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized' });
           return json(res, 200, { verdict: verdictOf(r), format: fmt, config: r[fmt], notes: r.notes, coverage: coverage(r.stats), topology: r.graph, env: r.env, summary: r.sentence });
+        }
+        case '/v1/inventory/kibana': {
+          const fmt = url.searchParams.get('format') || 'json';
+          if (!['json', 'md', 'html', 'csv'].includes(fmt)) return json(res, 400, { error: `format inconnu « ${fmt} » (json, md, html ou csv)` });
+          const tz = url.searchParams.get('timezone') || null;
+          if (tz && !validTimeZone(tz)) return json(res, 400, { error: `fuseau inconnu « ${tz} »` });
+          const inv = kibanaInventory(body, cfg, { timeZone: tz });
+          if (!inv.summary.objects && !Object.keys(inv.source.ignored).length) return json(res, 422, { error: `aucun objet sauvegardé lisible${inv.source.errors.length ? ` (${inv.source.errors[0]})` : ''}` });
+          if (fmt === 'md') return send(res, 200, inventoryMarkdown(inv), { 'content-type': 'text/markdown; charset=utf-8' });
+          if (fmt === 'html') return send(res, 200, inventoryHTML(inv, 'Inventaire Kibana'), { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" });
+          if (fmt === 'csv') return send(res, 200, inventoryCSV(inv), { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="inventaire.csv"' });
+          return json(res, 200, inv);
         }
         case '/v1/validate/vector': return json(res, 200, await limited(() => validateVector(body, url.searchParams.get('format') || 'yaml')));
         case '/v1/validate/sql': return json(res, 200, await limited(() => validateSQL(cfg, body, url.searchParams)));
@@ -331,6 +344,9 @@ Utilisation :
   passerelle serve       [--config FICHIER] [--listen HÔTE:PORT]
   passerelle dsl2sql     <fichier|dossier>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo|review] [--verbose]
   passerelle ls2vector   <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review] [--verbose]
+  passerelle schema ddl  <fichier|dossier>... [--config FICHIER] [--preset otel|otel-json] [--compact] [--json] [--table NOM] [--format sql|yaml] [--out DOSSIER]
+  passerelle schema pull [--config FICHIER] [--table NOM]...
+  passerelle kibana      <export.ndjson>... [--config FICHIER] [--timezone FUSEAU] [--format md|html|csv|json] [--out DOSSIER] [--fail-on todo|review]
   passerelle check-config [--config FICHIER] [--quiet]
   passerelle version
 
@@ -350,6 +366,7 @@ const OPTIONS = {
   config: { type: 'string' }, listen: { type: 'string' }, index: { type: 'string' }, out: { type: 'string' },
   format: { type: 'string' }, 'fail-on': { type: 'string' }, quiet: { type: 'boolean' }, verbose: { type: 'boolean' },
   preset: { type: 'string' }, compact: { type: 'boolean' }, json: { type: 'boolean' }, table: { type: 'string', multiple: true },
+  timezone: { type: 'string' },
   help: { type: 'boolean', short: 'h' }
 };
 function parseArgs(argv) {
@@ -470,6 +487,36 @@ async function schemaPull(o) {
   if (Object.keys(out.profiles).length < tables.length) process.exit(1);
 }
 
+/* ---------- Inventaire Kibana (passerelle kibana) ---------- */
+// Fuseau IANA (Europe/Paris) ou décalage en heures entières (+02:00), comme le paramètre time_zone d’Elasticsearch
+function validTimeZone(tz) {
+  if (/^[+-]\d{2}:?00$/.test(tz)) return true;
+  try { new Intl.DateTimeFormat('fr', { timeZone: tz }); return true; } catch (e) { return false; }
+}
+function kibanaReport(o) {
+  if (o.timezone !== undefined && !validTimeZone(o.timezone)) fail(`--timezone attend un fuseau IANA (Europe/Paris) ou un décalage en heures (+02:00), pas « ${o.timezone} »`);
+  if (!o._.length) fail('aucun export à lire. Exemple : passerelle kibana export.ndjson --out inventaire/');
+  const fmt = formatFor(o, ['md', 'html', 'csv', 'json'], 'kibana') || 'md';
+  const cfg = loadCfgOrFail(o);
+  const files = collect(o._, /\.(ndjson|json)$/i);
+  if (!files.length) fail('aucun fichier .ndjson trouvé');
+  const inv = kibanaInventory(files.map(f => fs.readFileSync(f, 'utf8')), cfg, { names: files.map(f => path.basename(f)), timeZone: o.timezone || null });
+  if (!inv.summary.objects && !Object.keys(inv.source.ignored).length) fail(`aucun objet sauvegardé lisible${inv.source.errors.length ? ` (${inv.source.errors[0]})` : ''}`);
+  const title = `Inventaire Kibana — ${files.map(f => path.basename(f)).join(', ')}`;
+  const render = f => (f === 'md' ? inventoryMarkdown(inv) : f === 'html' ? inventoryHTML(inv, title) : f === 'csv' ? inventoryCSV(inv) : JSON.stringify(inv, null, 2) + '\n');
+  if (o.out) {
+    fs.mkdirSync(path.join(o.out, 'sql'), { recursive: true });
+    for (const f of ['md', 'html', 'csv', 'json']) fs.writeFileSync(path.join(o.out, `inventaire.${f}`), render(f));
+    const sqlFiles = inventorySQLFiles(inv);
+    for (const f of sqlFiles) fs.writeFileSync(path.join(o.out, 'sql', f.name), f.content);
+    process.stderr.write(`inventaire → ${path.join(o.out, 'inventaire.{md,html,csv,json}')}, ${sqlFiles.length} fichier(s) SQL dans ${path.join(o.out, 'sql')}\n`);
+  } else process.stdout.write(render(fmt));
+  const s = inv.summary; const v = s.byVerdict;
+  process.stderr.write(`${s.objects} objet(s) : ${v.ready} prêt(s), ${v.review} à vérifier, ${v.todo} à reprendre${v.unrecognized ? `, ${v.unrecognized} non reconnu(s)` : ''}. Effort estimé : ${String(s.effort.hours).replace('.', ',')} h (${String(s.effort.days).replace('.', ',')} j).\n`);
+  inv.source.errors.forEach(e => process.stderr.write(`attention : ${e}\n`));
+  if (o['fail-on'] && inv.entries.some(x => VERDICT_RANK[x.verdict] >= VERDICT_RANK[o['fail-on']])) process.exit(2);
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv; const o = parseArgs(rest);
   if (!cmd || cmd === 'help' || cmd === '-h' || cmd === '--help' || o.help) { process.stdout.write(HELP + '\n'); return; }
@@ -485,6 +532,7 @@ function main(argv) {
       return fail(`sous-commande inconnue : schema ${sub || ''}`.trim() + ' (ddl ou pull)');
     }
     case 'ls2vector': return batch('ls', o);
+    case 'kibana': return kibanaReport(o);
     case 'check-config': {
       const file = o.config || process.env.PASSERELLE_CONFIG || null;
       let cfg; try { cfg = loadConfig(file); } catch (e) { fail(e.message); }

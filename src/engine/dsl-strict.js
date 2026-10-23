@@ -235,11 +235,11 @@ function checkDSL(dsl) {
   if (!isObj(dsl)) return out;
   // Formes qui ne sont pas une requête de recherche : le message dit quoi en extraire
   if (isObj(dsl.attributes) && typeof dsl.type === 'string') {
-    error(`objet sauvegardé Kibana (${dsl.type}), pas une requête de recherche. Copiez la requête depuis Inspect > Request dans Kibana`);
+    error(`objet sauvegardé Kibana (${dsl.type}), pas une requête de recherche. Importez l’export .ndjson dans l’inventaire Kibana (passerelle kibana), ou copiez la requête depuis Inspect > Request dans Kibana`);
     return out;
   }
   if (isObj(dsl.query) && typeof dsl.query.query === 'string' && typeof dsl.query.language === 'string') {
-    error(`requête Kibana en ${dsl.query.language === 'kuery' ? 'KQL' : dsl.query.language} (searchSource), pas une requête DSL. Copiez la requête depuis Inspect > Request dans Kibana`);
+    error(`requête Kibana en ${dsl.query.language === 'kuery' ? 'KQL' : dsl.query.language} (searchSource), pas une requête DSL. Importez l’export .ndjson dans l’inventaire Kibana (passerelle kibana), ou copiez la requête depuis Inspect > Request dans Kibana`);
     return out;
   }
   const noEffect = [];

@@ -11,7 +11,9 @@
     "test": "node scripts/test.mjs && node tests/server/run.mjs",
     "test:update": "node scripts/test.mjs --update",
     "test:diff": "node tests/differential/run.mjs",
-    "test:pipelines": "node tests/pipelines/run.mjs"
+    "test:pipelines": "node tests/pipelines/run.mjs",
+    "test:attributes": "node tests/attributes/run.mjs",
+    "test:clickhouse": "node tests/clickhouse/run.mjs"
   },
   "engines": {
     "node": ">=24"

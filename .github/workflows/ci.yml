@@ -62,6 +62,29 @@ jobs:
           CLICKHOUSE_LOCAL: ${{ github.workspace }}/clickhouse local
         run: npm run test:diff
 
+  # Sans Elasticsearch : les attributs (Map, JSON) donnent le résultat de la table plate, et ce que Passerelle
+  # génère pour ses exemples (schéma, inventaire Kibana) s'exécute sur ClickHouse avec les valeurs attendues
+  clickhouse:
+    name: Bancs ClickHouse (attributs, schéma, inventaire Kibana)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Extraire le binaire ClickHouse 26.9 de son image officielle
+        run: sh tests/differential/clickhouse.sh 26.9 ./clickhouse
+      - name: Attributs OpenTelemetry
+        env:
+          CLICKHOUSE_LOCAL: ${{ github.workspace }}/clickhouse local
+        run: npm run test:attributes
+      - name: Schéma et inventaire Kibana
+        env:
+          CLICKHOUSE_LOCAL: ${{ github.workspace }}/clickhouse local
+        run: npm run test:clickhouse
+
   pipelines:
     name: Banc d'équivalence Logstash / Vector
     runs-on: ubuntu-latest

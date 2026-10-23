@@ -81,9 +81,16 @@ for (const c of PIPELINE_CASES) {
   const own = Object.fromEntries(Object.entries(r.config.transforms).filter(([name]) => !isTransport(name)));
   snapshot(`pipelines/${c.id}.yaml`, withHeader(r, '#') + (Object.keys(own).length ? E.toYAML({ transforms: own }) : r.yaml).trimEnd() + '\n');
 }
+// Inventaire Kibana des exemples : le rapport complet (verdicts, effort, SQL de chaque objet) est figé ici ;
+// le banc ClickHouse (npm run test:clickhouse) exécute chacune de ses requêtes et contrôle des valeurs
+const kibanaCfg = E.mergeConfig(E.DEFAULT_CONFIG, E.parseYAMLConfig(rd('examples/kibana/passerelle.yaml')));
+const kibanaFiles = readdirSync(join(ROOT, 'examples/kibana')).filter(n => n.endsWith('.ndjson')).sort();
+const kibanaInv = E.kibanaInventory(kibanaFiles.map(f => rd(`examples/kibana/${f}`)), kibanaCfg, { names: kibanaFiles });
+snapshot('kibana/inventaire.md', E.inventoryMarkdown(kibanaInv));
+
 // Un instantané sans cas ni exemple correspondant est un reste : supprimé par --update, signalé sinon
 for (const rel of readdirSync(join(ROOT, 'tests/snapshots'), { recursive: true }).map(p => p.split(sep).join('/'))) {
-  if (!/\.(sql|yaml)$/.test(rel) || snapshots.seen.has(rel)) continue;
+  if (!/\.(sql|yaml|md)$/.test(rel) || snapshots.seen.has(rel)) continue;
   if (UPDATE) rmSync(join(ROOT, 'tests/snapshots', rel));
   else { snapshots.different++; check(false, `instantané ${rel}`, 'aucun cas ni exemple ne lui correspond'); }
 }
@@ -196,6 +203,49 @@ const upd = E.translateLogstash('input { stdin {} } output { elasticsearch { act
 check(E.verdictOf(upd) === 'todo', 'sortie elasticsearch : mise à jour de documents à reprendre');
 check(E.verdictOf(E.translateLogstash('input { stdin {} } output { file { path => "/tmp/x" flush_interval => 0 inconnue => 1 } }', E.DEFAULT_CONFIG)) === 'review', 'option de sortie non reprise : à vérifier');
 check(/imbrication/.test(E.translateLogstash('input { stdin {} } filter { ' + 'if [a] { '.repeat(500) + 'drop {}' + ' }'.repeat(500) + ' } output { stdout {} }', E.DEFAULT_CONFIG).error || ''), 'pipeline imbriqué à l’excès : refus, pas de pile épuisée');
+
+/* ---------- KQL : la grammaire et les conversions de Kibana (kbn-es-query) ---------- */
+const KQL_TYPES = { status: 'number', host: 'keyword', '@timestamp': 'date', message: 'text', service: 'keyword' };
+const kql = (q, fields) => { const issues = []; try { return { dsl: E.kqlTranslate(q, { fieldType: f => KQL_TYPES[f] || null, fields: fields || [], issues }), issues }; } catch (e) { return { error: e.message, issues }; } };
+const kqlIs = (q, expected, label, fields) => { const r = kql(q, fields); const ok = JSON.stringify(r.dsl) === JSON.stringify(expected); check(ok, `KQL ${label}`, ok ? '' : r.error || JSON.stringify(r.dsl)); };
+kqlIs('message: connexion refusée', { match: { message: 'connexion refusée' } }, 'valeur sans guillemets à plusieurs mots : match, pas une phrase');
+kqlIs('message: "connexion refusée"', { match_phrase: { message: 'connexion refusée' } }, 'valeur entre guillemets : match_phrase');
+kqlIs('host:a or host:b and not status >= 500', { bool: { should: [{ term: { host: { value: 'a' } } }, { bool: { filter: [{ term: { host: { value: 'b' } } }, { bool: { must_not: { range: { status: { gte: 500 } } } } }] } }], minimum_should_match: 1 } }, 'priorité : not, puis and, puis or');
+kqlIs('NOT host:a', { bool: { must_not: { term: { host: { value: 'a' } } } } }, 'mots-clés sans distinction de casse');
+kqlIs('message: cannot', { match: { message: 'cannot' } }, '« not » dans un mot n’est pas un mot-clé');
+kqlIs('host: *', { exists: { field: 'host' } }, 'champ: * vaut exists');
+kqlIs('*:*', { match_all: {} }, '*:* vaut tous les documents');
+kqlIs('host: web-*', { wildcard: { host: { value: 'web-*' } } }, 'joker sur un keyword : wildcard');
+kqlIs('host: "web-*"', { term: { host: { value: 'web-*' } } }, 'joker entre guillemets : caractère ordinaire');
+kqlIs('@timestamp: "2026-01-01"', { range: { '@timestamp': { gte: '2026-01-01', lte: '2026-01-01' } } }, 'valeur sur un champ date : plage [valeur, valeur]');
+kqlIs('service: (a or b)', { bool: { should: [{ term: { service: { value: 'a' } } }, { term: { service: { value: 'b' } } }], minimum_should_match: 1 } }, 'liste de valeurs sur un champ');
+kqlIs('items:{ name: x and qty > 2 }', { nested: { path: 'items', query: { bool: { filter: [{ match: { 'items.name': 'x' } }, { range: { 'items.qty': { gt: 2 } } }] } }, score_mode: 'none' } }, 'requête imbriquée (nested)');
+kqlIs('http.*: 500', { bool: { should: [{ match: { 'http.method': '500' } }, { match: { 'http.status': '500' } }], minimum_should_match: 1 } }, 'champ à motif : les champs connus qui y correspondent', ['http.method', 'http.status', 'host']);
+check(kql('connexion').issues.some(i => i.kind === 'review'), 'KQL sans nom de champ : multi_match, à vérifier');
+check(/fin de requête attendue/.test(kql('a:b not c:d').error || ''), 'KQL « a:b not c:d » refusé, comme Kibana le refuse');
+check(/valeur attendue/.test(kql('url: \\/admin').error || ''), 'KQL échappement inconnu refusé, comme Kibana le refuse');
+check(/imbriquée/.test(kql('('.repeat(100) + 'a:b' + ')'.repeat(100)).error || ''), 'KQL imbriqué à l’excès : refus, pas de pile épuisée');
+
+/* ---------- Inventaire Kibana : rien de faux annoncé comme juste ---------- */
+const kbEntry = title => kibanaInv.entries.find(x => x.title === title) || { issues: [], queries: [] };
+check(kbEntry('Carte des sessions (Vega)').verdict === 'todo' && kbEntry('Enquête délais d’attente').verdict === 'todo', 'Vega et ES|QL : à reprendre, jamais traduits en silence');
+check(kbEntry('Erreurs : aujourd’hui contre hier').issues.some(i => /décalage temporel/.test(i.label)), 'Lens, décalage temporel (time shift) : à reprendre');
+check(kbEntry('Supervision du site web').verdict === 'todo', 'tableau de bord : verdict de son plus mauvais panneau');
+const byValue = kibanaInv.entries.find(x => x.parent && x.title === 'Codes d’erreur');
+check(byValue && /service\.environment = 'production'/.test(byValue.queries[0].sql) && /`?url\.path`? != '\/health'/.test(byValue.queries[0].sql), 'panneau par valeur : requête et filtres du tableau de bord inclus');
+check(kibanaInv.summary.effort.hours === kibanaInv.entries.reduce((n, x) => n + x.effort, 0), 'effort total : somme des objets, chaque objet compté une fois');
+const kbTsvb = kbEntry('Débit sortant par hôte (TSVB)');
+check(/ORDER BY sum\(`?http\.response\.bytes`?\) DESC/.test(kbTsvb.queries[0].sql), 'TSVB trié par une mesure : la mesure est recalculée sous le terms, comme dans TSVB');
+check(kbEntry('Latence moyenne et p95 par heure').queries[0].sql.includes("'Europe/Paris'"), 'fuseau de Kibana (dateFormat:tz exporté) : tranches dans ce fuseau');
+const kbNoTz = E.kibanaInventory(rd('examples/kibana/supervision_web.ndjson').split('\n').filter(l => !/"type":"config"/.test(l)).join('\n'), kibanaCfg);
+check(kbNoTz.entries.find(x => x.title === 'Latence moyenne et p95 par heure').verdict === 'ready' && kbNoTz.entries.find(x => x.title === 'Requêtes par service').issues.some(i => i.label === 'intervalle automatique'), 'sans fuseau exporté : tranches horaires exactes, intervalle automatique signalé');
+const kbDay = E.kibanaInventory(JSON.stringify({ type: 'visualization', id: 'v', attributes: { title: 'jour', visState: JSON.stringify({ type: 'line', aggs: [{ id: '1', type: 'count', schema: 'metric' }, { id: '2', type: 'date_histogram', params: { field: '@timestamp', interval: 'd' }, schema: 'segment' }] }), kibanaSavedObjectMeta: { searchSourceJSON: '{}' } } }), kibanaCfg);
+check(kbDay.entries[0].issues.some(i => /fuseau/.test(i.label)), 'tranches de jours sans fuseau connu : à vérifier (Kibana découpe dans le fuseau du navigateur)');
+const kbMissing = E.kibanaInventory(JSON.stringify({ type: 'dashboard', id: 'd', attributes: { title: 'd', panelsJSON: JSON.stringify([{ panelIndex: '1', panelRefName: 'panel_0', type: 'visualization' }]), kibanaSavedObjectMeta: { searchSourceJSON: '{}' } }, references: [{ name: 'panel_0', type: 'visualization', id: 'absent' }] }), kibanaCfg);
+check(kbMissing.prerequisites.some(p => p.label === 'Objets liés absents') && kbMissing.entries[0].verdict === 'review', 'panneau absent de l’export : signalé, jamais compté comme prêt');
+check(E.kibanaInventory('{"type":"canvas-workpad","id":"c","attributes":{"name":"c"}}\n{"type":"osquery-pack","id":"o","attributes":{"name":"o"}}', kibanaCfg).entries.every(x => x.verdict === 'todo' || x.verdict === 'unrecognized'), 'Canvas et type inconnu : à reprendre ou non reconnu');
+const kbBad = E.kibanaInventory('{"type":"search","id":"s","attributes":{"title":"s","kibanaSavedObjectMeta":{"searchSourceJSON":"{\\"query\\":{\\"query\\":\\"a:b not c:d\\",\\"language\\":\\"kuery\\"},\\"filter\\":[]}"}}}\nligne illisible', kibanaCfg);
+check(kbBad.entries[0].verdict === 'todo' && kbBad.source.errors.length === 1, 'KQL invalide : à reprendre ; ligne illisible : signalée');
 
 // Les fichiers du moteur et le serveur partagent une portée : un nom déclaré deux fois casserait le binaire
 const declared = (engineSource() + rd('src/server.js')).match(/^(?:function|const|let|class) +[A-Za-z_$][\w$]*/gm).map(d => d.split(/ +/)[1]);

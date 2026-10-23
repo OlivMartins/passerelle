@@ -106,6 +106,8 @@ export const CASES = [
   { id: 'agg_rate_tranche_fixe', dsl: { size: 0, aggs: { t: { date_histogram: { field: TS, fixed_interval: '6h' }, aggs: { docs_heure: { rate: { unit: 'hour' } }, valeurs_minute: { rate: { field: 'retries', mode: 'value_count', unit: 'minute' } } } } } } },
   { id: 'agg_rate_sans_unite', dsl: perDay({ octets: { rate: { field: 'bytes' } } }) },
   { id: 'agg_rate_semaine', dsl: { size: 0, aggs: { w: { date_histogram: { field: TS, calendar_interval: 'week' }, aggs: { octets_jour: { rate: { field: 'bytes', unit: 'day' } } } } } } },
+  // rate sous un terms, lui-même sous le date_histogram : Elasticsearch divise par la tranche de l’ancêtre (graphiques Lens ventilés)
+  { id: 'agg_rate_sous_terms', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, fixed_interval: '6h' }, aggs: { svc: { terms: { field: 'service', size: 3 }, aggs: { par_minute: { rate: { unit: 'minute' } } } } } } } } },
   { id: 'pipeline_serial_diff', dsl: perDay({ s: { sum: { field: 'bytes' } }, sd: { serial_diff: { buckets_path: 's', lag: 2 } } }) },
   { id: 'pipeline_moving_avg', dsl: perDay({ s: { sum: { field: 'bytes' } }, mv: { moving_fn: { buckets_path: 's', window: 2, script: 'MovingFunctions.unweightedAvg(values)' } } }) },
   { id: 'pipeline_moving_max', dsl: perDay({ s: { sum: { field: 'bytes' } }, mv: { moving_fn: { buckets_path: 's', window: 2, script: 'MovingFunctions.max(values)' } } }) },
@@ -114,6 +116,8 @@ export const CASES = [
   { id: 'pipeline_avec_tranches_vides', known: 'avec un pipeline, les tranches vides ne sont pas ajoutées : Elasticsearch les compte dans le calcul', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { d: { date_histogram: { field: TS, fixed_interval: '1h' }, aggs: { s: { sum: { field: 'bytes' } }, cs: { cumulative_sum: { buckets_path: 's' } }, dv: { derivative: { buckets_path: 's' } } } } } } },
   { id: 'pipeline_max_bucket', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { s: { sum: { field: 'bytes' } } } }, mx: { max_bucket: { buckets_path: 'svc>s' } } } } },
   { id: 'pipeline_bucket_selector', dsl: { size: 0, aggs: { h: { terms: { field: 'host', size: 20 }, aggs: { lat: { avg: { field: 'latency_ms' } }, garde: { bucket_selector: { buckets_path: { v: 'lat' }, script: 'params.v > 1500' } } } } } } },
+  // Chemin filtre._count : le nombre de documents d’un sous-filtre (formules Lens, filter_ratio de TSVB)
+  { id: 'pipeline_bucket_script_filtre_count', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { err: { filter: { range: { status: { gte: 500 } } } }, part: { bucket_script: { buckets_path: { e: 'err._count', t: '_count' }, script: 'params.e / params.t' } } } } } } },
   { id: 'pipeline_bucket_sort', dsl: { size: 0, aggs: { h: { terms: { field: 'host', size: 20 }, aggs: { lat: { avg: { field: 'latency_ms' } }, top: { bucket_sort: { sort: [{ lat: { order: 'desc' } }], size: 3 } } } } } } },
 
   /* ---------- Filtres ---------- */

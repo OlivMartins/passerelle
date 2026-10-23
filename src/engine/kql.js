@@ -165,6 +165,10 @@ function kqlParse(input) {
 function kqlQueryString(value) {
   return String(value).split(KQL_WILD).map(x => x.replace(/[+\-=&|><!(){}[\]^"~*?:\\/]/g, '\\$&')).join('*');
 }
+// Valeur à joker écrite pour une requête wildcard : seuls \, * et ? y sont réservés
+function kqlWildcardValue(value) {
+  return String(value).split(KQL_WILD).map(x => x.replace(/[\\*?]/g, '\\$&')).join('*');
+}
 const kqlLoneWildcard = v => !!v && v.wildcard && String(v.value).replace(KQL_WILD, '').length === 0;
 /*
  * Arbre KQL → DSL. opts.fieldType(nom) renvoie 'keyword', 'text', 'date', 'number', 'boolean', 'ip' ou null (inconnu,
@@ -219,7 +223,7 @@ function kqlToDSL(node, opts) {
         return either(fields.map(f => {
           const t = typeOf(f);
           if (kqlLoneWildcard(v)) return { exists: { field: f } };
-          if (v.wildcard) return t === 'keyword' ? { wildcard: { [f]: { value: kqlQueryString(v.value) } } } : { query_string: { fields: [f], query: kqlQueryString(v.value) } };
+          if (v.wildcard) return t === 'keyword' ? { wildcard: { [f]: { value: kqlWildcardValue(v.value) } } } : { query_string: { fields: [f], query: kqlQueryString(v.value) } };
           if (t === 'date') return { range: { [f]: Object.assign({ gte: v.value, lte: v.value }, tz) } };
           if (t === 'keyword') return { term: { [f]: { value: v.value } } };
           return { [v.quoted ? 'match_phrase' : 'match']: { [f]: v.value } };

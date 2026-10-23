@@ -5,7 +5,7 @@
  * Linux seulement (le faux Vector est un script shell).
  *   node tests/server/run.mjs
  */
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, chmodSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -160,6 +160,21 @@ try {
   r = await request(prod, 'POST', '/v1/translate/logstash', { body: 'input { stdin {} } filter { ruby { code => "x" } } output { stdout {} }', headers: auth });
   check(r.status === 200 && r.json.verdict === 'todo', 'traduction Logstash : verdict renvoyé', r.json && r.json.verdict);
 
+  /* ---------- Inventaire Kibana ---------- */
+  const ndjson = rd('examples/kibana/supervision_web.ndjson');
+  r = await request(prod, 'POST', '/v1/inventory/kibana', { body: ndjson, headers: auth });
+  check(r.status === 200 && r.json.summary.objects > 10 && r.json.entries.some(x => x.type === 'dashboard') && r.json.summary.effort.hours > 0, 'inventaire Kibana : objets, verdicts et effort', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/inventory/kibana?format=md&timezone=Europe/Paris', { body: ndjson, headers: auth });
+  check(r.status === 200 && /^# Inventaire de migration Kibana/.test(r.body), 'inventaire Kibana : rapport Markdown', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/inventory/kibana?timezone=Mars/Olympe', { body: ndjson, headers: auth });
+  check(r.status === 400 && /fuseau/.test(r.json.error), 'inventaire Kibana : fuseau inconnu refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/inventory/kibana', { body: 'pas un export', headers: auth });
+  check(r.status === 422, 'inventaire Kibana : fichier sans objet refusé', `statut ${r.status}`);
+  // Un export de plusieurs Mio passe sur cette route, pas sur les autres
+  const big = Array.from({ length: 220 }, () => ndjson).join('');
+  r = await request(prod, 'POST', '/v1/inventory/kibana?format=csv', { body: big, headers: auth });
+  check(r.status === 200 && big.length > 2 * 1024 * 1024 && /^\ufeffType;/.test(r.body), 'inventaire Kibana : export de plus de 2 Mio accepté, CSV', `statut ${r.status}, ${Math.round(big.length / 1048576)} Mio`);
+
   /* ---------- Sens de tri des documents ---------- */
   r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ sort: [{ service: { order: 'desc; DROP TABLE logs.events --' } }] }), headers: auth });
   check(r.status === 422 && !/DROP/i.test(r.json && r.json.sql || ''), 'sens de tri inconnu refusé', `statut ${r.status}`);
@@ -192,6 +207,16 @@ c = cli('ls2vector', 'examples/logstash/batch.conf', '--format', 'tom');
 check(c.status === 1, '--format avec une valeur inconnue : erreur', `code ${c.status}`);
 c = cli('--help');
 check(/--verbose/.test(c.stdout), 'l’aide mentionne --verbose');
+
+const kibanaOut = join(TMP, 'inventaire');
+c = cli('kibana', 'examples/kibana/', '--config', 'examples/kibana/passerelle.yaml', '--out', kibanaOut);
+check(c.status === 0 && ['md', 'html', 'csv', 'json'].every(f => existsSync(join(kibanaOut, `inventaire.${f}`))) && readdirSync(join(kibanaOut, 'sql')).length > 10 && /Effort estimé/.test(c.stderr), 'kibana --out : rapports et fichiers SQL', `code ${c.status} ${c.stderr}`);
+c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--fail-on', 'todo');
+check(c.status === 2, 'kibana --fail-on todo : code 2 quand un objet est à reprendre', `code ${c.status}`);
+c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--format', 'toml');
+check(c.status === 1 && /--format/.test(c.stderr), 'kibana --format : formats de l’inventaire seulement', `code ${c.status}`);
+c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--timezone', 'Mars/Olympe');
+check(c.status === 1 && /--timezone/.test(c.stderr), 'kibana --timezone : fuseau inconnu refusé', `code ${c.status}`);
 
 const typo = join(TMP, 'faute.yaml');
 writeFileSync(typo, 'version: 1\nclickhous:\n  endpoint: http://localhost:8123\nkafka:\n  bootstrap_server: k:9092\n');

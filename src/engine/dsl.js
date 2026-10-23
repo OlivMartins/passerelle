@@ -1258,8 +1258,10 @@ function metricDef(ctx, name, type, body, parent) {
     case 'rate': {
       // rate : valeur par unité de temps, dans les tranches d’un date_histogram parent. Elasticsearch divise la somme (ou le
       // nombre de valeurs, ou de documents sans champ) par la durée de la tranche exprimée dans l’unité demandée ;
-      // une tranche calendaire (mois) n’a pas toujours la même durée, d’où dateDiff.
-      const B = parent && parent.rateInfo;
+      // une tranche calendaire (mois) n’a pas toujours la même durée, d’où dateDiff. Le date_histogram peut être un
+      // ancêtre plus lointain (date_histogram › terms › rate) : Elasticsearch retient le plus proche.
+      const anc = parent && parent.rateInfo ? parent : (ctx.levelAncestors || []).slice().reverse().find(l => l.rateInfo);
+      const B = anc && anc.rateInfo;
       if (!B) throw new Error('rate ne se calcule que sous un date_histogram (Elasticsearch le refuse ailleurs)');
       const SEC = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800 }; const MONTHS = { month: 1, quarter: 3, year: 12 };
       const CAL_SEC = { MINUTE: 60, HOUR: 3600, DAY: 86400, WEEK: 604800 }; const CAL_MONTHS = { MONTH: 1, QUARTER: 3, YEAR: 12 };
@@ -1307,6 +1309,8 @@ function resolveBucketsPath(level, path) {
   if (p === '_key') return level.keys.length ? level.keys[level.keys.length - 1].alias : 'NULL';
   const [head, sub] = p.split(/[.\[]/);
   const clean = head.replace(/>.*/, '');
+  // filtre._count : le nombre de documents du sous-filtre (colonne <filtre>_doc_count)
+  if (sub === '_count') { const c = level.metrics.find(x => x.alias === aliasOf(`${clean}_doc_count`)); if (c) return c.alias; }
   const m = level.metrics.find(x => x.alias === aliasOf(`${clean}_${sub}`)) || level.metrics.find(x => x.alias === aliasOf(clean));
   return m ? m.alias : aliasOf(clean);
 }
@@ -1843,6 +1847,8 @@ function walkAggs(ctx, env, aggs, parentPath, out) {
     // Elasticsearch refuse une agrégation global ailleurs qu’au premier niveau
     if (t === 'global' && parentPath.length) { todo(ctx, `agrégation ${name}`, 'Une agrégation global ne peut être définie qu’au premier niveau des agrégations.'); continue; }
     let L;
+    // Niveaux englobants : rate cherche son date_histogram parmi eux, comme Elasticsearch
+    ctx.levelAncestors = parentPath;
     try { L = buildLevel(ctx, name, def); }
     catch (e) { todo(ctx, `agrégation ${name}`, e.message); continue; }
     const path = parentPath.concat([L]);
