@@ -1320,6 +1320,16 @@ function parseYAMLConfig(text) {
     if (/^".*"$/.test(s)) return JSON.parse(s);
     if (/^\[.*\]$/.test(s)) { const inner = s.slice(1, -1).trim(); return inner ? inner.split(/,(?=(?:[^']*'[^']*')*[^']*$)/).map(scalar) : []; }
     if (s === '{}') return {};
+    // Table en ligne : { clé: valeur, 'autre clé': [a, b] }
+    if (/^\{.*\}$/.test(s)) {
+      const out = {};
+      for (const pair of splitTopArgs(s.slice(1, -1))) {
+        const kv = /^('[^']*'|"[^"]*"|[^:]+):\s*(.*)$/.exec(pair.trim());
+        if (!kv) throw new Error(`table en ligne illisible : ${s}`);
+        out[scalar(kv[1])] = scalar(kv[2]);
+      }
+      return out;
+    }
     if (/^(true|false)$/.test(s)) return s === 'true';
     if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
     return s;
