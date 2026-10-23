@@ -1,7 +1,6 @@
 # Couverture : 8 directs, 1 à vérifier, 0 à reprendre
 # À vérifier : useragent → parse_user_agent
 # À vérifier : Tableaux dans mutate
-# À vérifier : Référence %{champ}
 # À vérifier : Comparaison à un nombre
 
 # Configuration Vector générée par Passerelle depuis un pipeline Logstash
@@ -118,7 +117,8 @@ transforms:
       }
       if is_string(.http.method) { .http.method = downcase!(.http.method) }
       if exists(.event.dataset) { .event.dataset = push(array(.event.dataset) ?? [.event.dataset], "nginx.access") } else { .event.dataset = "nginx.access" }
-      if exists(.kafka.source_topic) { .kafka.source_topic = push(array(.kafka.source_topic) ?? [.kafka.source_topic], (to_string(%kafka.topic) ?? join(%kafka.topic, ",") ?? encode_json(%kafka.topic))) } else { .kafka.source_topic = (to_string(%kafka.topic) ?? join(%kafka.topic, ",") ?? encode_json(%kafka.topic)) }
+      ref_1 = if %kafka.topic == null { "%{[@metadata][kafka][topic]}" } else if is_array(%kafka.topic) { (join(map_values(flatten(array!(%kafka.topic))) -> |item| { if item == null { "" } else { to_string(item) ?? encode_json(item) } }, ",") ?? "") } else { to_string(%kafka.topic) ?? encode_json(%kafka.topic) }
+      if exists(.kafka.source_topic) { .kafka.source_topic = push(array(.kafka.source_topic) ?? [.kafka.source_topic], ref_1) } else { .kafka.source_topic = ref_1 }
       del(.message)
       del(.agent)
   condition_6:
@@ -128,7 +128,7 @@ transforms:
       if ((is_integer(.http.status) || is_float(.http.status)) && (to_float(.http.status) ?? 0.0) >= 500) {
         # mutate
         .tags = compact(flatten([.tags, "erreur_serveur"]))
-      } else if (match(.url.path, r'^/health') ?? false) {
+      } else if (match(.url.path, r'(?m)^/health') ?? false) {
         # drop
         abort
       }

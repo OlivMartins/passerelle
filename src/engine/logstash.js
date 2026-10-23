@@ -148,6 +148,61 @@ function vPathOf(segs, ns) {
 }
 const vq = s => JSON.stringify(String(s)).replace(/\\u([0-9a-fA-F]{4})/g, '\\u{$1}');
 const vraw = (s, pre) => `${pre}'${String(s).replace(/\\'/g, "\\\\'").replace(/'/g, "\\'")}'`;
+/*
+ * Expression régulière de Ruby (Onigmo, celle des conditions =~, de gsub et de prune) → moteur regex de VRL (Rust).
+ * - ^ et $ valent pour chaque ligne en Ruby : (?m) leur donne ce sens en Rust ;
+ * - le drapeau m de Ruby (le point prend le saut de ligne) s’écrit s en Rust ;
+ * - \w, \d, \s et \h ne prennent que des caractères ASCII en Ruby, tout Unicode en Rust : ils sont écrits en classes.
+ * Le reste (lookahead, \Z, quantificateurs possessifs) n’a pas d’équivalent : Vector refuse alors la configuration.
+ */
+const RUBY_CLASSES = { w: '0-9A-Za-z_', d: '0-9', s: '\\t\\n\\x0B\\x0C\\r ', h: '0-9a-fA-F' };
+// Classes POSIX : Unicode en Ruby, ASCII en Rust (graph et print restent celles de Rust)
+const RUBY_POSIX = {
+  alnum: '\\p{L}\\p{M}\\p{Nd}', alpha: '\\p{L}\\p{M}', blank: '\\p{Zs}\\t', cntrl: '\\p{Cc}\\p{Cf}\\p{Cn}\\p{Co}', digit: '\\p{Nd}',
+  lower: '\\p{Ll}', upper: '\\p{Lu}', punct: '\\p{P}\\x24+<=>\\^`|~', space: '\\p{Zs}\\p{Zl}\\p{Zp}\\t\\n\\x0B\\x0C\\r\\x{85}',
+  xdigit: '0-9A-Fa-f', word: '\\p{L}\\p{M}\\p{Nd}\\p{Pc}'
+};
+function rubyRe(re) {
+  re = String(re);
+  let out = ''; let depth = 0; let anchors = false;
+  for (let i = 0; i < re.length; i++) {
+    const c = re[i];
+    if (c === '\\') {
+      const n = re[i + 1]; i++;
+      if (n === undefined) { out += c; break; }
+      const k = n.toLowerCase();
+      if (RUBY_CLASSES[k]) {
+        const neg = n !== k;
+        out += depth ? (neg ? `[^${RUBY_CLASSES[k]}]` : RUBY_CLASSES[k]) : `[${neg ? '^' : ''}${RUBY_CLASSES[k]}]`;
+      } else out += c + n;
+      continue;
+    }
+    if (depth) {
+      const px = c === '[' && /^\[:(\^?)([a-z]+):\]/.exec(re.slice(i));
+      if (px && RUBY_POSIX[px[2]]) { out += px[1] ? `[^${RUBY_POSIX[px[2]]}]` : RUBY_POSIX[px[2]]; i += px[0].length - 1; continue; }
+      if (c === '[') depth++;
+      else if (c === ']') depth--;
+      out += c; continue;
+    }
+    if (c === '[') {
+      depth = 1; out += c;
+      if (re[i + 1] === '^') { out += '^'; i++; }
+      if (re[i + 1] === ']') { out += '\\]'; i++; }
+      continue;
+    }
+    if (c === '(' && re[i + 1] === '?') {
+      const m = /^\(\?([imx]*)(?:-([imx]*))?([:)])/.exec(re.slice(i));
+      if (m && (m[1] || m[2] !== undefined)) {
+        const sw = f => f.replace(/m/g, 's');
+        out += `(?${sw(m[1])}${m[2] !== undefined ? '-' + sw(m[2]) : ''}${m[3]}`;
+        i += m[0].length - 1; continue;
+      }
+    }
+    if (c === '^' || c === '$') anchors = true;
+    out += c;
+  }
+  return anchors ? '(?m)' + out : out;
+}
 function joda2strf(f) {
   let out = ''; let i = 0;
   const tok = (c, run) => {
@@ -220,8 +275,20 @@ class VrlGen {
       const ref = m[1]; dyn = true;
       if (ref.startsWith('+')) parts.push(`(format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: ${vq(joda2strf(ref.slice(1)))}) ?? "")`);
       else {
-        const p = this.path(ref); parts.push(this.asStr(p));
-        if (this.tget(p) !== 'str') this.v.note('warn', 'Référence %{champ}', 'Pour un champ absent ou nul, Logstash laisse « %{champ} » tel quel dans la valeur ; la traduction écrit une chaîne vide.');
+        // Champ absent ou nul : Logstash laisse « %{champ} » tel quel. Un tableau est joint par des virgules,
+        // ses éléments écrits en texte (StringInterpolation de Logstash).
+        const p = this.path(ref); const t = this.tget(p); const lit = vq(m[0]);
+        // KeyNode.join : les tableaux imbriqués sont aplatis, un élément nul compte pour une chaîne vide
+        const list = (x, known) => `(join(map_values(flatten(${known ? x : `array!(${x})`})) -> |item| { if item == null { "" } else { to_string(item) ?? encode_json(item) } }, ",") ?? "")`;
+        if (t === 'str') parts.push(p);
+        else if (t === 'null') parts.push(lit);
+        else if (t === 'arr') parts.push(list(p, true));
+        else {
+          // VRL n’accepte pas un if au milieu d’une expression : la valeur est calculée juste avant la ligne qui l’emploie
+          const v = `ref_${++this.v.refN}`;
+          this.emit(`${v} = if ${p} == null { ${lit} } else if is_array(${p}) { ${list(p)} } else { to_string(${p}) ?? encode_json(${p}) }`);
+          parts.push(v);
+        }
       }
       last = re.lastIndex;
     }
@@ -315,7 +382,7 @@ class VrlGen {
     if (x.t === 'num') return String(x.v);
     if (x.t === 'arr') return `[${x.v.map(i => (i.t === 'num' ? String(i.v) : vq(lsJs(i)))).join(', ')}]`;
     if (x.t === 'bare') return x.v === 'true' || x.v === 'false' || x.v === 'nil' ? (x.v === 'nil' ? 'null' : x.v) : vq(x.v);
-    if (x.t === 're') return vraw(x.v, 'r');
+    if (x.t === 're') return vraw(rubyRe(x.v), 'r');
     return 'null';
   }
   numOf(x) { if (x.t !== 'field') return this.rv(x); const p = this.rv(x); const t = this.tget(p); return t === 'null' ? '0.0' : `(to_float(${p}) ?? 0.0)`; }
@@ -348,7 +415,8 @@ class VrlGen {
         const re = c.r.t === 're' ? c.r.v : String(c.r.v);
         if (/\(\?<?[=!]/.test(re)) this.v.note('warn', 'Assertion regex', `L’expression /${re}/ utilise une assertion (lookahead/lookbehind) non prise en charge par le moteur regex de Vector.`);
         const p = this.rv(c.l); const t = this.tget(p);
-        const m = t === 'str' ? `match(${p}, ${vraw(re, 'r')})` : t === 'null' ? 'false' : `(match(${p}, ${vraw(re, 'r')}) ?? false)`;
+        const rx = vraw(rubyRe(re), 'r');
+        const m = t === 'str' ? `match(${p}, ${rx})` : t === 'null' ? 'false' : `(match(${p}, ${rx}) ?? false)`;
         return c.neg ? `!${m}` : m;
       }
       case 'in': {
@@ -514,7 +582,7 @@ class VrlGen {
           else if (!num) this.assignIf(`${x} != null`, x, expr);
           else { this.open(`if ${x} != null`); this.emit(numLine); this.assign(x, expr); this.close(); this.tset(x, 'any'); }
         }); break;
-        case 'gsub': { const a = lsList(v); for (let i = 0; i + 2 < a.length; i += 3) { const x = this.path(a[i]); const rep = String(a[i + 2]).replace(/\$/g, '$$$$').replace(/\\(\d)/g, '$${$1}'); onString(x, bang => `replace${bang}(${x}, ${vraw(a[i + 1], 'r')}, ${vq(rep)})`, 'str'); } break; }
+        case 'gsub': { const a = lsList(v); for (let i = 0; i + 2 < a.length; i += 3) { const x = this.path(a[i]); const rep = String(a[i + 2]).replace(/\$/g, '$$$$').replace(/\\(\d)/g, '$${$1}'); onString(x, bang => `replace${bang}(${x}, ${vraw(rubyRe(a[i + 1]), 'r')}, ${vq(rep)})`, 'str'); } break; }
         case 'uppercase': unary(v, 'upcase'); break;
         case 'lowercase': unary(v, 'downcase'); break;
         case 'strip': unary(v, 'strip_whitespace'); break;
@@ -765,6 +833,227 @@ class VrlGen {
     const c = addrs.flatMap(a => nets.map(nw => `(ip_cidr_contains(${vq(nw)}, ${a}) ?? false)`)).join(' || ');
     this.open(`if ${c}`); this.common(s); if (!(s.add_field || s.add_tag || s.remove_field || s.remove_tag)) this.emit('noop = true'); this.close(); this.ok();
   }
+  /*
+   * prune : clés de premier niveau de l’événement (event.to_hash, @metadata exclu, @timestamp compris) gardées
+   * ou retirées selon des expressions régulières non ancrées ; blacklist_names vaut par défaut %\{[^}]+\} (clés
+   * restées avec une référence non résolue). Les valeurs sont filtrées après les noms, sur l’événement d’origine.
+   */
+  f_prune(s, p) {
+    const pats = list => lsList(list).map(String);
+    const wl = pats(s.whitelist_names); const bl = s.blacklist_names === undefined ? ['%\\{[^}]+\\}'] : pats(s.blacklist_names);
+    const wv = lsPairs(s.whitelist_values); const bv = lsPairs(s.blacklist_values);
+    if (truthy(s.interpolate) && [...wl, ...bl, ...wv.flat(), ...bv.flat()].some(x => /%\{/.test(String(x)))) return this.ko(p, 'prune avec interpolate : les expressions régulières calculées pour chaque événement n’existent pas en VRL, qui compile ses expressions à l’avance.');
+    const union = list => vraw(rubyRe(list.map(x => `(?:${x})`).join('|')), 'r');
+    this.emit(`orig = ${this.root()}`);
+    const keep = [];
+    if (wl.length) keep.push(`match(key, ${union(wl)})`);
+    if (bl.length) keep.push(`!match(key, ${union(bl)})`);
+    if (keep.length) this.emit(`. = filter(orig) -> |key, _value| { ${keep.join(' && ')} }`);
+    const values = (pairs, white) => pairs.forEach(([k, re]) => {
+      const key = `[${vq(k)}]`; const dot = `.${vq(k)}`; const r = vraw(rubyRe(re), 'r');
+      const hit = x => (white ? `is_string(${x}) && match(string!(${x}), ${r})` : `!(is_string(${x}) && match(string!(${x}), ${r}))`);
+      this.emit(`v = get!(orig, ${key})`);
+      this.open('if v != null && v != false');
+      this.open('if is_array(v)');
+      this.emit(`kept = filter(array!(v)) -> |_index, x| { ${hit('x')} }`);
+      // Un tableau dont aucun élément n’est retiré reste tel quel, vide compris
+      this.emit(`if length(kept) != length(array!(v)) { if length(kept) == 0 { del(${dot}) } else { ${dot} = kept } }`);
+      this.close(`} else if is_string(v) {`); this.ind++;
+      this.emit(`if ${white ? '!' : ''}match(string!(v), ${r}) { del(${dot}) }`);
+      this.close();
+      this.close();
+    });
+    values(wv, true); values(bv, false);
+    this.treset(); this.types.set('.', 'obj');
+    this.common(s); this.ok();
+  }
+  /*
+   * de_dot : remplace les points des noms de champs. Sans fields, les clés de premier niveau ; avec recursive, celles
+   * des objets imbriqués aussi (pas celles des objets rangés dans des tableaux). nested range le champ sous un chemin
+   * ([a][b]) ; un parent qui n’est pas un objet fait échouer le filtre (_de_dot_error), comme dans Logstash.
+   */
+  f_de_dot(s, p) {
+    const nested = truthy(s.nested); const sep = nested ? '][' : String(s.separator === undefined ? '_' : s.separator);
+    if (!nested && sep.includes('.')) return this.ko(p, 'de_dot : le séparateur ne peut pas contenir de point (Logstash refuse la configuration).');
+    const recursive = truthy(s.recursive);
+    const failTag = s.tag_on_failure !== undefined ? String(s.tag_on_failure) : '_de_dot_error';
+    if (s.fields !== undefined) {
+      if (recursive) return this.ko(p, 'de_dot avec fields et recursive : à reprendre en VRL (map_keys sur les champs voulus).');
+      const plan = [];
+      for (const f of lsList(s.fields)) {
+        const segs = fieldSegs(f);
+        if (!String(f).includes('.')) continue;
+        if (segs.slice(0, -1).some(x => x.includes('.'))) return this.ko(p, `de_dot : le champ « ${f} » a un point dans un nom parent ; Logstash déplace alors tout le parent, à reprendre en VRL.`);
+        plan.push({ segs, f });
+      }
+      this.emit(`dd = ${this.root()}`);
+      for (const { segs, f } of plan) {
+        const parent = segs.slice(0, -1).map(vq); const last = segs[segs.length - 1];
+        const from = `[${parent.concat([vq(last)]).join(', ')}]`;
+        const to = nested ? `[${parent.concat(last.split('.').map(vq)).join(', ')}]` : `[${parent.concat([vq(last.split('.').join(sep))]).join(', ')}]`;
+        this.emit(`v = get!(dd, ${from})`);
+        this.open(`if exists(${this.path(f)})`);
+        this.emit(`dd = remove!(dd, ${from})`);
+        this.emit(`dd = set!(dd, ${to}, v)`);
+        this.close();
+      }
+      this.emit('. = dd');
+      if (nested) this.v.note('warn', 'de_dot nested sur des champs nommés', 'Un parent qui n’est pas un objet fait échouer le filtre dans Logstash (_de_dot_error) ; la traduction le remplace par un objet.');
+    } else if (!recursive && !nested) {
+      // Clé par clé, comme Logstash : la nouvelle clé remplace une clé existante du même nom
+      this.emit(`dd = ${this.root()}`);
+      this.open(`for_each(${this.root()}) -> |key, value|`);
+      this.emit(`if contains(key, ".") { dd = remove!(dd, [key]); dd = set!(dd, [replace(key, ".", ${vq(sep)})], value) }`);
+      this.close();
+      this.emit('. = dd');
+    } else if (!recursive && nested) {
+      // [a.b] → [a][b] ; un parent qui existe sans être un objet fait échouer le filtre et arrête le renommage
+      this.emit(`dd = ${this.root()}`);
+      this.emit('failed = false');
+      this.open(`for_each(${this.root()}) -> |key, value|`);
+      this.open('if !failed && contains(key, ".")');
+      this.emit('segs = split(key, ".")');
+      this.emit('parent = []');
+      this.emit('blocked = false');
+      this.emit('for_each(slice!(segs, 0, length(segs) - 1)) -> |_index, seg| { parent = push(parent, seg); x = get!(dd, parent); if x != null && !is_object(x) { blocked = true } }');
+      this.emit('if blocked { failed = true } else { dd = remove!(dd, [key]); dd = set!(dd, segs, value) }');
+      this.close();
+      this.close();
+      this.emit('. = dd');
+      this.open('if failed'); this.addTags([failTag]); this.close();
+      this.v.note('info', 'de_dot nested : ordre des clés', 'Logstash renomme les clés dans leur ordre d’arrivée et s’arrête au premier échec ; la traduction les parcourt dans l’ordre alphabétique. Le résultat ne diffère que si un renommage échoue.');
+    } else if (recursive && !nested) {
+      // Renommage à chaque niveau d’objet, jusqu’à 10 niveaux ; les objets rangés dans des tableaux ne sont pas visités
+      const DEPTH = 10;
+      const level = (x, d) => {
+        const renamed = `map_keys(${x}) -> |k${d}| { replace(k${d}, ".", ${vq(sep)}) }`;
+        return d + 1 < DEPTH ? `map_values(${renamed}) -> |v${d}| { if is_object(v${d}) { ${level(`object!(v${d})`, d + 1)} } else { v${d} } }` : renamed;
+      };
+      this.emit(`. = ${level(this.root(), 0)}`);
+      this.v.note('info', 'de_dot recursive', 'Les clés sont renommées jusqu’à 10 niveaux d’objets imbriqués ; au-delà, elles restent telles quelles. Si une clé renommée rencontre une clé du même nom (a.b et a_b), la valeur gardée peut différer de Logstash, qui suit l’ordre d’arrivée des clés.');
+    } else return this.ko(p, 'de_dot avec nested et recursive : à reprendre en VRL.');
+    this.treset(); this.types.set('.', 'obj');
+    this.common(s); this.ok();
+  }
+  /*
+   * syslog_pri : priorité (13 par défaut) → facility (priorité >> 3) et severity (priorité & 7), puis leurs noms.
+   * Champs ECS ([log][syslog][...]) ou historiques (syslog_*) selon ecs_compatibility. La priorité est lue comme le
+   * fait Ruby (to_i) : entier, flottant tronqué, chaîne lue jusqu’au premier caractère non numérique.
+   */
+  f_syslog_pri(s, p) {
+    const ecs = this.ecsOn(s);
+    const src = this.path(s.syslog_pri_field_name || (ecs ? '[log][syslog][priority]' : 'syslog_pri'));
+    const keys = ecs
+      ? { fc: '[log][syslog][facility][code]', sc: '[log][syslog][severity][code]', fl: '[log][syslog][facility][name]', sl: '[log][syslog][severity][name]' }
+      : { fc: 'syslog_facility_code', sc: 'syslog_severity_code', fl: 'syslog_facility', sl: 'syslog_severity' };
+    const FAC = ['kernel', 'user-level', 'mail', 'daemon', 'security/authorization', 'syslogd', 'line printer', 'network news', 'uucp', 'clock', 'security/authorization', 'ftp', 'ntp', 'log audit', 'log alert', 'clock', 'local0', 'local1', 'local2', 'local3', 'local4', 'local5', 'local6', 'local7'];
+    const SEV = ['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'informational', 'debug'];
+    const fac = s.facility_labels !== undefined ? lsList(s.facility_labels).map(String) : FAC;
+    const sev = s.severity_labels !== undefined ? lsList(s.severity_labels).map(String) : SEV;
+    this.emit('pri = 13');
+    this.emit(`raw = ${src}`);
+    this.open('if raw != null && raw != false');
+    this.emit('if is_array(raw) { raw = get!(raw, [0]) }');
+    this.emit('pri = 0');
+    this.open('if is_integer(raw)'); this.emit('pri = int!(raw)');
+    this.close('} else if is_float(raw) {'); this.ind++; this.emit('pri = to_int!(raw)');
+    this.close('} else if is_string(raw) {'); this.ind++;
+    // Ruby String#to_i : espaces en tête, signe, chiffres (soulignés permis entre chiffres), le reste ignoré
+    this.emit("m = parse_regex(string!(raw), r'^\\s*(?P<n>[+-]?\\d+(?:_\\d+)*)') ?? null");
+    this.emit('if m != null { pri = to_int(replace(string!(m.n), "_", "")) ?? 0 }');
+    this.close();
+    this.close();
+    // >> et & de Ruby sur un entier signé : division euclidienne par 8
+    this.emit('facility = to_int(floor(pri / 8))');
+    this.emit('severity = pri - facility * 8');
+    this.assign(this.path(keys.sc), 'severity'); this.assign(this.path(keys.fc), 'facility');
+    if (s.use_labels === undefined || truthy(s.use_labels)) {
+      this.open(`if facility > ${fac.length - 1}`);
+      this.addTags(['_syslogpriparsefailure']);
+      this.close('} else {'); this.ind++;
+      // Un indice négatif se lit depuis la fin, comme un tableau Ruby
+      this.emit(`labels = [${fac.map(vq).join(', ')}]`);
+      this.emit('i = if facility < 0 { length(labels) + facility } else { facility }');
+      this.emit(`name = get!(labels, [i])`);
+      this.emit(`if name != null { ${this.path(keys.fl)} = name }`);
+      this.emit(`sname = get!([${sev.map(vq).join(', ')}], [severity])`);
+      this.emit(`if sname != null { ${this.path(keys.sl)} = sname }`);
+      this.close();
+      this.tset(this.path(keys.fl), 'any'); this.tset(this.path(keys.sl), 'any');
+    }
+    this.common(s); this.ok();
+  }
+  /*
+   * clone : une copie de l’événement par type. En mode ECS, le type s’ajoute aux étiquettes (tags) ; sinon il devient
+   * le champ type. add_field, add_tag… ne valent que pour les copies. L’original et ses copies sortent ensemble, comme
+   * un split : la racine devient la liste des événements.
+   */
+  f_clone(s, p) {
+    const types = lsList(s.clones).map(String);
+    if (!types.length) { this.v.note('info', 'clone sans copie', 'clones est vide : Logstash ne crée aucune copie.'); this.ok(); return; }
+    const ecs = this.ecsOn(s);
+    this.emit(`orig = ${this.root()}`);
+    const names = [];
+    types.forEach((t, i) => {
+      this.emit('. = orig'); this.treset(); this.types.set('.', 'obj');
+      if (ecs) this.emit(`if is_array(.tags) { .tags = push(array!(.tags), ${vq(t)}) } else if .tags == null { .tags = [${vq(t)}] } else { .tags = [.tags, ${vq(t)}] }`);
+      else this.emit(`.type = ${vq(t)}`);
+      this.tset('.tags', 'any'); this.tset('.type', 'any');
+      this.common(s);
+      const n = `copie_${i + 1}`; this.emit(`${n} = .`); names.push(n);
+    });
+    this.emit(`. = [orig, ${names.join(', ')}]`);
+    this.treset(); this.types.delete('.'); this.splitDone = true;
+    if (this.depth > 0) this.v.note('warn', 'clone dans une condition', 'Après clone, la racine de l’événement devient une liste : placez les filtres suivants de la branche dans une étape séparée.');
+    this.v.note('info', 'clone → plusieurs événements', 'Le programme rend la liste [original, copies] : Vector émet un événement par élément, qui traverse la suite du pipeline.');
+    this.ok();
+  }
+  // environment : [@metadata][champ] = variable d’environnement (null si elle n’est pas définie)
+  f_environment(s) {
+    for (const [field, env] of lsPairs(s.add_metadata_from_env)) {
+      const name = String(env);
+      this.assign(vPathOf(['@metadata', String(field)], this.v.ns), `get_env_var(${vq(name)}) ?? null`);
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) this.v.env.add(name);
+    }
+    this.v.note('info', 'environment → get_env_var', 'Vector lit la variable dans son propre environnement, au moment du traitement : définissez-la dans le service Vector.');
+    this.common(s); this.ok();
+  }
+  /*
+   * bytes : « 10 MB », « 1,5 kB »… → nombre d’octets, arrondi. Puissances de 1024 (binary) ou de 1000 (metric) ;
+   * b et B comptent tous deux des octets, comme dans Logstash. Échec : tag_on_failure, la cible n’est pas écrite.
+   */
+  f_bytes(s, p) {
+    if (s.target === undefined) return this.ko(p, 'bytes sans target : Logstash n’a pas de champ cible par défaut et ne peut pas poser la valeur.');
+    const src = this.path(s.source || 'message'); const tgt = this.path(s.target);
+    const dec = String(s.decimal_separator || '.');
+    if (dec !== '.' && dec !== ',') return this.ko(p, `bytes : decimal_separator « ${dec} » invalide (Logstash n’accepte que . et ,).`);
+    const pow = String(s.conversion_method || 'binary') === 'metric' ? 1000 : 1024;
+    const mult = ['k', 'm', 'g', 't', 'p', 'e'].map((x, i) => `${vq(x)}: ${(pow ** (i + 1)).toLocaleString('en', { useGrouping: false })}.0`).join(', ');
+    const tags = s.tag_on_failure !== undefined ? lsList(s.tag_on_failure) : ['_bytesparsefailure'];
+    if (tags.length) this.emit('done = false');
+    this.open(`if is_string(${src})`);
+    // String#strip! modifie la chaîne lue sur place : Logstash rend le champ source sans ses espaces de bord,
+    // même quand la conversion échoue ensuite. Les ancres ^ et $ de Ruby valent pour chaque ligne.
+    this.emit(`bs = replace(string!(${src}), r'\\A[\\x00\\t\\n\\x0B\\x0C\\r ]+|[\\x00\\t\\n\\x0B\\x0C\\r ]+\\z', "")`);
+    this.emit(`${src} = bs`);
+    this.emit(`m = parse_regex(bs, r'(?m)^(?P<n>[0-9 _,.]*)[\\t\\n\\x0B\\x0C\\r ]*(?P<p>[kKmMgGtTpPeE]?)[bB]?$') ?? null`);
+    this.open(`if m != null && length(split(string!(m.n), ${vq(dec)})) <= 2`);
+    this.emit(`num = replace(replace(strip_whitespace(string!(m.n)), r'[^0-9${dec === '.' ? '.' : ','}]', ""), ${vq(dec)}, ".")`);
+    this.open('if num != ""');
+    // String#to_f de Ruby : « . » vaut 0
+    this.emit('f = to_float(num) ?? 0.0');
+    this.emit(`if m.p != "" { f = f * float!(get!({ ${mult} }, [downcase(string!(m.p))])) }`);
+    this.emit(`${tgt} = to_int(round(f))`);
+    this.common(s);
+    if (tags.length) this.emit('done = true');
+    this.close(); this.close(); this.close();
+    if (tags.length) { this.open('if !done'); this.failTags(tags); this.close(); }
+    this.tset(tgt, 'any'); this.ok();
+  }
+  // throttle dans une condition : le transform throttle de Vector ne se place pas sous une condition VRL
+  f_throttle(s, p) {
+    this.ko(p, 'throttle sous condition : le transform throttle de Vector s’applique à tout un flux. Sortez le filtre de la condition, ou routez d’abord les événements concernés (transform route).');
+  }
   f_xml(s) {
     this.approx('Forme de l’objet XML', 'parse_xml de Vector ne rend pas l’objet comme Logstash (attributs, texte des éléments, valeurs en tableaux) : vérifiez la forme attendue par la suite du traitement.');
     const src = this.path(s.source || 'message'); const t = this.tget(src);
@@ -780,16 +1069,11 @@ function moves_note(matches) { return matches.some(([, pats]) => lsList(pats).so
 const KO_HINTS = {
   ruby: 'Le code Ruby doit être réécrit en VRL (fonctions intégrées, closures for_each / map_values). Le code d’origine est recopié en commentaire.',
   aggregate: 'L’agrégation d’événements corrélés se fait avec le transform reduce de Vector (group_by, merge_strategies, ends_when).',
-  clone: 'Pour dupliquer un flux, branchez plusieurs transforms sur la même entrée dans la topologie Vector.',
-  throttle: 'Utilisez le transform throttle de Vector (threshold, window_secs, key_field).',
   metrics: 'Utilisez le transform log_to_metric de Vector.',
   elasticsearch: 'Les requêtes vers Elasticsearch pendant le traitement n’ont pas d’équivalent ; préférez une table d’enrichissement.',
   jdbc_streaming: 'Préférez une table d’enrichissement (fichier CSV mis à jour périodiquement) aux requêtes SQL par événement.',
   jdbc_static: 'Exportez la table de référence en CSV et déclarez-la comme table d’enrichissement.',
   http: 'Les appels HTTP par événement n’ont pas d’équivalent dans un transform Vector.',
-  prune: 'Utilisez filter/for_each sur l’objet racine en VRL pour ne garder que certaines clés.',
-  de_dot: 'Parcourez les clés avec map_keys(., recursive: true) pour remplacer les points.',
-  syslog_pri: 'Décodez la priorité avec parse_syslog ou un calcul facility = pri / 8, severity = pri % 8.',
   memcached: 'Pas d’équivalent : préférez une table d’enrichissement.',
   sleep: 'Pas d’équivalent : inutile dans Vector.'
 };
@@ -1094,6 +1378,42 @@ function flatOutputs(stmts, conds, out) {
   }
   return out;
 }
+/*
+ * throttle de Logstash : compte les événements par clé et par tranche de « period » secondes (horodatage de
+ * l’événement), et applique add_tag, add_field… à ceux qui dépassent after_count. Le filtre ne supprime rien : un
+ * « if "étiquette" in [tags] { drop {} } » le suit d’ordinaire. Le transform throttle de Vector supprime directement
+ * ce qui dépasse le seuil, sur une fenêtre glissante de temps de traitement : il ne vaut que si l’étiquette sert à
+ * supprimer, ce qui est vérifié dans la suite du pipeline.
+ */
+function throttleTransform(v, st, rest) {
+  const s = lsSettings(st);
+  const ko = why => { v.stats.ko++; v.note('err', `Filtre throttle non traduit (ligne ${st.line})`, why); return { threshold: 1, window_secs: 1, __ko: true }; };
+  if (s.before_count !== undefined && +s.before_count !== -1) return ko('before_count marque les premiers événements de chaque tranche : le transform throttle de Vector ne sait que limiter ceux qui dépassent un seuil.');
+  if (s.after_count === undefined || +s.after_count === -1) return ko('throttle sans after_count : rien n’est marqué, aucun équivalent à produire.');
+  const period = String(s.period === undefined ? '60' : s.period);
+  if (/%\{/.test(period)) return ko('period calculée pour chaque événement : la fenêtre du transform throttle est fixe.');
+  const window = parseInt(period, 10) || 60;
+  const tags = lsList(s.add_tag).map(String);
+  // L’étiquette sert-elle à supprimer ? « if "x" in [tags] { drop {} } » dans la suite du pipeline
+  const drops = tag => rest.some(function walk(x) {
+    if (!x) return false;
+    if (x.k === 'if') return x.branches.some(b => (b.cond && JSON.stringify(b.cond).includes(JSON.stringify(tag)) && b.body.some(y => y.k === 'plugin' && y.name === 'drop')) || b.body.some(walk));
+    return false;
+  });
+  const dropped = tags.length && tags.every(drops);
+  const key = s.key === undefined ? null : String(s.key).replace(/%\{([^}]+)\}/g, (m, ref) => `{{ ${vPathOf(fieldSegs(ref), v.ns).replace(/^\./, '')} }}`);
+  const out = { threshold: Math.max(0, parseInt(s.after_count, 10)), window_secs: window };
+  if (key) out.key_field = key;
+  if (!dropped) {
+    v.stats.ko++;
+    v.note('err', `Filtre throttle non traduit (ligne ${st.line})`, `Logstash étiquette${tags.length ? ` (${tags.join(', ')})` : ''} les événements au-delà de ${s.after_count} par ${window} s sans les supprimer, et la suite du pipeline les garde. Le transform throttle de Vector les supprimerait : il est proposé ici, à n’activer que si ces événements doivent disparaître.`);
+  } else {
+    v.stats.approx++;
+    v.note('warn', 'throttle → transform throttle', `Les événements au-delà de ${out.threshold} par ${window} s${key ? ` et par ${key}` : ''} sont supprimés par Vector, comme le faisait le drop sur l’étiquette ${tags.join(', ')}. Différence : Vector compte sur une fenêtre glissante, à l’heure de traitement, là où Logstash découpe des tranches fixes selon l’horodatage des événements.`);
+  }
+  if (s.max_counters !== undefined || s.max_age !== undefined) v.note('info', 'throttle : max_age, max_counters', 'Vector gère seul la mémoire de ses compteurs : ces réglages n’ont pas d’équivalent.');
+  return out;
+}
 function translateLogstash(src, cfg) {
   try { return translatePipeline(src, cfg); }
   catch (e) {
@@ -1105,7 +1425,7 @@ function translateLogstash(src, cfg) {
 function translatePipeline(src, cfg) {
   const notes = makeNotes();
   // Compatibilité ECS : celle de la configuration (v8 par défaut, comme Logstash 8 et suivants), sauf réglage du plugin
-  const v = { ns: cfg.vector.log_namespace !== false, compat: !!cfg.vector.logstash_compat, ecs: String(cfg.vector.ecs_compatibility || 'v8') !== 'disabled', stats: { ok: 0, approx: 0, ko: 0 }, enrich: {}, env: new Set(), note: (l, t, d, c) => notes.add(l, t, d, c) };
+  const v = { ns: cfg.vector.log_namespace !== false, compat: !!cfg.vector.logstash_compat, ecs: String(cfg.vector.ecs_compatibility || 'v8') !== 'disabled', stats: { ok: 0, approx: 0, ko: 0 }, enrich: {}, env: new Set(), refN: 0, note: (l, t, d, c) => notes.add(l, t, d, c) };
   let ast;
   try { ast = parseLogstash(src); }
   catch (e) { return { error: e.message }; }
@@ -1159,6 +1479,20 @@ function translatePipeline(src, cfg) {
   // Filtres
   let pending = [];
   ast.filter.forEach((st, idx) => {
+    // throttle au premier niveau : le transform throttle de Vector, qui limite le flux par clé
+    if (st.k === 'plugin' && st.name === 'throttle') {
+      const t = throttleTransform(v, st, ast.filter.slice(idx + 1));
+      if (t) {
+        const s0 = lsSettings(st);
+        const tn = uniq(used, compName(s0.id || 'throttle'));
+        const { __ko, ...cfgT } = t;
+        transforms[tn] = Object.assign({ type: 'throttle', inputs: prev.slice() }, cfgT);
+        graph.nodes.push({ id: tn, kind: 'transform', type: 'throttle', label: 'throttle', detail: `${t.threshold} par ${t.window_secs} s${t.key_field ? `, par ${t.key_field}` : ''}` });
+        prev.forEach(x => graph.edges.push([x, tn]));
+        prev = [tn];
+        return;
+      }
+    }
     const g = new VrlGen(v);
     pending.forEach(l => g.lines.push(l)); pending = [];
     g.stmt(st);
@@ -1246,7 +1580,17 @@ function translatePipeline(src, cfg) {
   if (Object.keys(v.enrich).length) config.enrichment_tables = v.enrich;
   config.sources = sources; config.transforms = transforms; config.sinks = sinks;
   if (!Object.keys(transforms).length) delete config.transforms;
-  if (cfg.vector.acknowledgements) v.note('opt', 'Accusés de réception de bout en bout', 'Les offsets Kafka ne sont validés qu’après l’écriture dans le topic de sortie : aucun message perdu en cas d’arrêt brutal.');
+  if (cfg.vector.acknowledgements) {
+    // Le texte suit les composants réels : seules certaines sources de Vector savent attendre l’écriture
+    const srcTypes = Object.values(sources).map(x => x.type); const sinkTypes = Object.values(sinks).map(x => x.type);
+    const where = sinkTypes.length && sinkTypes.every(t => t === 'kafka') ? 'l’écriture dans le topic de sortie' : 'l’écriture par les sorties';
+    const ACK = ['kafka', 'logstash', 'http_server', 'file', 'journald', 'opentelemetry', 'splunk_hec', 'fluent', 'vector', 'amqp', 'aws_s3', 'aws_sqs'];
+    const without = [...new Set(srcTypes.filter(t => !ACK.includes(t)))];
+    const text = srcTypes.length && srcTypes.every(t => t === 'kafka')
+      ? `Les offsets Kafka ne sont validés qu’après ${where} : aucun message perdu en cas d’arrêt brutal.`
+      : `Les sources n’accusent réception qu’après ${where}` + (without.length ? ` ; ${without.join(', ')} n’ont pas d’accusé de réception et peuvent perdre des événements en cas d’arrêt brutal.` : ' : aucun événement perdu en cas d’arrêt brutal.');
+    v.note('opt', 'Accusés de réception de bout en bout', text);
+  }
   if (cfg.vector.shadow_mode) v.note('info', 'Mode shadow', 'Le groupe de consommateurs et les topics de sortie sont suffixés par -shadow : Vector tourne en parallèle de Logstash sans lui prendre de partitions.');
   if (v.ns) v.note('info', 'Namespace de logs', 'log_namespace isole les métadonnées Kafka (topic, offset, clé) de la charge utile : les messages écrits restent identiques à ceux de Logstash.');
   const header = `Configuration Vector générée par Passerelle depuis un pipeline Logstash\nVérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>${interpolation ? '\nVector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)' : ''}${v.env.size ? `\nVariables d’environnement attendues : ${[...v.env].join(', ')}` : ''}`;

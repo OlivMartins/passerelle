@@ -1,0 +1,19 @@
+# Couverture : 3 directs, 1 à vérifier, 0 à reprendre
+# À vérifier : throttle → transform throttle
+
+transforms:
+  throttle:
+    type: throttle
+    inputs: [stdin_in_init]
+    threshold: 2
+    window_secs: 3600
+    key_field: '{{ host }}'
+  condition_2:
+    type: remap
+    inputs: [throttle]
+    source: |
+      if (includes(array(.tags) ?? [], "throttled") || contains(string(.tags) ?? "", "throttled")) {
+        # drop
+        abort
+      }
+    drop_on_abort: true

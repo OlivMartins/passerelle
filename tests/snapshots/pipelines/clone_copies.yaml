@@ -1,0 +1,18 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  clone:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # clone
+      orig = object!(.)
+      . = orig
+      if is_array(.tags) { .tags = push(array!(.tags), "a") } else if .tags == null { .tags = ["a"] } else { .tags = [.tags, "a"] }
+      if exists(.copie) { .copie = push(array(.copie) ?? [.copie], "oui") } else { .copie = "oui" }
+      copie_1 = .
+      . = orig
+      if is_array(.tags) { .tags = push(array!(.tags), "b") } else if .tags == null { .tags = ["b"] } else { .tags = [.tags, "b"] }
+      if exists(.copie) { .copie = push(array(.copie) ?? [.copie], "oui") } else { .copie = "oui" }
+      copie_2 = .
+      . = [orig, copie_1, copie_2]

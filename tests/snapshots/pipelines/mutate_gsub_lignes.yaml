@@ -1,0 +1,10 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Tableaux dans mutate
+
+transforms:
+  mutate:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # mutate
+      if is_string(.a) { .a = replace!(.a, r'(?m)^[\t\n\x0B\x0C\r ]+', "") }

@@ -1,5 +1,4 @@
 # Couverture : 3 directs, 0 à vérifier, 0 à reprendre
-# À vérifier : Référence %{champ}
 
 transforms:
   mutate:
@@ -7,4 +6,5 @@ transforms:
     inputs: [stdin_in_init]
     source: |
       # mutate
-      .a = "v-" + (to_string(.b) ?? join(.b, ",") ?? encode_json(.b))
+      ref_1 = if .b == null { "%{b}" } else if is_array(.b) { (join(map_values(flatten(array!(.b))) -> |item| { if item == null { "" } else { to_string(item) ?? encode_json(item) } }, ",") ?? "") } else { to_string(.b) ?? encode_json(.b) }
+      .a = "v-" + ref_1

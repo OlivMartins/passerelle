@@ -57,6 +57,8 @@ function prepare(cases) {
     }
   }
   writeFileSync(join(LS, 'pipelines.yml'), pipelines.join(''));
+  // Greffons à installer dans Logstash avant de jouer les cas (voir logstash.sh)
+  writeFileSync(join(LS, 'plugins.txt'), [...new Set(cases.flatMap(c => c.plugins || []))].join(' '));
   return translations;
 }
 
