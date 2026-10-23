@@ -136,10 +136,11 @@ function fieldTarget(ctx, field) {
       for (const p of [].concat(patterns || []).map(String)) {
         if (p !== '*' && !new RegExp(globToRe(p)).test(name)) continue;
         const weight = p.replace(/\*/g, '').length;
-        if (!best || weight > best.weight) best = { column, weight };
+        // labels: [labels.*] : la colonne porte le nom de l’objet, ses clés sont relatives (labels.env → labels['env'])
+        if (!best || weight > best.weight) best = { column, weight, key: p === `${column}.*` ? name.slice(column.length + 1) : name };
       }
     }
-    target = best ? attrTarget(ctx, best.column, name, name) : { kind: 'column', column: name };
+    target = best ? attrTarget(ctx, best.column, best.key, name) : { kind: 'column', column: name };
   }
   ctx.targets.set(name, target);
   return target;

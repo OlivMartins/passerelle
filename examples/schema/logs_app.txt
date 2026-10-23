@@ -1,0 +1,54 @@
+PUT _ilm/policy/logs-app-30j
+{
+  "policy": {
+    "phases": {
+      "hot": { "actions": { "rollover": { "max_age": "1d", "max_primary_shard_size": "50gb" } } },
+      "warm": { "min_age": "7d", "actions": { "forcemerge": { "max_num_segments": 1 } } },
+      "delete": { "min_age": "30d", "actions": { "delete": {} } }
+    }
+  }
+}
+
+PUT _component_template/logs-app@mappings
+{
+  "template": {
+    "mappings": {
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "message": { "type": "match_only_text" },
+        "log": { "properties": { "level": { "type": "keyword" }, "logger": { "type": "keyword" } } },
+        "service": { "properties": { "name": { "type": "keyword" }, "version": { "type": "keyword" } } },
+        "host": { "properties": { "name": { "type": "keyword" }, "ip": { "type": "ip" } } },
+        "trace": { "properties": { "id": { "type": "keyword" } } },
+        "http": {
+          "properties": {
+            "request": { "properties": { "method": { "type": "keyword" } } },
+            "response": { "properties": { "status_code": { "type": "long" }, "body": { "properties": { "bytes": { "type": "long" } } } } }
+          }
+        },
+        "event": { "properties": { "duration": { "type": "long" }, "original": { "type": "keyword", "index": false, "doc_values": false } } },
+        "url": { "properties": { "path": { "type": "wildcard" } } },
+        "user": { "properties": { "name": { "type": "keyword", "fields": { "text": { "type": "match_only_text" } } } } },
+        "tags": { "type": "keyword" },
+        "labels": { "type": "object" },
+        "error": { "properties": { "message": { "type": "match_only_text" }, "stack_trace": { "type": "wildcard" } } }
+      }
+    }
+  }
+}
+
+PUT _index_template/logs-app
+{
+  "index_patterns": ["logs-app-*"],
+  "data_stream": {},
+  "priority": 200,
+  "composed_of": ["logs@mappings", "logs-app@mappings"],
+  "template": {
+    "settings": { "index.lifecycle.name": "logs-app-30j", "index.codec": "best_compression" },
+    "mappings": {
+      "runtime": {
+        "lent": { "type": "boolean", "script": "emit(doc['event.duration'].value > 1000000000L)" }
+      }
+    }
+  }
+}
