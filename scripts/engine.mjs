@@ -17,6 +17,7 @@ export const ENGINE_FILES = [
   'src/engine/schema.js',
   'src/engine/kql.js',
   'src/engine/kibana.js',
+  'src/engine/grafana.js',
   'src/engine/logstash.js'
 ];
 
@@ -24,5 +25,5 @@ export const engineSource = () => ENGINE_FILES.map(f => readFileSync(join(ROOT, 
 
 // Le moteur chargé hors du binaire, pour les tests et les bancs
 export function loadEngine() {
-  return new Function(`'use strict';\n${engineSource()}\nreturn { translateDSL, translateLogstash, schemaFromElastic, profilesFromSystem, kqlParse, kqlToDSL, kqlTranslate, kibanaObjects, kibanaInventory, inventoryMarkdown, inventoryCSV, inventoryHTML, inventorySQLFiles, schemaPullQueries, parseYAMLConfig, tableConfig, toYAML, DEFAULT_CONFIG, mergeConfig, verdictOf, coverage, VERDICTS };`)();
+  return new Function(`'use strict';\n${engineSource()}\nreturn { translateDSL, translateLogstash, schemaFromElastic, profilesFromSystem, kqlParse, kqlToDSL, kqlTranslate, kibanaObjects, kibanaInventory, inventoryMarkdown, inventoryCSV, inventoryHTML, inventorySQLFiles, grafanaDashboard, grafanaReportMarkdown, schemaPullQueries, parseYAMLConfig, tableConfig, toYAML, DEFAULT_CONFIG, mergeConfig, verdictOf, coverage, VERDICTS };`)();
 }

@@ -1,6 +1,6 @@
 # Inventaire de migration Kibana vers ClickHouse
 
-25 objets à migrer, 21 requêtes traduites. Effort estimé : **37,5 h**, soit **5,4 jours** à 7 h.
+25 objets à migrer, 21 requêtes traduites. Effort estimé : **37,25 h**, soit **5,3 jours** à 7 h.
 
 Non comptés (sans requête à migrer) : 1 tag, 1 config.
 
@@ -10,14 +10,14 @@ Non comptés (sans requête à migrer) : 1 tag, 1 config.
 |---|---:|---:|---:|---:|---:|---:|
 | Vue de données | 1 | 1 | 0 | 0 | 0 | 0,25 h |
 | Recherche | 2 | 1 | 0 | 1 | 0 | 3,5 h |
-| Visualisation | 7 | 4 | 2 | 1 | 0 | 11,25 h |
+| Visualisation | 7 | 4 | 2 | 1 | 0 | 11 h |
 | Lens | 5 | 2 | 2 | 1 | 0 | 4,5 h |
 | Carte | 1 | 0 | 0 | 1 | 0 | 4,5 h |
 | Tableau de bord | 1 | 0 | 0 | 1 | 0 | 2 h |
 | Règle d’alerte | 3 | 3 | 0 | 0 | 0 | 3,5 h |
 | Règle de détection | 3 | 0 | 2 | 1 | 0 | 7,5 h |
 | Connecteur | 2 | 2 | 0 | 0 | 0 | 0,5 h |
-| **Total** | **25** | **13** | **6** | **6** | **0** | **37,5 h** |
+| **Total** | **25** | **13** | **6** | **6** | **0** | **37,25 h** |
 
 *Prête* : traduction directe. *À vérifier* : traduite, avec un écart de comportement à confirmer. *À reprendre* : une partie ne se traduit pas et s’écrit à la main. *Non reconnue* : objet que Passerelle ne lit pas.
 
@@ -35,7 +35,7 @@ Non comptés (sans requête à migrer) : 1 tag, 1 config.
 
 | Tableau de bord | Panneaux | Verdict | Effort, panneaux compris |
 |---|---:|---|---:|
-| Supervision du site web | 11 | à reprendre | 11 h |
+| Supervision du site web | 11 | à reprendre | 10,75 h |
 
 L’effort d’un tableau de bord compte ses panneaux ; un objet partagé par plusieurs tableaux de bord est compté dans chacun ici, une seule fois dans le total.
 
@@ -48,7 +48,7 @@ L’effort d’un tableau de bord compte ses panneaux ; un objet partagé par pl
 | Recherche | Erreurs 5xx récentes | Discover | prête | 0,25 h |
 | Visualisation | Carte des sessions (Vega) | Vega | à reprendre | 6,5 h |
 | Visualisation | Chemins en erreur | secteurs, depuis une recherche | prête | 0,5 h |
-| Visualisation | Débit sortant par hôte (TSVB) | TSVB timeseries | à vérifier | 1,75 h |
+| Visualisation | Débit sortant par hôte (TSVB) | TSVB timeseries | à vérifier | 1,5 h |
 | Visualisation | Latence moyenne et p95 par heure | courbes | prête | 0,5 h |
 | Visualisation | Mode d’emploi | Markdown | prête | 0,5 h |
 | Visualisation | Requêtes par service | barres verticales | à vérifier | 1 h |
@@ -184,7 +184,7 @@ LIMIT 10;
 
 ### Visualisation : Débit sortant par hôte (TSVB)
 
-À vérifier, 1,75 h. TSVB timeseries. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v004`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
+À vérifier, 1,5 h. TSVB timeseries. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v004`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
 
 À vérifier :
 - **intervalle automatique** : Kibana calcule l’intervalle d’après la période affichée. La traduction retient 30m, l’intervalle de la période par défaut du tableau de bord (1 j) ; dans Grafana, $__interval le recalcule à chaque affichage.
@@ -240,7 +240,6 @@ ORDER BY host_name ASC, periode ASC WITH FILL
 
 **Taux d’erreur** — à vérifier, couverture 100 %. Sur @timestamp ≥ {{time_from}} et ≤ {{time_to}}, garde les documents où service.environment = production, puis regroupe par tranche de 30 min.
 
-- À vérifier : **exists sur message** — La colonne n’est pas Nullable : un champ absent y prend la valeur par défaut et ne se distingue plus d’un champ renseigné, la condition est donc toujours vraie. Si la chaîne vide représente l’absence, activez clickhouse.empty_as_missing.
 - À vérifier : **Tranches vides non comblées (periode)** — Avec un pipeline d’agrégation, les tranches sans document ne sont pas ajoutées : le calcul porte sur les tranches présentes, alors qu’Elasticsearch compte aussi les tranches vides.
 
 ```sql
@@ -249,7 +248,7 @@ SELECT
     toStartOfInterval(timestamp, INTERVAL 30 MINUTE, 'Europe/Paris') AS periode,
     count() AS doc_count,
     countIf(http.response.status_code >= 500) AS numerateur_doc_count,
-    countIf(isNotNull(message)) AS denominateur_doc_count,
+    countIf(1) AS denominateur_doc_count,
     if(denominateur_doc_count > 0, numerateur_doc_count / denominateur_doc_count, 0) AS filter_ratio
 FROM logs.web
 WHERE timestamp >= parseDateTime64BestEffort({time_from:String}, 3, 'UTC')
@@ -263,7 +262,7 @@ ORDER BY periode ASC;
 
 - Recréer l’objet (visualisation) : 0,5 h
 - Vérifier « Taux d’erreur » (à vérifier) : 0,25 h
-- Points à vérifier de « Taux d’erreur » : 0,5 h
+- Points à vérifier de « Taux d’erreur » : 0,25 h
 - intervalle automatique : 0,25 h
 - dernière tranche écartée (TSVB) : 0,25 h
 

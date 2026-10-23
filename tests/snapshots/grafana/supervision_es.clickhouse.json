@@ -1,0 +1,681 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_CLICKHOUSE",
+      "label": "ClickHouse",
+      "description": "Source de données ClickHouse (remplace Elasticsearch)",
+      "type": "datasource",
+      "pluginId": "grafana-clickhouse-datasource",
+      "pluginName": "ClickHouse"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "11.3.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "datasource",
+      "id": "grafana-clickhouse-datasource",
+      "name": "ClickHouse",
+      "version": "4.0.0"
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${DS_CLICKHOUSE}"
+        },
+        "enable": true,
+        "iconColor": "red",
+        "name": "Déploiements",
+        "target": {
+          "refId": "Anno",
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    timestamp AS time,\n    message AS text,\n    service.name AS tags\nFROM\n(\n    SELECT\n        timestamp,\n        message,\n        service.name\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n      AND event.category = 'deployment'\n      AND $__conditionalAll(service.name IN (${service:singlequote}), $service)\n    ORDER BY timestamp DESC\n    LIMIT 10000\n)",
+          "pluginVersion": "4.23.2"
+        }
+      }
+    ]
+  },
+  "editable": true,
+  "graphTooltip": 0,
+  "uid": "web-es-ch",
+  "title": "Supervision web (ClickHouse)",
+  "tags": [
+    "web"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 7,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "label": "Service",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${DS_CLICKHOUSE}"
+        },
+        "query": {
+          "editorType": "sql",
+          "rawSql": "SELECT valeur\nFROM\n(\n    SELECT\n        service.name AS valeur,\n        count() AS doc_count\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n      AND service.environment = 'production'\n    GROUP BY valeur\n    ORDER BY valeur ASC\n    LIMIT 500\n)"
+        },
+        "definition": "SELECT valeur\nFROM\n(\n    SELECT\n        service.name AS valeur,\n        count() AS doc_count\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n      AND service.environment = 'production'\n    GROUP BY valeur\n    ORDER BY valeur ASC\n    LIMIT 500\n)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": null,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "refresh": 2,
+        "sort": 1,
+        "options": []
+      },
+      {
+        "name": "methode",
+        "label": "Méthode",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${DS_CLICKHOUSE}"
+        },
+        "query": {
+          "editorType": "sql",
+          "rawSql": "SELECT valeur\nFROM\n(\n    SELECT\n        http.request.method AS valeur,\n        count() AS doc_count\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n    GROUP BY valeur\n    ORDER BY doc_count DESC, valeur ASC\n    LIMIT 10\n)"
+        },
+        "includeAll": false,
+        "multi": false,
+        "current": {},
+        "refresh": 1,
+        "options": [],
+        "definition": "SELECT valeur\nFROM\n(\n    SELECT\n        http.request.method AS valeur,\n        count() AS doc_count\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n    GROUP BY valeur\n    ORDER BY doc_count DESC, valeur ASC\n    LIMIT 10\n)"
+      },
+      {
+        "name": "champ",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${DS_CLICKHOUSE}"
+        },
+        "query": {
+          "editorType": "sql",
+          "rawSql": "SELECT name\nFROM system.columns\nWHERE database = 'logs' AND table = 'web'\n  AND type LIKE '%String%'\nORDER BY name"
+        },
+        "current": {},
+        "options": [],
+        "definition": "SELECT name\nFROM system.columns\nWHERE database = 'logs' AND table = 'web'\n  AND type LIKE '%String%'\nORDER BY name"
+      },
+      {
+        "name": "filtres",
+        "type": "adhoc",
+        "datasource": {
+          "type": "grafana-clickhouse-datasource",
+          "uid": "${DS_CLICKHOUSE}"
+        },
+        "filters": []
+      },
+      {
+        "name": "pas",
+        "type": "interval",
+        "query": "1m,10m,1h",
+        "current": {
+          "text": "10m",
+          "value": "10m"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Requêtes par service",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    time,\n    toString(service_name) AS `service_name`,\n    doc_count AS `Count`\nFROM\n(\n    WITH\n        base AS (\n            SELECT\n                *\n            FROM logs.web\n            WHERE $__timeFilter_ms(timestamp)\n              AND $__conditionalAll(service.name IN (${service:singlequote}), $service)\n              AND service.environment = 'production'\n        ),\n        top_service_name AS (\n            SELECT\n                service.name AS service_name\n            FROM base\n            GROUP BY service_name\n            ORDER BY count() DESC, service_name ASC\n            LIMIT 5\n        )\n    SELECT\n        service.name AS service_name,\n        toStartOfInterval(timestamp, INTERVAL $__interval_s SECOND, 'UTC') AS time,\n        count() AS doc_count,\n        sum(count()) OVER (PARTITION BY service_name) AS service_name_doc_count\n    FROM base\n    WHERE service.name IN (SELECT service_name FROM top_service_name)\n    GROUP BY service_name, time\n    ORDER BY service_name_doc_count DESC, service_name, time ASC WITH FILL\n        FROM toStartOfInterval($__fromTime_ms, INTERVAL $__interval_s SECOND, 'UTC')\n        TO toStartOfInterval($__toTime_ms, INTERVAL $__interval_s SECOND, 'UTC') + INTERVAL $__interval_s SECOND\n        STEP INTERVAL $__interval_s SECOND\n)\nORDER BY time, service_name",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "${__field.labels.service_name}"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Latence : moyenne et centiles",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    time,\n    m1 AS `Average event.duration`,\n    m4[1] AS `p95.0 event.duration`,\n    m4[2] AS `p99.0 event.duration`\nFROM\n(\n    SELECT\n        toStartOfInterval(timestamp, INTERVAL 10 MINUTE, 'UTC') AS time,\n        count() AS doc_count,\n        avgOrNull(event.duration) AS m1,\n        arrayMap(v -> if(isNaN(v), NULL, v), quantilesTDigest(0.95, 0.99)(event.duration)) AS m4\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n      AND $__conditionalAll(service.name IN (${service:singlequote}), $service)\n    GROUP BY time\n    ORDER BY time ASC WITH FILL\n        FROM toStartOfInterval($__fromTime_ms, INTERVAL 10 MINUTE, 'UTC')\n        TO toStartOfInterval($__toTime_ms, INTERVAL 10 MINUTE, 'UTC') + INTERVAL 10 MINUTE\n        STEP INTERVAL 10 MINUTE\n)\nORDER BY time",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Octets moyens par requête (bucket script)",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    time,\n    m6 AS `Sum http.response.bytes / Count`\nFROM\n(\n    SELECT\n        toStartOfInterval(timestamp, INTERVAL $__interval_s SECOND, 'UTC') AS time,\n        count() AS doc_count,\n        sum(http.response.bytes / 1024) AS m5,\n        m5 / doc_count AS m6\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n      AND $__conditionalAll(service.name IN (${service:singlequote}), $service)\n    GROUP BY time\n    ORDER BY time ASC\n)\nORDER BY time",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "Passerelle : à vérifier — Division dans un script ; Tranches vides non comblées (time)."
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Octets cumulés et dérivée",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    time,\n    m1 AS `Sum http.response.bytes`,\n    m2 AS `Cumulative Sum Sum http.response.bytes`,\n    m3 AS `Derivative Sum http.response.bytes`,\n    m4 AS `Moving Function Sum http.response.bytes`\nFROM\n(\n    SELECT\n        toStartOfInterval(timestamp, INTERVAL 1 HOUR, 'UTC') AS time,\n        count() AS doc_count,\n        sum(http.response.bytes) AS m1,\n        sum(m1) OVER (ORDER BY time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS m2,\n        m1 - lagInFrame(toNullable(m1), 1) OVER (ORDER BY time ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS m3,\n        avg(toNullable(m1)) OVER (ORDER BY time ROWS BETWEEN 5 PRECEDING AND 1 PRECEDING) AS m4\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n    GROUP BY time\n    ORDER BY time ASC\n)\nORDER BY time",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "Passerelle : à vérifier — Tranches vides non comblées (time)."
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Erreurs 5xx",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    doc_count AS `Count`\nFROM\n(\n    SELECT\n        tout,\n        doc_count\n    FROM (\n        SELECT\n            [\n                countIf(1)\n            ] AS doc_count_values\n        FROM logs.web\n        WHERE $__timeFilter_ms(timestamp)\n          AND http.response.status_code >= 500\n          AND $__conditionalAll(service.name IN (${service:singlequote}), $service)\n    )\n    ARRAY JOIN\n        ['tout'] AS tout,\n        doc_count_values AS doc_count\n)",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "type": "bargauge",
+      "title": "Hôtes les plus lents",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 16,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    host_name,\n    m1 AS `Average event.duration`\nFROM\n(\n    SELECT\n        host.name AS host_name,\n        count() AS doc_count,\n        avg(event.duration) AS ordre_m1,\n        avg(event.duration) AS m1\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n    GROUP BY host_name\n    ORDER BY ordre_m1 DESC, host_name ASC\n    LIMIT 10\n)",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Méthodes et statuts",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    http_request_method,\n    http_response_status_code,\n    doc_count AS `Count`,\n    m2 AS `Max event.duration`,\n    m3 AS `Unique Count source.ip`\nFROM\n(\n    WITH\n        base AS (\n            SELECT\n                *\n            FROM logs.web\n            WHERE $__timeFilter_ms(timestamp)\n        ),\n        top_http_request_method AS (\n            SELECT\n                http.request.method AS http_request_method\n            FROM base\n            GROUP BY http_request_method\n            ORDER BY http_request_method ASC\n            LIMIT 5\n        )\n    SELECT\n        http.request.method AS http_request_method,\n        http.response.status_code AS http_response_status_code,\n        count() AS doc_count,\n        max(event.duration) AS m2,\n        uniq(source.ip) AS m3\n    FROM base\n    WHERE http.request.method IN (SELECT http_request_method FROM top_http_request_method)\n    GROUP BY http_request_method, http_response_status_code\n    ORDER BY http_request_method ASC, doc_count DESC, http_response_status_code ASC\n    LIMIT 10 BY http_request_method\n)",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "Passerelle : à vérifier — Unique Count."
+    },
+    {
+      "id": 8,
+      "type": "piechart",
+      "title": "Familles de statuts",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    filtre,\n    doc_count AS `Count`\nFROM\n(\n    SELECT\n        filtre,\n        doc_count\n    FROM (\n        SELECT\n            [\n                countIf(http.response.status_code BETWEEN 200 AND 299),\n                countIf(http.response.status_code BETWEEN 400 AND 499),\n                countIf(http.response.status_code BETWEEN 500 AND 599)\n            ] AS doc_count_values\n        FROM logs.web\n        WHERE $__timeFilter_ms(timestamp)\n    )\n    ARRAY JOIN\n        ['2xx', '4xx', '5xx'] AS filtre,\n        doc_count_values AS doc_count\n)",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Durée : écart type",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 24,
+        "w": 18,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    time,\n    m1_avg AS `Avg event.duration`,\n    m1_avg + 3 * m1_std_deviation AS `Std Dev Upper event.duration`,\n    m1_avg - 3 * m1_std_deviation AS `Std Dev Lower event.duration`\nFROM\n(\n    SELECT\n        toStartOfInterval(timestamp, INTERVAL 1 HOUR, 'UTC') AS time,\n        count() AS doc_count,\n        count(event.duration) AS m1_count,\n        minOrNull(event.duration) AS m1_min,\n        maxOrNull(event.duration) AS m1_max,\n        avgOrNull(event.duration) AS m1_avg,\n        sum(event.duration) AS m1_sum,\n        varPopOrNull(event.duration) AS m1_variance,\n        stddevPopOrNull(event.duration) AS m1_std_deviation,\n        sumOrNull(event.duration * event.duration) AS m1_sum_of_squares\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n    GROUP BY time\n    ORDER BY time ASC WITH FILL\n        FROM toStartOfInterval($__fromTime_ms, INTERVAL 1 HOUR, 'UTC')\n        TO toStartOfInterval($__toTime_ms, INTERVAL 1 HOUR, 'UTC') + INTERVAL 1 HOUR\n        STEP INTERVAL 1 HOUR\n)\nORDER BY time",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 10,
+      "type": "logs",
+      "title": "Journaux d’erreurs",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 2,
+          "queryType": "logs",
+          "rawSql": "SELECT\n    timestamp AS timestamp,\n    message AS body,\n    *\nFROM\n(\n    SELECT\n        *\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n      AND http.response.status_code >= 500\n      AND $__conditionalAll(service.name IN (${service:singlequote}), $service)\n    ORDER BY timestamp DESC\n    LIMIT 200\n)",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "description": "Passerelle : à vérifier — colonnes du panneau de journaux."
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Derniers documents",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT\n    *\nFROM logs.web\nWHERE $__timeFilter_ms(timestamp)\n  AND startsWith(url.path, '/admin')\nORDER BY timestamp DESC\nLIMIT 50",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Requêtes × 1000 (expression)",
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Mixed --"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 50,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    time,\n    doc_count AS `Count`\nFROM\n(\n    SELECT\n        toStartOfInterval(timestamp, INTERVAL $__interval_s SECOND, 'UTC') AS time,\n        count() AS doc_count\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n    GROUP BY time\n    ORDER BY time ASC WITH FILL\n        FROM toStartOfInterval($__fromTime_ms, INTERVAL $__interval_s SECOND, 'UTC')\n        TO toStartOfInterval($__toTime_ms, INTERVAL $__interval_s SECOND, 'UTC') + INTERVAL $__interval_s SECOND\n        STEP INTERVAL $__interval_s SECOND\n)\nORDER BY time",
+          "pluginVersion": "4.23.2"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "__expr__",
+            "uid": "__expr__",
+            "name": "Expression"
+          },
+          "type": "math",
+          "expression": "$A * 1000"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 13,
+      "type": "graph",
+      "title": "Pic de 5xx (ancienne alerte)",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "${DS_CLICKHOUSE}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 50,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "${DS_CLICKHOUSE}"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT\n    time,\n    doc_count AS `Count`\nFROM\n(\n    SELECT\n        toStartOfInterval(timestamp, INTERVAL 1 MINUTE, 'UTC') AS time,\n        count() AS doc_count\n    FROM logs.web\n    WHERE $__timeFilter_ms(timestamp)\n      AND http.response.status_code >= 500\n    GROUP BY time\n    ORDER BY time ASC WITH FILL\n        FROM toStartOfInterval($__fromTime_ms, INTERVAL 1 MINUTE, 'UTC')\n        TO toStartOfInterval($__toTime_ms, INTERVAL 1 MINUTE, 'UTC') + INTERVAL 1 MINUTE\n        STEP INTERVAL 1 MINUTE\n)\nORDER BY time",
+          "pluginVersion": "4.23.2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {},
+      "alert": {
+        "name": "Pic de 5xx",
+        "conditions": [
+          {
+            "evaluator": {
+              "params": [
+                100
+              ],
+              "type": "gt"
+            },
+            "query": {
+              "params": [
+                "A",
+                "5m",
+                "now"
+              ]
+            },
+            "reducer": {
+              "type": "avg"
+            }
+          }
+        ],
+        "frequency": "1m"
+      },
+      "description": "Passerelle : à reprendre — alerte du panneau."
+    },
+    {
+      "id": 14,
+      "type": "text",
+      "title": "À lire",
+      "gridPos": {
+        "x": 0,
+        "y": 58,
+        "w": 24,
+        "h": 3
+      },
+      "targets": [],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "content": "Tableau de bord de l’équipe web.",
+        "mode": "markdown"
+      }
+    }
+  ]
+}

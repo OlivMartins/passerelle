@@ -88,9 +88,16 @@ const kibanaFiles = readdirSync(join(ROOT, 'examples/kibana')).filter(n => n.end
 const kibanaInv = E.kibanaInventory(kibanaFiles.map(f => rd(`examples/kibana/${f}`)), kibanaCfg, { names: kibanaFiles });
 snapshot('kibana/inventaire.md', E.inventoryMarkdown(kibanaInv));
 
+// Tableau de bord Grafana de l’exemple : le tableau converti et son rapport sont figés ici ; le banc ClickHouse
+// interpole et exécute chacune de ses requêtes
+const grafanaCfg = E.mergeConfig(E.DEFAULT_CONFIG, E.parseYAMLConfig(rd('examples/grafana/passerelle.yaml')));
+const grafanaOut = E.grafanaDashboard(rd('examples/grafana/supervision_es.json'), grafanaCfg, { index: 'logs-web-*' });
+snapshot('grafana/supervision_es.clickhouse.json', JSON.stringify(grafanaOut.dashboard, null, 2) + '\n');
+snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut, 'supervision_es.json'));
+
 // Un instantané sans cas ni exemple correspondant est un reste : supprimé par --update, signalé sinon
 for (const rel of readdirSync(join(ROOT, 'tests/snapshots'), { recursive: true }).map(p => p.split(sep).join('/'))) {
-  if (!/\.(sql|yaml|md)$/.test(rel) || snapshots.seen.has(rel)) continue;
+  if (!/\.(sql|yaml|md|json)$/.test(rel) || snapshots.seen.has(rel)) continue;
   if (UPDATE) rmSync(join(ROOT, 'tests/snapshots', rel));
   else { snapshots.different++; check(false, `instantané ${rel}`, 'aucun cas ni exemple ne lui correspond'); }
 }
@@ -246,6 +253,27 @@ check(kbMissing.prerequisites.some(p => p.label === 'Objets liés absents') && k
 check(E.kibanaInventory('{"type":"canvas-workpad","id":"c","attributes":{"name":"c"}}\n{"type":"osquery-pack","id":"o","attributes":{"name":"o"}}', kibanaCfg).entries.every(x => x.verdict === 'todo' || x.verdict === 'unrecognized'), 'Canvas et type inconnu : à reprendre ou non reconnu');
 const kbBad = E.kibanaInventory('{"type":"search","id":"s","attributes":{"title":"s","kibanaSavedObjectMeta":{"searchSourceJSON":"{\\"query\\":{\\"query\\":\\"a:b not c:d\\",\\"language\\":\\"kuery\\"},\\"filter\\":[]}"}}}\nligne illisible', kibanaCfg);
 check(kbBad.entries[0].verdict === 'todo' && kbBad.source.errors.length === 1, 'KQL invalide : à reprendre ; ligne illisible : signalée');
+
+/* ---------- Tableaux de bord Grafana ---------- */
+const gDash = JSON.stringify(grafanaOut.dashboard);
+const gPanel = title => grafanaOut.dashboard.panels.find(p => p.title === title) || { targets: [] };
+check(!/"elasticsearch"/.test(gDash) && !/DS_ELASTICSEARCH/.test(gDash) && grafanaOut.dashboard.__inputs.some(i => i.pluginId === 'grafana-clickhouse-datasource'), 'Grafana : plus aucune référence à Elasticsearch, entrée DS_CLICKHOUSE à l’import');
+const gSeries = gPanel('Requêtes par service').targets[0];
+check(gSeries.format === 0 && /WHERE \$__timeFilter_ms\(timestamp\)/.test(gSeries.rawSql) && /INTERVAL \$__interval_s SECOND/.test(gSeries.rawSql) && gSeries.rawSql.includes('$__conditionalAll(service.name IN (${service:singlequote}), $service)'), 'Grafana : $__timeFilter, $__interval_s et $__conditionalAll pour une variable « All »');
+check(/FROM \$__fromTime_ms|toStartOfInterval\(\$__fromTime_ms/.test(gSeries.rawSql) && /\nORDER BY time, service_name$/.test(gSeries.rawSql), 'Grafana : tranches vides comblées sur la période du tableau de bord, résultat trié par temps');
+check(JSON.stringify(gPanel('Requêtes par service').fieldConfig.overrides).includes('${__field.labels.service_name}'), 'Grafana : alias {{term service.name}} → nom d’affichage des séries');
+const gMixed = gPanel('Requêtes × 1000 (expression)');
+check(gMixed.datasource.uid === '-- Mixed --' && gMixed.targets[1].datasource.type === '__expr__' && gMixed.targets[1].expression === '$A * 1000', 'Grafana : expression du panneau mixte gardée telle quelle');
+check(grafanaOut.report.panels.find(p => p.title === 'Pic de 5xx (ancienne alerte)').verdict === 'todo' && /Passerelle : à reprendre/.test(gPanel('Pic de 5xx (ancienne alerte)').description), 'Grafana : ancienne alerte de panneau à reprendre, signalée dans la description');
+const gVar = grafanaOut.dashboard.templating.list.find(v => v.name === 'service');
+check(gVar.query.editorType === 'sql' && /^SELECT valeur\n/.test(gVar.query.rawSql) && gVar.allValue === null && gVar.includeAll, 'Grafana : variable terms → SELECT d’une colonne, « All » géré par $__conditionalAll');
+check(/fromUnixTimestamp64Milli|\$__fromTime_ms/.test(E.translateDSL(JSON.stringify({ size: 0, aggs: { t: { date_histogram: { field: '@timestamp', fixed_interval: '1h', min_doc_count: 0, extended_bounds: { min: '$__from', max: '$__to' } } } } }), E.DEFAULT_CONFIG, { grafana: true }).sql), 'Grafana : bornes $__from et $__to → macros du plugin');
+check(/statut IN \(\$\{statut:singlequote\}\)/.test(E.translateDSL(JSON.stringify({ query: { term: { statut: '$statut' } } }), E.DEFAULT_CONFIG, { grafana: true }).sql) && /statut NOT IN/.test(E.translateDSL(JSON.stringify({ query: { bool: { must_not: { term: { statut: '$statut' } } } } }), E.DEFAULT_CONFIG, { grafana: true, variables: { statut: { includeAll: true } } }).sql), 'Grafana : égalité → IN, exclusion → NOT IN jamais levée par « All »');
+check(/schéma v2/.test(E.grafanaDashboard(JSON.stringify({ apiVersion: 'dashboard.grafana.app/v2beta1', kind: 'Dashboard', spec: {} }), E.DEFAULT_CONFIG).error || ''), 'Grafana : schéma v2 refusé avec la marche à suivre');
+const gNoIndex = E.grafanaDashboard(rd('examples/grafana/supervision_es.json'), grafanaCfg, {});
+check(gNoIndex.report.notes.some(n => /Aucun index précisé/.test(n)), 'Grafana : sans --index, la table par défaut est signalée');
+const unknownCol = E.translateDSL(JSON.stringify({ query: { term: { inconnue: 'x' } } }), grafanaCfg, { index: 'logs-web-*' });
+check(E.verdictOf(unknownCol) === 'review' && unknownCol.notes.some(n => /absente du schéma/.test(n.title)), 'schéma déclaré : une colonne qu’il ne connaît pas est à vérifier, pas prête');
 
 // Les fichiers du moteur et le serveur partagent une portée : un nom déclaré deux fois casserait le binaire
 const declared = (engineSource() + rd('src/server.js')).match(/^(?:function|const|let|class) +[A-Za-z_$][\w$]*/gm).map(d => d.split(/ +/)[1]);

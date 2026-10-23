@@ -86,6 +86,49 @@ function bindParams(sql, params) {
   });
 }
 
+/*
+ * Tableau de bord Grafana (opts.grafana) : les modèles sont des variables du tableau de bord, interpolées par Grafana
+ * avant l’envoi au plugin ClickHouse, pas des paramètres de requête. Un littéral qui ne porte qu’une variable devient
+ * ${var:singlequote}, qui donne 'a' ou 'a','b' : une égalité devient donc une liste (IN), et une variable qui propose
+ * « All » passe par $__conditionalAll, remplacé par 1=1 quand tout est sélectionné, comme le fait le plugin.
+ */
+const GRAFANA_VAR = /^\$\{([A-Za-z_]\w*)(?::[\w-]+)?\}$|^\[\[([A-Za-z_]\w*)(?::[\w-]+)?\]\]$|^\$([A-Za-z_]\w*)$/;
+function grafanaVar(source) { const m = GRAFANA_VAR.exec(String(source)); return m ? m[1] || m[2] || m[3] : null; }
+// Début et fin de la période du tableau de bord : macros du plugin ClickHouse
+const GRAFANA_TIME = { __from: '$__fromTime_ms', __to: '$__toTime_ms' };
+const grafanaTime = source => { const v = grafanaVar(source); return v && GRAFANA_TIME[v] ? GRAFANA_TIME[v] : null; };
+function bindGrafana(sql, params, vars) {
+  if (!params.length) return sql;
+  const varOf = i => params[i] && grafanaVar(params[i].source);
+  let out = sql.replace(/'(?:[^'\\]|\\.)*'/g, lit => {
+    if (!lit.includes('\uE000')) return lit;
+    const parts = lit.slice(1, -1).split(PARAM_SPLIT).filter(Boolean).map(p => {
+      const m = PARAM_WHOLE.exec(p);
+      const v = m && varOf(+m[1]);
+      return v ? `\${${v}:singlequote}` : `'${p}'`;
+    });
+    return parts.length === 1 ? parts[0] : `concat(${parts.join(', ')})`;
+  });
+  const all = name => !!(vars && vars[name] && vars[name].includeAll);
+  // Liste réduite à la variable (terms) : tout sélectionné, la condition disparaît
+  out = out.replace(/(\S+) IN \((\$\{(\w+):singlequote\})\)/g, (m, lhs, v, name) => (lhs !== 'NOT' && all(name) ? `$__conditionalAll(${m}, $${name})` : m));
+  // Égalité avec une variable : une variable à plusieurs valeurs donne une liste. L’exclusion n’est jamais levée :
+  // « tout sauf toutes les valeurs » ne garde rien, comme dans Elasticsearch.
+  out = out.replace(/(\S+) (=|!=) (\$\{(\w+):singlequote\})(?!\w)/g, (m, lhs, op, v, name) => {
+    const c = `${lhs} ${op === '=' ? 'IN' : 'NOT IN'} (${v})`;
+    return op === '=' && all(name) ? `$__conditionalAll(${c}, $${name})` : c;
+  });
+  return out;
+}
+// Variables Grafana présentes dans le SQL ; les autres sont perdues
+function grafanaParamsInSQL(sqls, params) {
+  const seen = new Set();
+  for (const sql of sqls) for (const m of sql.matchAll(/\$\{(\w+):singlequote\}/g)) seen.add(m[1]);
+  const found = params.filter(p => grafanaVar(p.source) && seen.has(grafanaVar(p.source))).map(p => ({ name: grafanaVar(p.source), source: p.source, types: ['variable Grafana'] }));
+  const lost = params.filter(p => !(grafanaVar(p.source) && seen.has(grafanaVar(p.source))));
+  return { found, lost };
+}
+
 // Paramètres réellement présents dans le SQL, avec leurs types ; les autres sont perdus
 function paramsInSQL(sqls, params) {
   const types = new Map();

@@ -285,8 +285,8 @@ function serve(opts) {
       if (!authorized(req)) return json(res, 401, { error: 'jeton absent ou invalide (Authorization: Bearer …)' });
       if (req.method === 'GET' && url.pathname === '/v1/config') return json(res, 200, publicConfig(cfg));
       if (req.method !== 'POST') return json(res, 405, { error: 'méthode non autorisée' });
-      // Un export Kibana complet dépasse vite 2 Mio : sa route accepte davantage
-      const body = await readBody(req, url.pathname === '/v1/inventory/kibana' ? INVENTORY_LIMIT : LIMIT);
+      // Un export Kibana complet ou un gros tableau de bord dépassent vite 2 Mio : leurs routes acceptent davantage
+      const body = await readBody(req, url.pathname === '/v1/inventory/kibana' || url.pathname === '/v1/translate/grafana' ? INVENTORY_LIMIT : LIMIT);
       switch (url.pathname) {
         case '/v1/translate/dsl': {
           const r = translateDSL(body, cfg, { index: url.searchParams.get('index') || '' });
@@ -312,6 +312,13 @@ function serve(opts) {
           if (fmt === 'html') return send(res, 200, inventoryHTML(inv, 'Inventaire Kibana'), { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" });
           if (fmt === 'csv') return send(res, 200, inventoryCSV(inv), { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="inventaire.csv"' });
           return json(res, 200, inv);
+        }
+        case '/v1/translate/grafana': {
+          const r = grafanaDashboard(body, cfg, { index: url.searchParams.get('index') || '' });
+          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized' });
+          if (r.empty) return json(res, 422, { error: 'aucune requête Elasticsearch dans ce tableau de bord', verdict: 'unrecognized' });
+          if (url.searchParams.get('format') === 'md') return send(res, 200, grafanaReportMarkdown(r), { 'content-type': 'text/markdown; charset=utf-8' });
+          return json(res, 200, { verdict: r.verdict, summary: r.summary, report: r.report, dashboard: r.dashboard });
         }
         case '/v1/validate/vector': return json(res, 200, await limited(() => validateVector(body, url.searchParams.get('format') || 'yaml')));
         case '/v1/validate/sql': return json(res, 200, await limited(() => validateSQL(cfg, body, url.searchParams)));
@@ -347,6 +354,7 @@ Utilisation :
   passerelle schema ddl  <fichier|dossier>... [--config FICHIER] [--preset otel|otel-json] [--compact] [--json] [--table NOM] [--format sql|yaml] [--out DOSSIER]
   passerelle schema pull [--config FICHIER] [--table NOM]...
   passerelle kibana      <export.ndjson>... [--config FICHIER] [--timezone FUSEAU] [--format md|html|csv|json] [--out DOSSIER] [--fail-on todo|review]
+  passerelle grafana     <tableau.json>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo|review]
   passerelle check-config [--config FICHIER] [--quiet]
   passerelle version
 
@@ -517,6 +525,40 @@ function kibanaReport(o) {
   if (o['fail-on'] && inv.entries.some(x => VERDICT_RANK[x.verdict] >= VERDICT_RANK[o['fail-on']])) process.exit(2);
 }
 
+/* ---------- Tableaux de bord Grafana (passerelle grafana) ---------- */
+function grafanaConvert(o) {
+  if (!o._.length) fail('aucun tableau de bord à convertir. Exemple : passerelle grafana tableau.json --index logs-* --out grafana/');
+  if (o.format !== undefined) fail('--format ne s’applique pas à grafana (le résultat est un tableau de bord JSON et son rapport)');
+  const cfg = loadCfgOrFail(o);
+  const files = collect(o._, /\.json$/i);
+  if (!files.length) fail('aucun fichier .json trouvé');
+  if (files.length > 1 && !o.out) fail('plusieurs tableaux de bord : précisez --out DOSSIER');
+  if (o.out) fs.mkdirSync(o.out, { recursive: true });
+  let errors = 0, failing = 0;
+  const MARK = { ready: '✓', review: '~', todo: '!', unrecognized: '✗' };
+  for (const f of files) {
+    const r = grafanaDashboard(fs.readFileSync(f, 'utf8'), cfg, { index: o.index || '' });
+    if (r.error) { errors++; process.stderr.write(`✗ ${f} (non reconnu) : ${r.error}\n`); continue; }
+    if (r.empty) { errors++; process.stderr.write(`✗ ${f} : aucune requête Elasticsearch dans ce tableau de bord\n`); continue; }
+    const v = r.summary.byVerdict;
+    const summary = `${VERDICTS[r.verdict]} : ${r.summary.panels} panneau(x), ${v.ready} prêt(s), ${v.review} à vérifier, ${v.todo} à reprendre`;
+    if (o.out) {
+      const base = path.join(o.out, path.basename(f).replace(/\.json$/i, ''));
+      fs.writeFileSync(`${base}.clickhouse.json`, JSON.stringify(r.dashboard, null, 2) + '\n');
+      fs.writeFileSync(`${base}.rapport.md`, grafanaReportMarkdown(r, path.basename(f)));
+      process.stderr.write(`${MARK[r.verdict]} ${f} → ${base}.clickhouse.json, ${base}.rapport.md (${summary})\n`);
+    } else {
+      process.stdout.write(JSON.stringify(r.dashboard, null, 2) + '\n');
+      process.stderr.write(`${MARK[r.verdict]} ${f} (${summary})\n`);
+    }
+    for (const n of r.report.notes) process.stderr.write(`    ${n}\n`);
+    if (o.verbose) for (const p of r.report.panels) process.stderr.write(`    ${MARK[p.verdict]} ${p.title} — ${[...new Set(p.targets.flatMap(t => t.issues.map(i => i.label).concat(t.notes.map(n => n.title))))].join(' ; ') || VERDICTS[p.verdict]}\n`);
+    if (o['fail-on'] && VERDICT_RANK[r.verdict] >= VERDICT_RANK[o['fail-on']]) failing++;
+  }
+  if (errors) process.exit(1);
+  if (failing) process.exit(2);
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv; const o = parseArgs(rest);
   if (!cmd || cmd === 'help' || cmd === '-h' || cmd === '--help' || o.help) { process.stdout.write(HELP + '\n'); return; }
@@ -533,6 +575,7 @@ function main(argv) {
     }
     case 'ls2vector': return batch('ls', o);
     case 'kibana': return kibanaReport(o);
+    case 'grafana': return grafanaConvert(o);
     case 'check-config': {
       const file = o.config || process.env.PASSERELLE_CONFIG || null;
       let cfg; try { cfg = loadConfig(file); } catch (e) { fail(e.message); }

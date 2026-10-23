@@ -5,6 +5,8 @@
  *   - Schéma : chaque CREATE TABLE tiré des modèles d’index (examples/schema) est créé sur ClickHouse.
  *   - Inventaire Kibana : chaque requête SQL de l’inventaire des exemples (examples/kibana) s’exécute sur une table
  *     remplie de documents connus ; quelques résultats sont comparés à leur valeur calculée ici, à la main.
+ *   - Tableau de bord Grafana (examples/grafana) : chaque requête du tableau converti est interpolée comme Grafana et le
+ *     plugin ClickHouse le font (grafana.mjs), puis exécutée et contrôlée de la même façon.
  *
  *   node tests/clickhouse/run.mjs [--verbose]
  *
@@ -19,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEngine } from '../../scripts/engine.mjs';
+import { grafanaInterpolate } from './grafana.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const VERBOSE = process.argv.includes('--verbose');
@@ -56,7 +59,7 @@ const fresh = name => { const d = join(WORK, name); rmSync(d, { recursive: true,
   }
 }
 
-/* ---------- Inventaire Kibana ---------- */
+/* ---------- Inventaire Kibana, puis tableau de bord Grafana, sur une même table remplie ---------- */
 {
   const dir = fresh('kibana');
   const cfg = E.mergeConfig(E.DEFAULT_CONFIG, E.parseYAMLConfig(rd('examples/kibana/passerelle.yaml')));
@@ -117,6 +120,36 @@ const fresh = name => { const d = join(WORK, name); rmSync(d, { recursive: true,
   // Règle de détection à seuil : les documents anciens sont hors de la fenêtre now-6m
   const brute = get('Connexions refusées en rafale / Détection');
   check(results.has('Connexions refusées en rafale / Détection') && brute.length === 0, 'règle de détection à seuil : fenêtre now-6m, aucun groupe sur des documents anciens', `${brute.length} groupe(s)`);
+
+  /* ---------- Tableau de bord Grafana, sur la même table ---------- */
+  // Chaque requête est interpolée comme Grafana et le plugin ClickHouse l’auraient fait, puis exécutée
+  const gcfg = E.mergeConfig(E.DEFAULT_CONFIG, E.parseYAMLConfig(rd('examples/grafana/passerelle.yaml')));
+  const g = E.grafanaDashboard(rd('examples/grafana/supervision_es.json'), gcfg, { index: 'logs-web-*' });
+  const from = Date.parse(params.time_from), to = Date.parse(params.time_to);
+  const run = (sql, vars) => clickhouse(dir, grafanaInterpolate(sql, { from, to, intervalSeconds: 600, vars }));
+  const ALL = { service: '$__all', methode: 'GET', champ: 'message', pas: '10m' };
+  const gres = new Map(); let gran = 0, gfailed = 0;
+  const gtry = (key, sql, vars) => { try { gres.set(key, run(sql, vars)); gran++; } catch (e) { gfailed++; check(false, `Grafana ${key}`, errorOf(e)); } };
+  for (const p of g.report.panels) for (const t of p.targets) gtry(`${p.title} / ${t.refId}`, t.sql, ALL);
+  for (const v of g.report.variables.filter(v => v.sql)) gtry(`variable ${v.name}`, v.sql, ALL);
+  for (const a of g.report.annotations.filter(a => a.sql)) gtry(`annotation ${a.name}`, a.sql, ALL);
+  check(!gfailed && gran > 15, `tableau de bord Grafana : ${gran} requête(s) interpolées et exécutées`, gfailed ? `${gfailed} en échec` : '');
+  const gget = k => gres.get(k) || [];
+  const prod = inRange.filter(r => r['service.environment'] === 'production');
+  const series = gget('Requêtes par service / A');
+  check(series.reduce((n, x) => n + x.Count, 0) === prod.length && series.every((x, i) => i === 0 || x.time >= series[i - 1].time), 'Grafana, terms puis date_histogram, « All » : tous les documents de production, triés par temps', `${series.reduce((n, x) => n + x.Count, 0)} pour ${prod.length}`);
+  const one = run(g.report.panels.find(p => p.title === 'Erreurs 5xx').targets[0].sql, Object.assign({}, ALL, { service: ['checkout', 'panier'] }))[0];
+  check(one && one.Count === inRange.filter(r => r['http.response.status_code'] >= 500 && ['checkout', 'panier'].includes(r['service.name'])).length, 'Grafana, variable à deux valeurs : liste IN, valeur unique sans regroupement', JSON.stringify(one));
+  const fam = Object.fromEntries(gget('Familles de statuts / A').map(x => [x.filtre, x.Count]));
+  const famOk = fam['2xx'] === inRange.filter(r => r['http.response.status_code'] < 300).length && fam['5xx'] === inRange.filter(r => r['http.response.status_code'] >= 500).length;
+  check(famOk, 'Grafana, regroupement Filters (Lucene) : un groupe par filtre', JSON.stringify(fam));
+  const svc = gget('variable service').map(x => x.valeur);
+  check(JSON.stringify(svc) === JSON.stringify([...new Set(prod.map(r => r['service.name']))].sort()), 'Grafana, variable terms : valeurs distinctes, ordre alphabétique', JSON.stringify(svc));
+  const lat10 = gget('Latence : moyenne et centiles / A');
+  const b10 = new Map(); for (const r of inRange) { const t = Math.floor(Date.parse(r.timestamp.replace(' ', 'T') + 'Z') / 600000) * 600000; if (!b10.has(t)) b10.set(t, []); b10.get(t).push(r['event.duration']); }
+  const firstBucket = lat10.find(x => x['Average event.duration'] !== null);
+  const t0 = firstBucket && Date.parse(firstBucket.time.replace(' ', 'T') + 'Z');
+  check(firstBucket && b10.has(t0) && Math.abs(b10.get(t0).reduce((a, b) => a + b, 0) / b10.get(t0).length - firstBucket['Average event.duration']) < 1e-6 && lat10.length === 145, 'Grafana, date_histogram 10m : tranches alignées, comblées sur la période (WITH FILL), moyenne exacte', `${lat10.length} tranches`);
 }
 
 rmSync(WORK, { recursive: true, force: true });

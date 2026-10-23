@@ -175,6 +175,12 @@ try {
   r = await request(prod, 'POST', '/v1/inventory/kibana?format=csv', { body: big, headers: auth });
   check(r.status === 200 && big.length > 2 * 1024 * 1024 && /^\ufeffType;/.test(r.body), 'inventaire Kibana : export de plus de 2 Mio accepté, CSV', `statut ${r.status}, ${Math.round(big.length / 1048576)} Mio`);
 
+  /* ---------- Tableau de bord Grafana ---------- */
+  r = await request(prod, 'POST', '/v1/translate/grafana?index=logs-*', { body: rd('examples/grafana/supervision_es.json'), headers: auth });
+  check(r.status === 200 && r.json.dashboard.__inputs.some(i => i.pluginId === 'grafana-clickhouse-datasource') && r.json.report.panels.length > 5, 'tableau de bord Grafana : converti, avec son rapport', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/grafana', { body: JSON.stringify({ panels: [{ type: 'text', title: 't' }] }), headers: auth });
+  check(r.status === 422 && /aucune requête Elasticsearch/.test(r.json.error), 'tableau de bord sans Elasticsearch : refusé', `statut ${r.status}`);
+
   /* ---------- Sens de tri des documents ---------- */
   r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ sort: [{ service: { order: 'desc; DROP TABLE logs.events --' } }] }), headers: auth });
   check(r.status === 422 && !/DROP/i.test(r.json && r.json.sql || ''), 'sens de tri inconnu refusé', `statut ${r.status}`);
@@ -217,6 +223,12 @@ c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--format', 'toml');
 check(c.status === 1 && /--format/.test(c.stderr), 'kibana --format : formats de l’inventaire seulement', `code ${c.status}`);
 c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--timezone', 'Mars/Olympe');
 check(c.status === 1 && /--timezone/.test(c.stderr), 'kibana --timezone : fuseau inconnu refusé', `code ${c.status}`);
+
+const grafanaOut = join(TMP, 'grafana');
+c = cli('grafana', 'examples/grafana/supervision_es.json', '--config', 'examples/grafana/passerelle.yaml', '--index', 'logs-web-*', '--out', grafanaOut);
+check(c.status === 0 && existsSync(join(grafanaOut, 'supervision_es.clickhouse.json')) && existsSync(join(grafanaOut, 'supervision_es.rapport.md')), 'grafana --out : tableau de bord converti et rapport', `code ${c.status} ${c.stderr}`);
+c = cli('grafana', 'examples/grafana/supervision_es.json', '--fail-on', 'todo');
+check(c.status === 2 && /"grafana-clickhouse-datasource"/.test(c.stdout), 'grafana --fail-on todo : JSON sur la sortie standard, code 2', `code ${c.status}`);
 
 const typo = join(TMP, 'faute.yaml');
 writeFileSync(typo, 'version: 1\nclickhous:\n  endpoint: http://localhost:8123\nkafka:\n  bootstrap_server: k:9092\n');

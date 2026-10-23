@@ -57,6 +57,7 @@ const epochMillisSQL = v => `fromUnixTimestamp64Milli(toInt64(${chNum(v, 'date e
 // Borne de date d’une agrégation (hard_bounds, date_range…) : epoch millis, date math ou date écrite en clair
 function dateBoundSQL(ctx, v, tz) {
   if (isEpoch(v)) return epochMillisSQL(v);
+  if (isParamMark(v) && ctx.opts && ctx.opts.grafana && grafanaTime(paramSource(ctx, v))) { consumeParam(ctx, v); return grafanaTime(paramSource(ctx, v)); }
   return dateMathSQL(ctx, parseDateMath(String(v)) || { abs: String(v), steps: [], ops: [], round: null }, tz);
 }
 // Valeur de curseur d’une clé de regroupement : la clé d’un date_histogram arrive d’Elasticsearch en epoch millis
@@ -290,6 +291,8 @@ function mapField(ctx, field) {
   ctx.columns.add(name);
   const type = columnType(ctx.cfg, ctx.table, name);
   if (type && type.nullable) ctx.nullableCols.add(chIdent(name));
+  // Schéma déclaré : une colonne qu’il ne connaît pas ferait échouer la requête (UNKNOWN_IDENTIFIER)
+  if (!type && ctx.schema && ctx.table) { if (!ctx.unknownCols) ctx.unknownCols = new Set(); ctx.unknownCols.add(name); }
   return chIdent(name);
 }
 function isTextField(ctx, field) {
@@ -672,6 +675,20 @@ function rangeClause(ctx, field, spec0) {
   // Attribut rangé en chaîne : converti en date ou en nombre selon les bornes, comme Elasticsearch compare selon le type du champ
   const numeric = OPS.some(([op]) => typeof spec[op] === 'number' || (typeof spec[op] === 'string' && /^-?\d+(\.\d+)?$/.test(spec[op])));
   const f = fieldAs(ctx, field, dateField ? 'date' : numeric ? 'num' : null);
+  // Tableau de bord Grafana : la période entière ($__from, $__to) devient la macro $__timeFilter du plugin ClickHouse,
+  // à la milliseconde sur une colonne DateTime64
+  const gt = v => isParamMark(v) && ctx.opts && ctx.opts.grafana ? grafanaTime(paramSource(ctx, v)) : null;
+  if (!multi && gt(spec.gte) === '$__fromTime_ms' && gt(spec.lte) === '$__toTime_ms' && spec.gt === undefined && spec.lt === undefined) {
+    consumeParam(ctx, spec.gte); consumeParam(ctx, spec.lte);
+    const col = fieldColumn(ctx, field); const cols = ctx.cfg.clickhouse.columns || {};
+    const raw = String(cols[`${ctx.table}.${col}`] || cols[col] || '');
+    const macro = /^(Nullable\()?DateTime64/.test(raw) ? '$__timeFilter_ms' : '$__timeFilter';
+    const parts2 = [`${macro}(${f})`];
+    const timeKey = ctx.cfg.clickhouse.time_key;
+    if (timeKey && col === ctx.cfg.clickhouse.time_field) parts2.push(`$__timeFilter(${chIdent(timeKey)})`);
+    ctx.dateFields.add(f); H(ctx, 'period', 'la période du tableau de bord'); ctx.stats.ok++;
+    return andJoin(parts2);
+  }
   for (const [op, sym, hs] of OPS) {
     const v = spec[op];
     if (v === undefined || v === null) continue;
@@ -699,6 +716,11 @@ function rangeClause(ctx, field, spec0) {
       if (upper2 && (dm.round || dayOnly)) s = op === 'gt' ? '>=' : '<';
       date = true;
       if (op[0] === 'g') lower = { dm, v }; else upper = { dm, v };
+    } else if (dateField && isParamMark(v) && ctx.opts && ctx.opts.grafana && grafanaTime(paramSource(ctx, v))) {
+      // Tableau de bord Grafana : début ou fin de la période, macro du plugin ClickHouse
+      consumeParam(ctx, v);
+      sql = grafanaTime(paramSource(ctx, v));
+      date = true;
     } else if (dateField && isParamMark(v)) {
       // Modèle (Watcher, Grafana) : la valeur arrive à l’exécution, lue selon le format de la requête
       const zone = zoneOf(ctx.cfg, tz);
@@ -1025,6 +1047,8 @@ function clauseSQL(ctx, q) {
     case 'query_string': case 'simple_query_string': {
       const defFields = body.default_field ? (body.default_field === '*' ? textFieldsOr(ctx) : [body.default_field]) : body.fields ? body.fields.map(f => String(f).replace(/\^[\d.]+$/, '')) : textFieldsOr(ctx);
       const simple = type === 'simple_query_string';
+      // « * » seul, sur tous les champs (défaut d’Elasticsearch, index.query.default_field: *) : tous les documents
+      if (!body.fields && (!body.default_field || body.default_field === '*') && /^\s*\*\s*$/.test(String(body.query || ''))) { ctx.stats.ok++; return null; }
       let ast;
       try { ast = simple ? simpleQueryParse(body.query, body.default_operator) : luceneParse(body.query, body.default_operator); }
       catch (e) { return todo(ctx, 'query_string', `${e.message} — requête : ${body.query}`); }
@@ -1157,7 +1181,9 @@ function valueExpr(ctx, body, want) {
   let e;
   if (body.script) {
     const sc = body.script; const src = typeof sc === 'string' ? sc : sc.source;
-    e = painlessToSQL(ctx, src, { mode: 'expr', params: sc.params || {} }).sql;
+    // Script de valeur (champ et script) : _value est la valeur du champ, que le script transforme
+    const valueSQL = typeof body.field === 'string' ? (want ? fieldAs(ctx, body.field, want) : mapField(ctx, body.field)) : undefined;
+    e = painlessToSQL(ctx, src, Object.assign({ mode: 'expr', params: sc.params || {} }, valueSQL ? { valueSQL } : {})).sql;
   } else e = want ? fieldAs(ctx, body.field, want) : mapField(ctx, body.field);
   if (body.missing !== undefined) e = `ifNull(${e}, ${chVal(body.missing)})`;
   return e;
@@ -1234,7 +1260,10 @@ function metricDef(ctx, name, type, body, parent) {
     }
     case 'top_metrics': {
       ctx.stats.ok++;
-      const ms = [].concat(body.metrics || []); const sort = body.sort || {};
+      const ms = [].concat(body.metrics || []);
+      // Tri écrit en objet ou en liste d’un seul tri, comme dans une recherche (Grafana envoie une liste)
+      if (Array.isArray(body.sort) && body.sort.length !== 1) throw new Error(`top_metrics : un seul tri attendu, ${body.sort.length} reçus (Elasticsearch le refuse aussi)`);
+      const sort = (Array.isArray(body.sort) ? body.sort[0] : body.sort) || {};
       const sf = isObj(sort) ? Object.keys(sort)[0] : String(sort);
       const dir = isObj(sort) ? String(isObj(sort[sf]) ? sort[sf].order : sort[sf]).toLowerCase() : 'asc';
       const fn = dir === 'desc' ? 'argMax' : 'argMin';
@@ -2197,11 +2226,13 @@ function translateRequest(input, cfg, opts, columns) {
   if (ctx.groupCols.size) ctx.notes.add('opt', 'LowCardinality pour les regroupements', `${[...ctx.groupCols].join(', ')} : si le nombre de valeurs distinctes reste sous ~10 000, le type LowCardinality(String) accélère nettement GROUP BY et réduit le stockage.`);
   if (statements.some(s => /\btop_\w+ AS \(\n/.test(s.sql))) ctx.notes.add('info', 'Top N imbriqués', 'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits en deux temps : une CTE top_<nom> retient les N premiers groupes du parent, puis la requête principale s’y limite, avec des comptes exacts là où Elasticsearch les estime par shard. Le filtre commun est nommé une fois (CTE base). ClickHouse recopie une CTE à chaque emploi : la table est lue une fois par CTE top_ et une fois par la requête principale.');
   // Modèles : marqueurs des littéraux → {nom:String} ; un marqueur hors littéral redevient lisible
-  const finish = s => restoreTemplates(bindParams(s, ctx.params), ctx.params);
+  const grafana = !!opts.grafana;
+  const finish = s => restoreTemplates(grafana ? bindGrafana(s, ctx.params, opts.variables) : bindParams(s, ctx.params), ctx.params);
   const statementsOut = statements.map(s => ({ title: s.title, sql: finish(withClause(ctx, s.sql)) }));
   const sql = statementsOut.map(s => `-- ${s.title}\n${s.sql};`).join('\n\n');
-  const params = paramsInSQL(statementsOut.map(s => s.sql), ctx.params);
-  if (params.found.length) {
+  const params = (grafana ? grafanaParamsInSQL : paramsInSQL)(statementsOut.map(s => s.sql), ctx.params);
+  if (params.found.length && grafana) ctx.notes.add('info', 'Variables Grafana', `${params.found.map(p => p.source).join(', ')} : interpolées par Grafana (\${variable:singlequote}), une liste quand plusieurs valeurs sont choisies.`);
+  else if (params.found.length) {
     const first = params.found[0].name;
     ctx.notes.add('info', 'Paramètres de requête', `${params.found.map(p => `${p.source} → {${p.name}:${p.types.join(' | ')}}`).join(', ')}. La valeur est fournie à l’exécution : param_${first}=… dans l’URL de l’interface HTTP, --param_${first}=… avec clickhouse-client.`);
   }
@@ -2227,6 +2258,11 @@ function translateRequest(input, cfg, opts, columns) {
   // Au-delà de max_query_size (256 Kio par défaut), ClickHouse refuse la requête
   const longest = statementsOut.reduce((n, s) => Math.max(n, s.sql.length), 0);
   if (longest > 262144) ctx.notes.add('warn', 'Requête trop longue pour ClickHouse', `Une requête fait ${Math.round(longest / 1024)} Kio. Au-delà de 256 Kio, ClickHouse la refuse par défaut (max_query_size). Si une longue liste de valeurs en est la cause, clickhouse.lists.threshold la sort du SQL pour une table nommée.`);
+  if (ctx.unknownCols && ctx.unknownCols.size) {
+    ctx.stats.approx++;
+    const list = [...ctx.unknownCols];
+    ctx.notes.add('warn', `Colonne${list.length > 1 ? 's' : ''} absente${list.length > 1 ? 's' : ''} du schéma`, `${list.join(', ')} : le schéma déclaré de ${table} (clickhouse.columns, profil de la table) ne ${list.length > 1 ? 'les' : 'la'} connaît pas. ClickHouse refusera la requête si la table ne ${list.length > 1 ? 'les a' : 'l’a'} pas : ajoutez ${list.length > 1 ? 'ces colonnes' : 'la colonne'} au schéma, ou une correspondance dans field_mapping.`);
+  }
   if (!ctx.schema && ctx.schemaGaps.size) {
     const labels = { must_not: 'une exclusion (must_not, NOT)', exists: 'exists' };
     ctx.notes.add('warn', 'Schéma des colonnes non fourni', `La requête contient ${[...ctx.schemaGaps].map(g => labels[g]).join(' et ')}, dont le résultat dépend du type des colonnes. Sur une colonne Nullable, une exclusion écarte les lignes NULL qu’Elasticsearch garde ; sur une colonne non Nullable, exists est toujours vrai. Renseignez clickhouse.columns pour que la traduction en tienne compte.`);

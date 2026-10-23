@@ -123,6 +123,8 @@ export const CASES = [
   /* ---------- Filtres ---------- */
   { id: 'filtre_bool_documents', dsl: { size: 20, sort: [{ [TS]: 'desc' }], query: { bool: { filter: [{ term: { level: 'ERROR' } }, { range: { status: { gte: 500 } } }] } } } },
   { id: 'filtre_wildcard', dsl: total({ wildcard: { host: 'web-*' } }) },
+  // « * » seul sur tous les champs : tous les documents, y compris sans message (requête par défaut des panneaux Grafana)
+  { id: 'filtre_query_string_etoile', dsl: total({ query_string: { query: '*', analyze_wildcard: true } }) },
   { id: 'filtre_prefix', dsl: total({ prefix: { host: 'web' } }) },
   { id: 'filtre_regexp', dsl: total({ regexp: { host: 'web-[1-3]' } }) },
   { id: 'filtre_term_insensible', dsl: total({ term: { service: { value: 'search', case_insensitive: true } } }) },
@@ -357,6 +359,10 @@ export const CASES = [
   { id: 'audit_tri_tableau', dsl: { size: 10, sort: [{ nums: 'asc' }, { [TS]: 'asc' }] } },
   { id: 'audit_tri_tableau_desc', dsl: { size: 10, sort: [{ nums: 'desc' }, { [TS]: 'asc' }] } },
   { id: 'audit_top_metrics_size_croissant', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { t: { top_metrics: { metrics: { field: 'bytes' }, sort: { latency_ms: 'asc' }, size: 2 } } } } } } },
+  // Tri en liste d’un seul élément, comme l’envoie Grafana : même sens que l’objet
+  { id: 'audit_top_metrics_tri_liste', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { t: { top_metrics: { metrics: [{ field: 'status' }], sort: [{ [TS]: 'desc' }], size: '1' } } } } } } },
+  // Script de valeur : _value est la valeur du champ (scripts en ligne de Grafana et de Kibana)
+  { id: 'agg_avg_script_valeur', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { a: { avg: { field: 'latency_ms', script: { source: '_value * 0.1' } } } } } } } },
   // Elasticsearch refuse un tri de top_metrics sur un champ keyword : la traduction aussi
   { id: 'audit_top_metrics_size_chaine', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { host: 'desc' }, size: 3 } } } } },
   { id: 'audit_top_metrics_size', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { [TS]: 'desc' }, size: 3 } } } } }
