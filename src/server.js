@@ -26,6 +26,11 @@ function loadConfig(file) {
     // Une clé mal écrite laisserait la valeur par défaut en place sans que personne ne le voie
     const unknown = unknownKeys(over, Object.assign({ version: 1 }, DEFAULT_CONFIG), '');
     if (unknown.length) throw new Error(`clé${unknown.length > 1 ? 's' : ''} inconnue${unknown.length > 1 ? 's' : ''} dans ${file} : ${unknown.join(', ')}`);
+    for (const [t, profile] of Object.entries((over.clickhouse && over.clickhouse.tables) || {})) {
+      if (profile.preset !== undefined && !PRESETS[profile.preset]) throw new Error(`préréglage inconnu pour la table ${t} dans ${file} : ${profile.preset} (${Object.keys(PRESETS).join(' ou ')})`);
+    }
+    const out = over.vector && over.vector.elasticsearch_output;
+    if (out !== undefined && !['elasticsearch', 'clickhouse'].includes(out)) throw new Error(`vector.elasticsearch_output attend elasticsearch ou clickhouse, pas « ${out} » (${file})`);
   }
   return mergeConfig(DEFAULT_CONFIG, { clickhouse: over.clickhouse, kafka: over.kafka, vector: over.vector });
 }
@@ -35,7 +40,13 @@ function unknownKeys(src, ref, prefix) {
   for (const [k, v] of Object.entries(src)) {
     const p = prefix + k;
     if (!Object.hasOwn(ref, k)) out.push(p);
-    else if (isObj(v) && isObj(ref[k]) && !['index_mapping', 'field_mapping', 'columns', 'names'].includes(k)) out.push(...unknownKeys(v, ref[k], p + '.'));
+    // Profils de table : le nom de la table est libre, pas les clés du profil
+    else if (k === 'tables' && prefix === 'clickhouse.' && isObj(v)) {
+      for (const [t, profile] of Object.entries(v)) {
+        if (!isObj(profile)) { out.push(`${p}.${t}`); continue; }
+        for (const pk of Object.keys(profile)) if (!PROFILE_KEYS.includes(pk)) out.push(`${p}.${t}.${pk}`);
+      }
+    } else if (isObj(v) && isObj(ref[k]) && !FREE_MAPS.includes(k)) out.push(...unknownKeys(v, ref[k], p + '.'));
   }
   return out;
 }
@@ -338,6 +349,7 @@ Codes de sortie : 0 succès, 1 erreur ou fichier non reconnu,
 const OPTIONS = {
   config: { type: 'string' }, listen: { type: 'string' }, index: { type: 'string' }, out: { type: 'string' },
   format: { type: 'string' }, 'fail-on': { type: 'string' }, quiet: { type: 'boolean' }, verbose: { type: 'boolean' },
+  preset: { type: 'string' }, compact: { type: 'boolean' }, json: { type: 'boolean' }, table: { type: 'string', multiple: true },
   help: { type: 'boolean', short: 'h' }
 };
 function parseArgs(argv) {
@@ -350,7 +362,7 @@ function parseArgs(argv) {
   }
   const o = Object.assign({ _: r.positionals }, r.values);
   if (o['fail-on'] !== undefined && o['fail-on'] !== 'todo' && o['fail-on'] !== 'review') fail(`--fail-on attend todo ou review, pas « ${o['fail-on']} »`);
-  if (o.format !== undefined && o.format !== 'yaml' && o.format !== 'toml') fail(`--format attend yaml ou toml, pas « ${o.format} »`);
+  if (o.format !== undefined && !['yaml', 'toml', 'sql', 'md', 'html', 'csv', 'json'].includes(o.format)) fail(`--format attend yaml ou toml (pipelines), sql ou yaml (schéma), md, html, csv ou json (inventaire), pas « ${o.format} »`);
   return o;
 }
 function collect(inputs, exts) {
@@ -363,7 +375,14 @@ function collect(inputs, exts) {
   inputs.forEach(walk);
   return out;
 }
+// --format : chaque commande n’accepte que ses propres formats
+function formatFor(o, allowed, what) {
+  if (o.format !== undefined && !allowed.includes(o.format)) fail(`--format attend ${allowed.slice(0, -1).join(', ')}${allowed.length > 1 ? ' ou ' : ''}${allowed[allowed.length - 1]} pour ${what}, pas « ${o.format} »`);
+  return o.format;
+}
 function batch(kind, o) {
+  if (kind === 'ls') formatFor(o, ['yaml', 'toml'], 'ls2vector');
+  else if (o.format !== undefined) fail('--format ne s’applique pas à dsl2sql');
   if (!o._.length) fail(`aucun fichier à traduire. Exemple : passerelle ${kind === 'dsl' ? 'dsl2sql requetes/' : 'ls2vector pipelines/'}`);
   let cfg;
   try { cfg = loadConfig(o.config || process.env.PASSERELLE_CONFIG || null); } catch (e) { fail(e.message); }
@@ -403,6 +422,54 @@ function batch(kind, o) {
     process.exit(2);
   }
 }
+/* ---------- Schéma (passerelle schema ddl | pull) ---------- */
+function loadCfgOrFail(o) {
+  try { return loadConfig(o.config || process.env.PASSERELLE_CONFIG || null); } catch (e) { return fail(e.message); }
+}
+function schemaDDL(o) {
+  if (!o._.length) fail('aucun fichier à lire. Exemple : passerelle schema ddl modeles/ --out build/schema');
+  formatFor(o, ['sql', 'yaml'], 'schema ddl');
+  const cfg = loadCfgOrFail(o);
+  const files = collect(o._, /\.(json|txt|es)$/i);
+  if (!files.length) fail('aucun fichier correspondant trouvé');
+  // Les documents d’une même migration se complètent (modèle, composants, politique ILM) : ils sont lus ensemble
+  const r = schemaFromDocuments(files.map(f => fs.readFileSync(f, 'utf8').trim()), cfg, { preset: o.preset, compact: !!o.compact, json: !!o.json, table: o.table && o.table[0] });
+  if (r.error || r.empty) fail(r.error || 'aucun mapping lisible');
+  const verdict = verdictOf(r);
+  if (o.out) {
+    fs.mkdirSync(o.out, { recursive: true });
+    fs.writeFileSync(path.join(o.out, 'schema.sql'), `-- Généré par Passerelle ${VERSION} — verdict : ${VERDICTS[verdict]}\n\n${r.sql}`);
+    fs.writeFileSync(path.join(o.out, 'passerelle.tables.yaml'), r.yaml);
+    process.stderr.write(`${r.tables.length} table(s) → ${path.join(o.out, 'schema.sql')} et ${path.join(o.out, 'passerelle.tables.yaml')} (${VERDICTS[verdict]})\n`);
+  } else process.stdout.write(o.format === 'yaml' ? r.yaml : `${r.sql}`);
+  for (const t of r.tables) process.stderr.write(`${t.error ? '✗' : '✓'} ${t.table}${t.error ? ` : ${t.error}` : ''}\n`);
+  if (o.verbose || verdict !== 'ready') r.notes.filter(n => o.verbose || n.level === 'warn' || n.level === 'err').forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`));
+  if (o['fail-on'] && VERDICT_RANK[verdict] >= VERDICT_RANK[o['fail-on']]) process.exit(2);
+}
+// Plusieurs fichiers JSON (réponses d’API) : chacun est lu pour lui-même, puis tous sont traduits ensemble
+function schemaFromDocuments(blocks, cfg, opts) {
+  const wrapped = blocks.map(b => (/^(GET|PUT|POST)\s/i.test(b) ? b : `POST _passerelle\n${b}`)).join('\n\n');
+  return schemaFromElastic(wrapped, cfg, opts);
+}
+async function schemaPull(o) {
+  const cfg = loadCfgOrFail(o);
+  if (!expand(cfg.clickhouse.endpoint)) fail('clickhouse.endpoint n’est pas configuré');
+  const ch = cfg.clickhouse;
+  const tables = o.table && o.table.length ? o.table : [...new Set([...Object.values(ch.index_mapping || {}), ch.default_table].filter(Boolean))];
+  const Q = schemaPullQueries(tables);
+  const rows = async q => {
+    let r;
+    try { r = await clickhouseQuery(cfg, q, []); } catch (e) { fail(e.message); }
+    if (!r.ok) fail(`ClickHouse répond ${r.status} : ${r.text.slice(0, 300)}`);
+    return r.text.split('\n').filter(Boolean).map(l => JSON.parse(l));
+  };
+  const out = profilesFromSystem(await rows(Q.columns), await rows(Q.tables), await rows(Q.indices), tables, cfg);
+  process.stdout.write(out.yaml);
+  out.notes.forEach(n => process.stderr.write(`attention : ${n}\n`));
+  process.stderr.write(`${Object.keys(out.profiles).length} table(s) décrite(s) sur ${tables.length}.\n`);
+  if (Object.keys(out.profiles).length < tables.length) process.exit(1);
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv; const o = parseArgs(rest);
   if (!cmd || cmd === 'help' || cmd === '-h' || cmd === '--help' || o.help) { process.stdout.write(HELP + '\n'); return; }
@@ -410,6 +477,13 @@ function main(argv) {
     case 'version': case '--version': case '-v': process.stdout.write(`passerelle ${VERSION} (node ${process.version})\n`); return;
     case 'serve': try { serve(o); } catch (e) { fail(e.message); } return;
     case 'dsl2sql': return batch('dsl', o);
+    case 'schema': {
+      const sub = o._.shift();
+      if (o.preset !== undefined && !['otel', 'otel-json'].includes(o.preset)) fail(`--preset attend otel ou otel-json, pas « ${o.preset} »`);
+      if (sub === 'ddl') return schemaDDL(o);
+      if (sub === 'pull') return schemaPull(o).catch(e => fail(e.message));
+      return fail(`sous-commande inconnue : schema ${sub || ''}`.trim() + ' (ddl ou pull)');
+    }
     case 'ls2vector': return batch('ls', o);
     case 'check-config': {
       const file = o.config || process.env.PASSERELLE_CONFIG || null;

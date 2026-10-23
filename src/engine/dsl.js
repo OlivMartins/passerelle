@@ -934,19 +934,28 @@ function clauseSQL(ctx, q) {
       const v = String(isObj(raw) ? (raw.value !== undefined ? raw.value : raw.wildcard) : raw);
       const ci = isObj(raw) && raw.case_insensitive;
       const f = mapField(ctx, field);
-      if (v === '*') return tq(ctx, { exists: { field } });
+      // \x désigne le caractère x lui-même, joker compris (Kibana échappe ainsi les caractères réservés)
+      const toks = [];
+      for (let i = 0; i < v.length; i++) {
+        if (v[i] === '\\' && i + 1 < v.length) toks.push({ lit: v[++i] });
+        else if (v[i] === '*' || v[i] === '?') toks.push({ wild: v[i] });
+        else toks.push({ lit: v[i] });
+      }
+      const wild = toks.some(t => t.wild); const plain = toks.map(t => t.lit || '').join('');
+      if (toks.length === 1 && toks[0].wild === '*') return tq(ctx, { exists: { field } });
       H(ctx, 'filters', `${field} ~ ${v}`);
-      if (!/[*?]/.test(v) && ci) { ctx.stats.ok++; return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(v))}`); }
-      if (!/[*?]/.test(v)) { ctx.stats.ok++; return isArrayField(ctx, field) ? `has(${f}, ${chStr(v)})` : `${f} = ${chStr(v)}`; }
-      if (/^[^*?]+\*$/.test(v) && !ci && !isTextField(ctx, field)) { ctx.stats.ok++; return onValues(ctx, field, x => `startsWith(${x}, ${chStr(v.slice(0, -1))})`); }
-      let like = likeEscape(v).replace(/\*/g, '%').replace(/\?/g, '_');
-      if (/^[*?]/.test(v)) ctx.leadingWildcard = f;
+      if (!wild && ci) { ctx.stats.ok++; return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(plain))}`); }
+      if (!wild) { ctx.stats.ok++; return isArrayField(ctx, field) ? `has(${f}, ${chStr(plain)})` : `${f} = ${chStr(plain)}`; }
+      const prefixOnly = toks.length > 1 && toks[toks.length - 1].wild === '*' && toks.slice(0, -1).every(t => !t.wild);
+      if (prefixOnly && !ci && !isTextField(ctx, field)) { ctx.stats.ok++; return onValues(ctx, field, x => `startsWith(${x}, ${chStr(plain)})`); }
+      const like = toks.map(t => (t.wild ? (t.wild === '*' ? '%' : '_') : likeEscape(t.lit))).join('');
+      if (toks[0].wild) ctx.leadingWildcard = f;
       if (isTextField(ctx, field)) {
         // Elasticsearch confronte le motif à chaque mot du champ : * et ? ne débordent pas du mot
         ctx.stats.ok++;
         textIndexNote(ctx, f);
         const W = '[\\p{L}\\p{N}_]';
-        const pattern = v.toLowerCase().split(/([*?])/).map(p => (p === '*' ? `${W}*` : p === '?' ? W : escRe(p))).join('');
+        const pattern = toks.map(t => (t.wild === '*' ? `${W}*` : t.wild === '?' ? W : escRe(t.lit.toLowerCase()))).join('');
         return `match(${f}, ${chStr(`(?i)(?:^|[^\\p{L}\\p{N}_])${pattern}(?:$|[^\\p{L}\\p{N}_])`)})`;
       }
       ctx.stats.ok++;
@@ -1165,7 +1174,7 @@ function aggCall(fn, args, cond, mayBeEmpty) {
   return cond ? `${fn}If${orNull}(${args}, ${cond})` : `${fn}${orNull}(${args})`;
 }
 /* Renvoie [{alias, render(cond, mayBeEmpty)}] */
-function metricDef(ctx, name, type, body) {
+function metricDef(ctx, name, type, body, parent) {
   const A = aliasOf(name);
   const colType = typeof body.field === 'string' && !body.script && body.missing === undefined ? fieldType(ctx, body.field) : null;
   // Sur un champ multivalué, avg, sum, min et max portent sur toutes les valeurs : combinateur -Array
@@ -1245,6 +1254,43 @@ function metricDef(ctx, name, type, body) {
         return `arrayMap(t -> t.2, arraySlice(${dir === 'desc' ? 'arrayReverseSort' : 'arraySort'}(t -> t.1, groupArray${c ? 'If' : ''}(${tuple}${c ? `, ${c}` : ''})), 1, ${n}))`;
       };
       return ms.map(m => { const f = mapField(ctx, m.field); return { alias: aliasOf(ms.length > 1 ? `${name}_${m.field}` : name), render: c => (n > 1 ? topN(f, c) : c ? `${fn}If(${f}, ${s}, ${c})` : `${fn}(${f}, ${s})`) }; });
+    }
+    case 'rate': {
+      // rate : valeur par unité de temps, dans les tranches d’un date_histogram parent. Elasticsearch divise la somme (ou le
+      // nombre de valeurs, ou de documents sans champ) par la durée de la tranche exprimée dans l’unité demandée ;
+      // une tranche calendaire (mois) n’a pas toujours la même durée, d’où dateDiff.
+      const B = parent && parent.rateInfo;
+      if (!B) throw new Error('rate ne se calcule que sous un date_histogram (Elasticsearch le refuse ailleurs)');
+      const SEC = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800 }; const MONTHS = { month: 1, quarter: 3, year: 12 };
+      const CAL_SEC = { MINUTE: 60, HOUR: 3600, DAY: 86400, WEEK: 604800 }; const CAL_MONTHS = { MONTH: 1, QUARTER: 3, YEAR: 12 };
+      const unit = body.unit === undefined ? null : String(body.unit);
+      if (unit !== null && !SEC[unit] && !MONTHS[unit]) throw new Error(`rate : unité inconnue « ${unit} » (second, minute, hour, day, week, month, quarter, year)`);
+      const bucketMonths = B.kind === 'calendar' ? CAL_MONTHS[B.unit] : undefined;
+      let divisor = null;
+      if (unit && MONTHS[unit]) {
+        if (!bucketMonths) throw new Error(`rate : l’unité ${unit} demande un date_histogram au mois, au trimestre ou à l’année (Elasticsearch le refuse sinon)`);
+        divisor = bucketMonths / MONTHS[unit];
+      } else if (unit) {
+        if (bucketMonths) divisor = `(dateDiff('second', ${B.key}, ${B.key} + ${B.step}) / ${SEC[unit]})`;
+        else if (B.kind === 'calendar') divisor = CAL_SEC[B.unit] / SEC[unit];
+        else if (B.kind === 'fixed') divisor = B.seconds / SEC[unit];
+        else divisor = `($__interval_s / ${SEC[unit]})`;
+      }
+      const mode = String(body.mode || 'sum');
+      if (mode !== 'sum' && mode !== 'value_count') throw new Error(`rate : mode inconnu « ${mode} » (sum ou value_count)`);
+      const counted = !body.field && !body.script;
+      const x = counted ? null : valueExpr(ctx, body, mode === 'sum' ? 'num' : undefined);
+      const base = c => (counted ? (c ? `countIf(${c})` : 'count()') : mode === 'value_count' ? aggCall('count', x, c) : aggCall('sum', mayBeNull(ctx, x) ? `ifNull(${x}, 0)` : x, c));
+      ctx.stats.ok++;
+      H(ctx, 'metrics', `taux${body.field ? ` de ${body.field}` : ' de documents'}${unit ? ` par ${{ second: 'seconde', minute: 'minute', hour: 'heure', day: 'jour', week: 'semaine', month: 'mois', quarter: 'trimestre', year: 'année' }[unit]}` : ''}`);
+      // Une fraction de tranche (taux par an d’une tranche mensuelle) s’écrit en multiplication : × 12 plutôt que / 0,0833…
+      const scaled = c => {
+        if (divisor === null || divisor === 1) return `toFloat64(${base(c)})`;
+        if (typeof divisor !== 'number') return `${base(c)} / ${divisor}`;
+        if (divisor < 1 && Number.isInteger(+(1 / divisor).toFixed(9))) return `${base(c)} * ${+(1 / divisor).toFixed(9)}`;
+        return `${base(c)} / ${Number.isInteger(divisor) ? divisor : +divisor.toFixed(12)}`;
+      };
+      return [{ alias: A, render: c => scaled(c) }];
     }
     case 'boxplot': {
       ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
@@ -1377,7 +1423,13 @@ function buildLevel(ctx, name, def) {
       let bucket, step, hum;
       // Un intervalle qu’Elasticsearch refuse ne devient pas une tranche d’une heure en silence
       if (body.calendar_interval && !CAL[ci]) throw new Error(`intervalle calendaire inconnu : ${JSON.stringify(body.calendar_interval)} (minute, hour, day, week, month, quarter, year ou 1m, 1h, 1d, 1w, 1M, 1q, 1y)`);
-      if (ci && CAL[ci]) { const [fn, unit, fr] = CAL[ci]; bucket = x => `${fn}(${x}${tzA})`; step = `INTERVAL 1 ${unit}`; hum = `par ${fr}`; }
+      // Tableau de bord Grafana : l’intervalle vient du tableau de bord ($__interval), rendu en secondes par le plugin ClickHouse
+      const dashboardIv = !!(ctx.opts && ctx.opts.grafana) && [body.fixed_interval, body.interval, body.calendar_interval].some(x => isParamMark(x) && /^\$__interval(_ms)?$/.test(paramSource(ctx, x)));
+      if (dashboardIv) {
+        [body.fixed_interval, body.interval, body.calendar_interval].filter(isParamMark).forEach(x => consumeParam(ctx, x));
+        bucket = x => `toStartOfInterval(${x}, INTERVAL $__interval_s SECOND${tzA})`; step = 'INTERVAL $__interval_s SECOND'; hum = 'par intervalle du tableau de bord';
+        L.rateInfo = { kind: 'dashboard' };
+      } else if (ci && CAL[ci]) { const [fn, unit, fr] = CAL[ci]; bucket = x => `${fn}(${x}${tzA})`; step = `INTERVAL 1 ${unit}`; hum = `par ${fr}`; L.rateInfo = { kind: 'calendar', unit }; }
       else {
         const m = /^(\d+)(ms|s|m|h|d)$/.exec(String(fi || '1h'));
         if (!m) throw new Error(`intervalle fixe inconnu : ${JSON.stringify(fi)} (unités ms, s, m, h, d)`);
@@ -1387,6 +1439,7 @@ function buildLevel(ctx, name, def) {
         // Un nombre d’heures qui ne divise pas 24 s’écrit donc en minutes, alignées sur l’epoch.
         if (u === 'h' && 24 % n !== 0) { n *= 60; u = 'm'; }
         bucket = x => `toStartOfInterval(${x}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`; step = `INTERVAL ${n} ${FIXED_UNIT[u]}`;
+        L.rateInfo = { kind: 'fixed', seconds: n * { ms: 0.001, s: 1, m: 60, h: 3600, d: 86400 }[u] };
       }
       // offset : les tranches commencent plus tard (ou plus tôt) ; la clé est le début décalé de la tranche
       const off = body.offset ? /^([+-]?)(\d+)(ms|s|m|h|d)$/.exec(String(body.offset)) : null;
@@ -1401,7 +1454,8 @@ function buildLevel(ctx, name, def) {
         if (body.hard_bounds.max !== undefined) L.where.push(`${f} <= ${dateBoundSQL(ctx, body.hard_bounds.max, tz)}`);
       }
       // Semaine, mois, trimestre et année donnent une clé de type Date ; les autres intervalles, un DateTime
-      L.keys.push({ sql: key, alias: A, date: { asDate: !off && !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
+      L.keys.push({ sql: key, alias: A, date: { asDate: !dashboardIv && !off && !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
+      Object.assign(L.rateInfo, { key: A, step });
       L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) {
         L.fill = step;
@@ -1519,7 +1573,7 @@ function buildLevel(ctx, name, def) {
   L.children = [];
   for (const [cn, cdef] of Object.entries(kids)) {
     const ct = aggType(cdef); const cb = cdef[ct] || {};
-    if (METRIC_TYPES.has(ct)) L.metrics.push(...metricDef(ctx, cn, ct, cb).map(m => Object.assign(m, { cond: null })));
+    if (METRIC_TYPES.has(ct)) L.metrics.push(...metricDef(ctx, cn, ct, cb, L).map(m => Object.assign(m, { cond: null })));
     else if (PIPE_TYPES.has(ct)) L.pipes.push({ name: cn, type: ct, body: cb });
     else if (ct === 'top_hits') L.topHits = L.topHits || [], L.topHits.push({ name: cn, body: cb });
     else if (ct === 'filter' && Object.values(aggChildren(cdef)).every(d => METRIC_TYPES.has(aggType(d)))) {
@@ -1527,7 +1581,7 @@ function buildLevel(ctx, name, def) {
       // « outer » : condition du groupe quand le niveau est calculé par agrégation conditionnelle (bucketsQuery)
       const within = outer => (outer ? andJoin([c, outer]) : c);
       L.metrics.push({ alias: aliasOf(`${cn}_doc_count`), render: outer => `countIf(${within(outer)})` });
-      for (const [mn, md] of Object.entries(aggChildren(cdef))) { const mt = aggType(md); metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}).forEach(m => L.metrics.push({ alias: m.alias, render: outer => m.render(within(outer), true) })); }
+      for (const [mn, md] of Object.entries(aggChildren(cdef))) { const mt = aggType(md); metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}, L).forEach(m => L.metrics.push({ alias: m.alias, render: outer => m.render(within(outer), true) })); }
       ctx.stats.ok++;
       ctx.notes.add('opt', `Filtre « ${cn} » fusionné`, 'Plutôt qu’une requête de plus, le sous-filtre est calculé dans la même passe grâce aux combinateurs -If (countIf, avgIf…).');
     } else L.children.push({ name: cn, def: cdef });
@@ -2025,7 +2079,7 @@ function translateDSL(input, cfg, opts) {
 function translateRequest(input, cfg, opts, columns) {
   opts = opts || {};
   const ctx = makeDslCtx(cfg);
-  ctx.columns = columns;
+  ctx.columns = columns; ctx.opts = opts;
   let text = String(input || '').trim(); let index = opts.index || ''; let endpoint = '_search';
   if (!text) return { empty: true };
   const m = /^(GET|POST)\s+(\S+)[^\n]*\n?/i.exec(text);
@@ -2122,7 +2176,7 @@ function translateRequest(input, cfg, opts, columns) {
     const base = col.replace(/[`.]/g, '_');
     ctx.notes.add('opt', `Index plein texte sur ${col}`, `hasToken(lowerUTF8(${col}), …) exploite un index text construit sur la même expression : les blocs sans le mot sont sautés sans être lus. Le découpage splitByNonAlpha est celui de hasToken(). La taille de l’index dépend du nombre de mots distincts (identifiants, adresses IP) : mesurez-la dans system.data_skipping_indices. Un index tokenbf_v1 sur la même expression, de taille fixe par bloc, reste possible.`, `ALTER TABLE ${table}\n    ADD INDEX idx_${base}_text lowerUTF8(${col}) TYPE text(tokenizer = splitByNonAlpha);\nALTER TABLE ${table} MATERIALIZE INDEX idx_${base}_text;`);
   }
-  if (ctx.leadingWildcard) ctx.notes.add('opt', 'Joker en tête de motif', `Un motif qui commence par * impose de lire toute la colonne ${ctx.leadingWildcard}. Un index ngrambf_v1 permet d’éviter une partie des lectures.`, `ALTER TABLE ${table}\n    ADD INDEX idx_ngram ${ctx.leadingWildcard} TYPE ngrambf_v1(3, 65536, 3, 0) GRANULARITY 1;`);
+  if (ctx.leadingWildcard) ctx.notes.add('opt', 'Joker en tête de motif', `Un motif qui commence par * impose de lire toute la colonne ${ctx.leadingWildcard}. Un index text à trigrammes sert LIKE '%motif%' dès 4 caractères (vérifié sur ClickHouse 26.9) : les blocs sans les trigrammes du motif sont sautés.`, `ALTER TABLE ${table}\n    ADD INDEX idx_${String(ctx.leadingWildcard).replace(/[^A-Za-z0-9_]/g, '_')}_ngram ${ctx.leadingWildcard} TYPE text(tokenizer = ngrams(3));\nALTER TABLE ${table} MATERIALIZE INDEX idx_${String(ctx.leadingWildcard).replace(/[^A-Za-z0-9_]/g, '_')}_ngram;`);
   if (ctx.attrUsed && ctx.attrUsed.size) {
     // Un attribut lu par la requête se lit dans toute la Map ou la colonne JSON : une colonne matérialisée se lit seule,
     // se compresse mieux et peut entrer dans la clé de tri. L’absence y reste un NULL, comme dans Elasticsearch.
@@ -2176,6 +2230,6 @@ function translateRequest(input, cfg, opts, columns) {
   ctx.notes.list.sort((a, b) => order[a.level] - order[b.level]);
   // Textes affichés : le marqueur d’un modèle redevient le modèle d’origine
   const human = restoreDeep(ctx.human, ctx.params);
-  return { sql, statements: statementsOut, lists, notes: restoreDeep(ctx.notes.list, ctx.params), stats: ctx.stats, table, index, matched, human, sentence: sentence(human), parameters: params.found, lostParams: params.lost };
+  return { sql, statements: statementsOut, lists, notes: restoreDeep(ctx.notes.list, ctx.params), stats: ctx.stats, table, index, matched, human, sentence: sentence(human), parameters: params.found, lostParams: params.lost.filter(p => !p.consumed) };
 }
 

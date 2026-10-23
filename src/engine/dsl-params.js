@@ -97,3 +97,7 @@ function paramsInSQL(sqls, params) {
   const lost = params.filter(p => !types.has(p.name));
   return { found, lost };
 }
+
+// Modèle d’une valeur marquée, et modèle consommé par la traduction sans figurer dans le SQL (intervalle Grafana)
+function paramSource(ctx, mark) { const m = PARAM_WHOLE.exec(String(mark)); return m && ctx.params[+m[1]] ? ctx.params[+m[1]].source : ''; }
+function consumeParam(ctx, mark) { const m = PARAM_WHOLE.exec(String(mark)); if (m && ctx.params[+m[1]]) ctx.params[+m[1]].consumed = true; }
