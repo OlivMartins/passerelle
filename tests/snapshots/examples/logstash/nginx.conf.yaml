@@ -1,11 +1,13 @@
 # Couverture : 8 directs, 1 à vérifier, 0 à reprendre
 # À vérifier : useragent → parse_user_agent
+# À vérifier : geoip : base MaxMind à fournir
 # À vérifier : Tableaux dans mutate
 # À vérifier : Référence %{champ}
 # À vérifier : Comparaison à un nombre
 
 # Configuration Vector générée par Passerelle depuis un pipeline Logstash
 # Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+# Base geoip à fournir : /etc/vector/GeoLite2-City.mmdb (sans elle, Vector refuse le VRL : error[E401])
 
 data_dir: /var/lib/vector
 api:

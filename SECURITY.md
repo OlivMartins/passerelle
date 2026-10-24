@@ -4,8 +4,8 @@
 
 | Version | Correctifs de sécurité |
 |---|---|
-| 1.1.x | Oui |
-| 1.0.x | Non : mettez à jour vers 1.1 |
+| 1.3.x | Oui |
+| < 1.3 | Non : mettez à jour vers 1.3 |
 
 ## Signaler une vulnérabilité
 

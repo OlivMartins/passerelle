@@ -19,6 +19,11 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
   - toutes les unités d’Elasticsearch sont lues (`nmi`, `NM`, `cm`, `mm`, `in`, noms longs comme `miles`, notation `2.5e3m`) ; une unité inconnue faisait chercher à 0 m, elle fait maintenant refuser la requête, comme Elasticsearch ;
   - la distance n’est plus arrondie au mètre (`1.5ft` donnait 0) ;
   - la distance est calculée par la formule d’Elasticsearch (haversine, rayon de 6 371 008,77 m) : `geoDistance()`, sur l’ellipsoïde, comptait 418 m de plus entre Paris et Londres, de quoi classer autrement un point en bord de cercle.
+- `geoip` : la base MaxMind à monter est signalée « à vérifier » et rappelée en tête de la configuration générée. Sans elle, Vector refuse la configuration avec une erreur peu parlante (`error[E401] invalid enum variant`), comme pour l’exemple `nginx.conf`.
+- Interface :
+  - commandes de validation et de lancement pour Vector 0.59, avec la variable `VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION` quand la configuration l’exige, et la base geoip montée dans le conteneur ;
+  - modèle GitLab CI sur Vector 0.59 et ClickHouse 26.9 (au lieu de 0.49 et `latest`).
+- `SECURITY.md` : versions maintenues à jour (1.3.x).
 
 ## [1.3.0] - 2026-10-22
 
