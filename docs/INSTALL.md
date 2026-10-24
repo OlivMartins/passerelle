@@ -40,6 +40,8 @@ cd passerelle-1.3.0-linux-x86_64
 sudo ./install.sh
 ```
 
+La somme de contrôle détecte un fichier abîmé. Pour vérifier aussi que l’archive a été construite par la CI du dépôt, à partir de l’étiquette de la release : `gh attestation verify passerelle-1.3.0-linux-x86_64.tar.gz -R OlivMartins/passerelle`.
+
 Le script vérifie l’architecture, la glibc et l’intégrité des fichiers. Il crée ensuite l’utilisateur système `passerelle` et installe `/usr/local/bin/passerelle`, `/etc/passerelle/` et l’unité systemd. Un jeton d’API aléatoire est écrit dans `/etc/passerelle/passerelle.env`, puis le service est démarré.
 
 Relancer `install.sh` depuis une archive plus récente met à jour le binaire et l’unité, conserve la configuration et redémarre le service.

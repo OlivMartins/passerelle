@@ -1,0 +1,8 @@
+# Les actions sont épinglées par empreinte de commit : Dependabot propose chaque mise à jour en PR,
+# empreinte et commentaire de version compris.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

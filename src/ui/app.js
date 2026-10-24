@@ -228,9 +228,14 @@ SQL`;
 }
 function validateLS(r) {
   const f = `vector.${cfg.vector.format}`;
-  const env = (r.env || []).map(e => `${e}=…`).join(' ');
+  // Vector 0.57 et suivants ne remplacent ${VAR} (et $$) qu’avec cette option, que demande l’en-tête du fichier
+  const interp = /^# Vector 0\.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation/m.test(r.yaml || '');
+  const env = (r.env || []).map(e => `${e}=…`).concat(interp ? ['VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true'] : []).join(' ');
+  // La table geoip lit sa base MaxMind au démarrage : sans le fichier, Vector refuse le VRL (error[E401])
+  const mmdb = r.config && r.config.enrichment_tables && r.config.enrichment_tables.geoip && r.config.enrichment_tables.geoip.path;
+  const base = mmdb ? mmdb.split('/').pop() : '';
   const cmd = `# 1. Contrôle complet : syntaxe, topologie et compilation du VRL
-#    (--no-environment ne compile pas le VRL : préférez --skip-healthchecks)
+#    (--no-environment ne compile pas le VRL : préférez --skip-healthchecks)${mmdb ? `\n#    La base geoip doit exister à ${mmdb}` : ''}
 ${env ? env + ' ' : ''}vector validate --skip-healthchecks ${f}
 
 # 2. Rejouer une étape sur un événement réel extrait du topic source
@@ -238,8 +243,8 @@ vector vrl --input evenement.json --program etape.vrl --print-object
 
 # 3. Lancer en parallèle de Logstash (mode shadow conseillé dans la configuration)
 docker run --rm -v "$PWD/${f}:/etc/vector/vector.${cfg.vector.format}:ro" \\
-  ${(r.env || []).map(e => `-e ${e} `).join('')}timberio/vector:0.49.0-debian`;
-  return `<div class="prose"><p>Cette configuration a été générée pour Vector 0.49 et suit ses règles de typage VRL : chaque appel faillible est traité explicitement.</p>
+  ${mmdb ? `-v "$PWD/${base}:${mmdb}:ro" \\\n  ` : ''}${(r.env || []).map(e => `-e ${e} `).join('')}${interp ? '-e VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true ' : ''}timberio/vector:0.59.0-debian --config /etc/vector/vector.${cfg.vector.format}`;
+  return `<div class="prose"><p>Cette configuration a été générée pour Vector 0.59 et suit ses règles de typage VRL : chaque appel faillible est traité explicitement.</p>
     <pre class="code boxed">${hl(cmd, 'bash')}</pre>
     <p>L’archive téléchargée contient aussi un squelette de test unitaire, exécutable avec vector test, à compléter avec un message réel.</p></div>`;
 }
@@ -414,14 +419,14 @@ traduire:
 
 valider_vector:
   stage: valider
-  image: timberio/vector:0.49.0-debian
+  image: timberio/vector:0.59.0-debian
   script:
     - mkdir -p /var/lib/vector
     - for f in build/vector/*.${cfg.vector.format}; do vector validate --skip-healthchecks "$f"; done
 
 valider_sql:
   stage: valider
-  image: clickhouse/clickhouse-server:latest
+  image: clickhouse/clickhouse-server:26.9
   script:
     - for f in build/sql/*.sql; do clickhouse format --multiquery < "$f" > /dev/null; done
 
