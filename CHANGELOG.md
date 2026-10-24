@@ -7,6 +7,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 ### Corrigé
 
 - `ids` : la requête lit la colonne de `field_mapping._id`, comme `term` sur `_id`, au lieu d’une colonne `_id` écrite en dur.
+- `_source.excludes` : les exclusions sont gardées quand `includes` est présent ; un champ exclut aussi ses sous-champs (`http` retire `http.method`) et un motif (`http.*`) s’applique. Elles s’écrivent `EXCEPT ('expression régulière')` : une liste de noms n’excluait rien en silence pour un motif ou un nom absent.
 
 ## [1.3.0] - 2026-10-22
 

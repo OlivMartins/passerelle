@@ -162,6 +162,13 @@ const guarded = (dsl, re) => { const r = tr(dsl); return E.verdictOf(r) === 'tod
 const discover = tr({ _source: false, fields: [{ field: '*', include_unmapped: 'true' }, { field: '@timestamp', format: 'strict_date_optional_time' }], stored_fields: ['*'], size: 5 });
 check(/SELECT\n {4}\*\nFROM/.test(discover.sql) && !discover.sql.includes('`*`'), 'fields ["*"] de Discover : SELECT *');
 check(/COLUMNS\('\^http\\\\\.\.\*\$'\)/.test(tr({ _source: false, fields: ['http.*'] }).sql), 'fields à motif : COLUMNS(regex)');
+// _source excludes : un parent exclut ses sous-champs, un motif s’applique, includes ne fait pas oublier excludes
+// (formes exécutées sur ClickHouse 26.9 : un nom absent dans EXCEPT (…) n’exclut rien, sans erreur)
+const selected = src => tr({ _source: src }).sql.match(/^SELECT\n([\s\S]*?)\nFROM/m)[1].trim();
+check(selected({ excludes: ['http'] }) === "* EXCEPT ('^(?:http)(?:\\\\..*)?$')", '_source excludes d’un parent : sous-champs exclus');
+check(selected({ excludes: ['http.*'] }) === "* EXCEPT ('^(?:http\\\\..*)(?:\\\\..*)?$')", '_source excludes à motif : expression régulière');
+check(selected({ includes: ['http.*'], excludes: ['http.body'] }) === "COLUMNS('^http\\\\..*$') EXCEPT ('^(?:http\\\\.body)(?:\\\\..*)?$')", '_source includes et excludes à la fois : exclusions gardées');
+check(selected({ includes: ['service', 'http.method'], excludes: 'http' }) === 'service', '_source excludes écrit en chaîne : champ inclus retiré');
 // Clés inconnues : la requête est refusée, comme Elasticsearch la refuserait
 check(refused({ qeury: { term: { service: 'api' } } }, /qeury/), 'clé inconnue du corps de recherche : refus');
 check(refused({ query: { bool: { filtre: [{ term: { service: 'api' } }] } } }, /filtre/), 'clé inconnue de bool : refus');

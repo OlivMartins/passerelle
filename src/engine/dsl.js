@@ -1685,9 +1685,17 @@ function selectList(ctx, dsl) {
   else if (typeof src === 'string') addField(src);
   else if (Array.isArray(src)) src.forEach(addField);
   else if (isObj(src)) {
-    (src.includes || src.include || []).forEach(addField);
-    const ex = src.excludes || src.exclude || [];
-    if (!cols.length && ex.length) cols.push(`* EXCEPT (${ex.map(f => mapField(ctx, f)).join(', ')})`);
+    [].concat(src.includes || src.include || []).forEach(addField);
+    const ex = [].concat(src.excludes || src.exclude || []);
+    if (ex.length) {
+      // Elasticsearch exclut un champ avec ses sous-champs, et accepte des motifs : une seule expression régulière,
+      // que EXCEPT('regex') applique. Une liste de noms ignorerait en silence un motif ou un nom absent.
+      const raw = c => (c.startsWith('`') ? c.slice(1, -1).replace(/\\(.)/g, '$1') : c);
+      const re = '^(?:' + ex.map(f => (String(f).includes('*') ? String(f).split('*').map(escRe).join('.*') : escRe(raw(mapField(ctx, f))))).join('|') + ')(?:\\..*)?$';
+      const kept = cols.filter(c => c.startsWith('COLUMNS(') || c === '*' || !new RegExp(re).test(raw(c))).map(c => (c.startsWith('COLUMNS(') || c === '*' ? `${c} EXCEPT (${chStr(re)})` : c));
+      cols.splice(0, cols.length, ...(cols.length ? kept : [`* EXCEPT (${chStr(re)})`]));
+      ctx.stats.ok++;
+    }
   }
   for (const f of [].concat(dsl.fields || [], dsl.docvalue_fields || [], (dsl.stored_fields || []).filter(x => x !== '_none_'))) addField(isObj(f) ? f.field : f);
   // Discover demande « * » et @timestamp : * couvre déjà toutes les colonnes
