@@ -815,22 +815,29 @@ function clauseSQL(ctx, q) {
     }
     case 'fuzzy': {
       const [field, raw] = fieldEntry(body);
-      const v = String(isObj(raw) ? raw.value : raw);
-      let fz = isObj(raw) && raw.fuzziness !== undefined ? raw.fuzziness : 'AUTO';
-      const d = /^\d+$/.test(String(fz)) ? +fz : v.length <= 2 ? 0 : v.length <= 5 ? 1 : 2;
+      const o = isObj(raw) ? raw : {};
+      const v = String(isObj(raw) ? raw.value : raw); const len = [...v].length;
+      // AUTO, ou AUTO:bas,haut : distance 0 sous « bas » caractères, 1 sous « haut », 2 au-delà
+      const fz = String(o.fuzziness !== undefined ? o.fuzziness : 'AUTO'); const auto = /^AUTO(?::(\d+),(\d+))?$/i.exec(fz);
+      const lo = auto && auto[1] ? +auto[1] : 3; const hi = auto && auto[2] ? +auto[2] : 6;
+      // prefix_length : les n premiers caractères doivent être identiques ; au-delà de la longueur, la valeur exacte
+      const n = +o.prefix_length || 0;
+      const d = n >= len ? 0 : /^\d+$/.test(fz) ? +fz : len < lo ? 0 : len < hi ? 1 : 2;
       const f = mapField(ctx, field); ctx.stats.approx++;
-      ctx.notes.add('info', 'fuzzy → distance d’édition', 'Distance calculée à la volée (editDistanceUTF8 et damerauLevenshteinDistance) : coûteux sur de gros volumes, à combiner avec un filtre sélectif. L’inversion de deux lettres accentuées compte pour deux modifications, pour une seule chez Elasticsearch.');
+      ctx.notes.add('info', 'fuzzy → distance d’édition', 'Distance calculée à la volée (editDistanceUTF8 et damerauLevenshteinDistance) : coûteux sur de gros volumes, à combiner avec un filtre sélectif. L’inversion de deux lettres accentuées compte pour deux modifications, pour une seule chez Elasticsearch. max_expansions est sans objet : tous les termes proches sont trouvés.');
       H(ctx, 'filters', `${field} ≈ ${v}`);
       // Elasticsearch compte l’inversion de deux lettres voisines pour une modification (transpositions: true par défaut).
       // damerauLevenshteinDistance le fait mais compte en octets : least() garde editDistanceUTF8 pour les lettres
       // accentuées, où une transposition reste comptée deux fois.
-      const dist = (a, b) => (isObj(raw) && raw.transpositions === false ? `editDistanceUTF8(${a}, ${b})` : `least(editDistanceUTF8(${a}, ${b}), damerauLevenshteinDistance(${a}, ${b}))`);
-      if (isTextField(ctx, field)) return `arrayExists(t -> ${dist('t', chStr(v.toLowerCase()))} <= ${d}, tokens(lowerUTF8(${f})))`;
-      return `${dist(f, chStr(v))} <= ${d}`;
+      const dist = (a, b) => (o.transpositions === false ? `editDistanceUTF8(${a}, ${b})` : `least(editDistanceUTF8(${a}, ${b}), damerauLevenshteinDistance(${a}, ${b}))`);
+      // Avec un préfixe commun, la distance des termes entiers est celle des suffixes : startsWith() suffit
+      const near = (x, val) => (n > 0 && d > 0 ? `startsWith(${x}, ${chStr([...val].slice(0, n).join(''))}) AND ` : '') + `${dist(x, chStr(val))} <= ${d}`;
+      if (isTextField(ctx, field)) return `arrayExists(t -> ${near('t', v.toLowerCase())}, tokens(lowerUTF8(${f})))`;
+      return near(f, v);
     }
     case 'ids': {
-      ctx.stats.ok++; mapField(ctx, '_id');
-      return `_id IN (${(body.values || []).map(chVal).join(', ')})`;
+      ctx.stats.ok++;
+      return `${mapField(ctx, '_id')} IN (${(body.values || []).map(chVal).join(', ')})`;
     }
     case 'match': case 'match_phrase': case 'match_phrase_prefix': case 'match_bool_prefix': {
       const [field, raw] = fieldEntry(body);
@@ -866,7 +873,11 @@ function clauseSQL(ctx, q) {
       catch (e) { return todo(ctx, 'query_string', `${e.message} — requête : ${body.query}`); }
       if (ast === null) { ctx.stats.ok++; return 'false'; }
       ctx.cap.push([]);
+      // Options des termes « mot~ » : transmises à chaque fuzzy produit
+      const outer = ctx.fuzzyOpts;
+      ctx.fuzzyOpts = { prefix_length: body.fuzzy_prefix_length, transpositions: body.fuzzy_transpositions, fuzziness: simple ? undefined : body.fuzziness };
       const out = luceneSQL(ctx, ast, defFields, simple ? (c, f, tok) => simpleLeaf(c, f, tok, body.default_operator) : luceneLeaf);
+      ctx.fuzzyOpts = outer;
       ctx.cap.pop();
       H(ctx, 'text', `la recherche « ${body.query} » est satisfaite`);
       return out;
@@ -894,12 +905,15 @@ function clauseSQL(ctx, q) {
       let pt = body[field]; let lat, lon;
       if (Array.isArray(pt)) [lon, lat] = pt; else if (isObj(pt)) ({ lat, lon } = pt); else if (typeof pt === 'string') [lat, lon] = pt.split(',').map(Number);
       lat = chNum(lat, 'geo_distance (latitude)'); lon = chNum(lon, 'geo_distance (longitude)');
-      const m = /^([\d.]+)\s*(km|m|mi|yd|ft)?$/.exec(String(body.distance));
-      const meters = m ? +m[1] * ({ km: 1000, m: 1, mi: 1609.344, yd: 0.9144, ft: 0.3048 }[m[2] || 'm']) : 0;
+      const meters = geoMeters(body.distance);
       const f = mapField(ctx, field); ctx.stats.approx++;
       ctx.notes.add('warn', 'geo_distance', `Suppose une colonne Point (lon, lat) « ${field} ». Adaptez si la position est stockée en deux colonnes.`);
       H(ctx, 'filters', `${field} à moins de ${body.distance}`);
-      return `geoDistance(${f}.1, ${f}.2, ${lon}, ${lat}) <= ${Math.round(meters)}`;
+      // Formule d’Elasticsearch (haversine, rayon moyen de 6 371 008,7714 m) : geoDistance() suit l’ellipsoïde
+      // et greatCircleDistance() un autre rayon, d’où des points en bord de cercle classés autrement.
+      // distance_type: plane ne change pas le résultat de la requête dans Elasticsearch (vérifié par le banc)
+      const rad = x => `radians(${x})`;
+      return `2 * 6371008.7714 * asin(sqrt(pow(sin((${rad(`${f}.2`)} - ${rad(lat)}) / 2), 2) + cos(${rad(lat)}) * cos(${rad(`${f}.2`)}) * pow(sin((${rad(`${f}.1`)} - ${rad(lon)}) / 2), 2))) <= ${meters}`;
     }
     default:
       return todo(ctx, type, `La clause « ${type} » n’a pas d’équivalent automatique en SQL.`);
@@ -914,10 +928,28 @@ function luceneSQL(ctx, n, defFields, leaf) {
   const fields = n.field ? [n.field] : defFields;
   return orJoin(fields.map(f => leaf(ctx, f, n.tok)));
 }
+// Distance de geo_distance en mètres, lue comme Elasticsearch (DistanceUnit) : nombre, suffixe d’unité facultatif
+// (mètres par défaut) ; une unité inconnue fait refuser la requête, comme Elasticsearch la refuse
+const GEO_UNITS = [[['in', 'inch'], 0.0254], [['yd', 'yards'], 0.9144], [['ft', 'feet'], 0.3048], [['km', 'kilometers'], 1000], [['NM', 'nmi', 'nauticalmiles'], 1852], [['mm', 'millimeters'], 0.001], [['cm', 'centimeters'], 0.01], [['mi', 'miles'], 1609.344], [['m', 'meters'], 1]];
+function geoMeters(distance) {
+  if (typeof distance === 'number' && Number.isFinite(distance)) return distance;
+  const s = String(distance).trim();
+  let num = s, factor = 1;
+  for (const [names, f] of GEO_UNITS) { const u = names.find(n => s.endsWith(n)); if (u) { num = s.slice(0, -u.length).trim(); factor = f; break; } }
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(num)) throw new Error(`geo_distance : distance illisible ${JSON.stringify(distance)} (unités : ${GEO_UNITS.flatMap(u => u[0]).join(', ')})`);
+  return Number((Number(num) * factor).toPrecision(12));
+}
+// Terme « mot~n » : la distance écrite l’emporte sur l’option fuzziness de la requête
+function fuzzyTerm(ctx, value, n) {
+  const o = { value };
+  for (const [k, x] of Object.entries(ctx.fuzzyOpts || {})) if (x !== undefined) o[k] = x;
+  if (n !== null && n !== undefined) o.fuzziness = n;
+  return o;
+}
 // Terme d’une requête simple_query_string : pas de syntaxe champ:valeur, d’intervalle ni de joker interne
 function simpleLeaf(ctx, field, tok, defaultOp) {
   if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.slop ? { query: tok.v, slop: tok.slop } : tok.v } });
-  if (tok.t === 'fuzzy') return tq(ctx, { fuzzy: { [field]: tok.n === null ? { value: tok.v } : { value: tok.v, fuzziness: tok.n } } });
+  if (tok.t === 'fuzzy') return tq(ctx, { fuzzy: { [field]: fuzzyTerm(ctx, tok.v, tok.n) } });
   if (tok.t === 'prefix') return tq(ctx, { wildcard: { [field]: { value: tok.v + '*' } } });
   if (isTextField(ctx, field)) return tq(ctx, { match: { [field]: { query: tok.v, operator: defaultOp || 'or' } } });
   return tq(ctx, { term: { [field]: /^-?\d+(\.\d+)?$/.test(tok.v) ? Number(tok.v) : tok.v } });
@@ -935,7 +967,8 @@ function luceneLeaf(ctx, field, tok) {
     return tq(ctx, { range: { [field]: spec } });
   }
   let v = String(tok.v).replace(/\^[\d.]+$/, '');
-  if (/~\d*$/.test(v)) return tq(ctx, { fuzzy: { [field]: { value: v.replace(/~\d*$/, '') } } });
+  const fz = /~(\d*)$/.exec(v);
+  if (fz) return tq(ctx, { fuzzy: { [field]: fuzzyTerm(ctx, v.slice(0, fz.index), fz[1] || null) } });
   if (v === '*') return tq(ctx, { exists: { field } });
   const m = /^(>=|<=|>|<)(.+)$/.exec(v);
   if (m) { const op = { '>=': 'gte', '<=': 'lte', '>': 'gt', '<': 'lt' }[m[1]]; const x = /^-?\d+(\.\d+)?$/.test(m[2]) ? Number(m[2]) : m[2]; return tq(ctx, { range: { [field]: { [op]: x } } }); }
@@ -1685,9 +1718,17 @@ function selectList(ctx, dsl) {
   else if (typeof src === 'string') addField(src);
   else if (Array.isArray(src)) src.forEach(addField);
   else if (isObj(src)) {
-    (src.includes || src.include || []).forEach(addField);
-    const ex = src.excludes || src.exclude || [];
-    if (!cols.length && ex.length) cols.push(`* EXCEPT (${ex.map(f => mapField(ctx, f)).join(', ')})`);
+    [].concat(src.includes || src.include || []).forEach(addField);
+    const ex = [].concat(src.excludes || src.exclude || []);
+    if (ex.length) {
+      // Elasticsearch exclut un champ avec ses sous-champs, et accepte des motifs : une seule expression régulière,
+      // que EXCEPT('regex') applique. Une liste de noms ignorerait en silence un motif ou un nom absent.
+      const raw = c => (c.startsWith('`') ? c.slice(1, -1).replace(/\\(.)/g, '$1') : c);
+      const re = '^(?:' + ex.map(f => (String(f).includes('*') ? String(f).split('*').map(escRe).join('.*') : escRe(raw(mapField(ctx, f))))).join('|') + ')(?:\\..*)?$';
+      const kept = cols.filter(c => c.startsWith('COLUMNS(') || c === '*' || !new RegExp(re).test(raw(c))).map(c => (c.startsWith('COLUMNS(') || c === '*' ? `${c} EXCEPT (${chStr(re)})` : c));
+      cols.splice(0, cols.length, ...(cols.length ? kept : [`* EXCEPT (${chStr(re)})`]));
+      ctx.stats.ok++;
+    }
   }
   for (const f of [].concat(dsl.fields || [], dsl.docvalue_fields || [], (dsl.stored_fields || []).filter(x => x !== '_none_'))) addField(isObj(f) ? f.field : f);
   // Discover demande « * » et @timestamp : * couvre déjà toutes les colonnes

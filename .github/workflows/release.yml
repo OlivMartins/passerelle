@@ -27,15 +27,21 @@ jobs:
     name: Construire et joindre les fichiers
     needs: preuves
     runs-on: ubuntu-latest
+    # id-token, attestations et artifact-metadata : signer et enregistrer l'attestation de provenance
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     env:
       TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      # Le jeton en écriture n'est pas laissé dans .git, où npm ci et la construction pourraient le lire
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ env.TAG }}
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
@@ -45,11 +51,20 @@ jobs:
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           export SOURCE_DATE_EPOCH
           npm run build
+      # Vérifiable par : gh attestation verify <fichier> -R OlivMartins/passerelle
+      - name: Attester la provenance des fichiers
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/passerelle-*-linux-x86_64.tar.gz
+            dist/passerelle.html
+      # Sans --clobber : un fichier déjà joint n'est jamais remplacé en silence. Pour le remplacer,
+      # supprimez-le d'abord de la release, puis relancez le workflow.
       - name: Joindre les fichiers à la release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "$TAG" --clobber \
+          gh release upload "$TAG" \
             dist/passerelle-*-linux-x86_64.tar.gz \
             dist/passerelle-*-linux-x86_64.tar.gz.sha256 \
             dist/passerelle.html
