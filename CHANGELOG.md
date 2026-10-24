@@ -4,6 +4,11 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Non publié]
 
+### Sécurité
+
+- Release : les fichiers joints portent une attestation de provenance (`gh attestation verify <fichier> -R OlivMartins/passerelle`) ; un fichier déjà joint n’est plus remplacé en silence (`--clobber` retiré) ; le jeton en écriture n’est plus laissé dans le dépôt cloné pendant la construction.
+- CI : actions épinglées par empreinte de commit, mises à jour proposées par Dependabot.
+
 ### Corrigé
 
 - `ids` : la requête lit la colonne de `field_mapping._id`, comme `term` sur `_id`, au lieu d’une colonne `_id` écrite en dur.
