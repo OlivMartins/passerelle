@@ -44,7 +44,7 @@ const QUERY_SPECS = {
   prefix: { field: true, params: ['value', 'case_insensitive', 'rewrite'] },
   wildcard: { field: true, params: ['value', 'wildcard', 'case_insensitive', 'rewrite'] },
   regexp: { field: true, params: ['value', 'case_insensitive', 'rewrite', 'max_determinized_states', 'flags'], review: { flags: notDefault('all') } },
-  fuzzy: { field: true, params: ['value', 'fuzziness', 'max_expansions', 'prefix_length', 'transpositions', 'rewrite'], review: { prefix_length: positive } },
+  fuzzy: { field: true, params: ['value', 'fuzziness', 'max_expansions', 'prefix_length', 'transpositions', 'rewrite'] },
   match: {
     field: true,
     params: ['query', 'operator', 'minimum_should_match', 'fuzziness', 'zero_terms_query', 'analyzer', 'auto_generate_synonyms_phrase_query', 'max_expansions', 'prefix_length', 'fuzzy_transpositions', 'fuzzy_rewrite', 'lenient', 'cutoff_frequency'],
@@ -69,12 +69,12 @@ const QUERY_SPECS = {
   query_string: {
     params: ['query', 'default_field', 'fields', 'default_operator', 'analyzer', 'quote_analyzer', 'allow_leading_wildcard', 'analyze_wildcard', 'enable_position_increments', 'fuzziness', 'fuzzy_max_expansions', 'fuzzy_prefix_length', 'fuzzy_transpositions', 'lenient', 'max_determinized_states', 'minimum_should_match', 'quote_field_suffix', 'phrase_slop', 'rewrite', 'time_zone', 'auto_generate_synonyms_phrase_query', 'type', 'tie_breaker', 'escape', 'use_dis_max', 'split_on_whitespace'],
     todo: { minimum_should_match: always },
-    review: { analyzer: always, quote_analyzer: always, quote_field_suffix: always, phrase_slop: positive, time_zone: always, fuzzy_prefix_length: positive, fuzzy_transpositions: v => v === false }
+    review: { analyzer: always, quote_analyzer: always, quote_field_suffix: always, phrase_slop: positive, time_zone: always }
   },
   simple_query_string: {
     params: ['query', 'fields', 'default_operator', 'analyzer', 'analyze_wildcard', 'auto_generate_synonyms_phrase_query', 'flags', 'fuzzy_max_expansions', 'fuzzy_prefix_length', 'fuzzy_transpositions', 'lenient', 'minimum_should_match', 'quote_field_suffix'],
     todo: { minimum_should_match: always },
-    review: { analyzer: always, flags: notDefault('all'), quote_field_suffix: always, fuzzy_prefix_length: positive }
+    review: { analyzer: always, flags: notDefault('all'), quote_field_suffix: always }
   },
   bool: { bool: true },
   constant_score: { params: ['filter'], queries: { filter: 'one' } },

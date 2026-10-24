@@ -815,18 +815,25 @@ function clauseSQL(ctx, q) {
     }
     case 'fuzzy': {
       const [field, raw] = fieldEntry(body);
-      const v = String(isObj(raw) ? raw.value : raw);
-      let fz = isObj(raw) && raw.fuzziness !== undefined ? raw.fuzziness : 'AUTO';
-      const d = /^\d+$/.test(String(fz)) ? +fz : v.length <= 2 ? 0 : v.length <= 5 ? 1 : 2;
+      const o = isObj(raw) ? raw : {};
+      const v = String(isObj(raw) ? raw.value : raw); const len = [...v].length;
+      // AUTO, ou AUTO:bas,haut : distance 0 sous « bas » caractères, 1 sous « haut », 2 au-delà
+      const fz = String(o.fuzziness !== undefined ? o.fuzziness : 'AUTO'); const auto = /^AUTO(?::(\d+),(\d+))?$/i.exec(fz);
+      const lo = auto && auto[1] ? +auto[1] : 3; const hi = auto && auto[2] ? +auto[2] : 6;
+      // prefix_length : les n premiers caractères doivent être identiques ; au-delà de la longueur, la valeur exacte
+      const n = +o.prefix_length || 0;
+      const d = n >= len ? 0 : /^\d+$/.test(fz) ? +fz : len < lo ? 0 : len < hi ? 1 : 2;
       const f = mapField(ctx, field); ctx.stats.approx++;
-      ctx.notes.add('info', 'fuzzy → distance d’édition', 'Distance calculée à la volée (editDistanceUTF8 et damerauLevenshteinDistance) : coûteux sur de gros volumes, à combiner avec un filtre sélectif. L’inversion de deux lettres accentuées compte pour deux modifications, pour une seule chez Elasticsearch.');
+      ctx.notes.add('info', 'fuzzy → distance d’édition', 'Distance calculée à la volée (editDistanceUTF8 et damerauLevenshteinDistance) : coûteux sur de gros volumes, à combiner avec un filtre sélectif. L’inversion de deux lettres accentuées compte pour deux modifications, pour une seule chez Elasticsearch. max_expansions est sans objet : tous les termes proches sont trouvés.');
       H(ctx, 'filters', `${field} ≈ ${v}`);
       // Elasticsearch compte l’inversion de deux lettres voisines pour une modification (transpositions: true par défaut).
       // damerauLevenshteinDistance le fait mais compte en octets : least() garde editDistanceUTF8 pour les lettres
       // accentuées, où une transposition reste comptée deux fois.
-      const dist = (a, b) => (isObj(raw) && raw.transpositions === false ? `editDistanceUTF8(${a}, ${b})` : `least(editDistanceUTF8(${a}, ${b}), damerauLevenshteinDistance(${a}, ${b}))`);
-      if (isTextField(ctx, field)) return `arrayExists(t -> ${dist('t', chStr(v.toLowerCase()))} <= ${d}, tokens(lowerUTF8(${f})))`;
-      return `${dist(f, chStr(v))} <= ${d}`;
+      const dist = (a, b) => (o.transpositions === false ? `editDistanceUTF8(${a}, ${b})` : `least(editDistanceUTF8(${a}, ${b}), damerauLevenshteinDistance(${a}, ${b}))`);
+      // Avec un préfixe commun, la distance des termes entiers est celle des suffixes : startsWith() suffit
+      const near = (x, val) => (n > 0 && d > 0 ? `startsWith(${x}, ${chStr([...val].slice(0, n).join(''))}) AND ` : '') + `${dist(x, chStr(val))} <= ${d}`;
+      if (isTextField(ctx, field)) return `arrayExists(t -> ${near('t', v.toLowerCase())}, tokens(lowerUTF8(${f})))`;
+      return near(f, v);
     }
     case 'ids': {
       ctx.stats.ok++;
@@ -866,7 +873,11 @@ function clauseSQL(ctx, q) {
       catch (e) { return todo(ctx, 'query_string', `${e.message} — requête : ${body.query}`); }
       if (ast === null) { ctx.stats.ok++; return 'false'; }
       ctx.cap.push([]);
+      // Options des termes « mot~ » : transmises à chaque fuzzy produit
+      const outer = ctx.fuzzyOpts;
+      ctx.fuzzyOpts = { prefix_length: body.fuzzy_prefix_length, transpositions: body.fuzzy_transpositions, fuzziness: simple ? undefined : body.fuzziness };
       const out = luceneSQL(ctx, ast, defFields, simple ? (c, f, tok) => simpleLeaf(c, f, tok, body.default_operator) : luceneLeaf);
+      ctx.fuzzyOpts = outer;
       ctx.cap.pop();
       H(ctx, 'text', `la recherche « ${body.query} » est satisfaite`);
       return out;
@@ -914,10 +925,17 @@ function luceneSQL(ctx, n, defFields, leaf) {
   const fields = n.field ? [n.field] : defFields;
   return orJoin(fields.map(f => leaf(ctx, f, n.tok)));
 }
+// Terme « mot~n » : la distance écrite l’emporte sur l’option fuzziness de la requête
+function fuzzyTerm(ctx, value, n) {
+  const o = { value };
+  for (const [k, x] of Object.entries(ctx.fuzzyOpts || {})) if (x !== undefined) o[k] = x;
+  if (n !== null && n !== undefined) o.fuzziness = n;
+  return o;
+}
 // Terme d’une requête simple_query_string : pas de syntaxe champ:valeur, d’intervalle ni de joker interne
 function simpleLeaf(ctx, field, tok, defaultOp) {
   if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.slop ? { query: tok.v, slop: tok.slop } : tok.v } });
-  if (tok.t === 'fuzzy') return tq(ctx, { fuzzy: { [field]: tok.n === null ? { value: tok.v } : { value: tok.v, fuzziness: tok.n } } });
+  if (tok.t === 'fuzzy') return tq(ctx, { fuzzy: { [field]: fuzzyTerm(ctx, tok.v, tok.n) } });
   if (tok.t === 'prefix') return tq(ctx, { wildcard: { [field]: { value: tok.v + '*' } } });
   if (isTextField(ctx, field)) return tq(ctx, { match: { [field]: { query: tok.v, operator: defaultOp || 'or' } } });
   return tq(ctx, { term: { [field]: /^-?\d+(\.\d+)?$/.test(tok.v) ? Number(tok.v) : tok.v } });
@@ -935,7 +953,8 @@ function luceneLeaf(ctx, field, tok) {
     return tq(ctx, { range: { [field]: spec } });
   }
   let v = String(tok.v).replace(/\^[\d.]+$/, '');
-  if (/~\d*$/.test(v)) return tq(ctx, { fuzzy: { [field]: { value: v.replace(/~\d*$/, '') } } });
+  const fz = /~(\d*)$/.exec(v);
+  if (fz) return tq(ctx, { fuzzy: { [field]: fuzzyTerm(ctx, v.slice(0, fz.index), fz[1] || null) } });
   if (v === '*') return tq(ctx, { exists: { field } });
   const m = /^(>=|<=|>|<)(.+)$/.exec(v);
   if (m) { const op = { '>=': 'gte', '<=': 'lte', '>': 'gt', '<': 'lt' }[m[1]]; const x = /^-?\d+(\.\d+)?$/.test(m[2]) ? Number(m[2]) : m[2]; return tq(ctx, { range: { [field]: { [op]: x } } }); }

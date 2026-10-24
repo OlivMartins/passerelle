@@ -13,6 +13,8 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 - `ids` : la requête lit la colonne de `field_mapping._id`, comme `term` sur `_id`, au lieu d’une colonne `_id` écrite en dur.
 - `_source.excludes` : les exclusions sont gardées quand `includes` est présent ; un champ exclut aussi ses sous-champs (`http` retire `http.method`) et un motif (`http.*`) s’applique. Elles s’écrivent `EXCEPT ('expression régulière')` : une liste de noms n’excluait rien en silence pour un motif ou un nom absent.
+- `fuzzy` : `prefix_length` est appliqué (les premiers caractères doivent être identiques) au lieu d’être signalé « à vérifier » ; `fuzziness: AUTO:bas,haut` respecte ses bornes ; la longueur du mot se compte en caractères.
+- `query_string` : `mot~1` garde sa distance (elle était remplacée par `AUTO`), `mot~` prend l’option `fuzziness` de la requête ; `fuzzy_prefix_length` et `fuzzy_transpositions` sont appliqués, dans `simple_query_string` aussi.
 
 ## [1.3.0] - 2026-10-22
 
