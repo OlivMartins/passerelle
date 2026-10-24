@@ -829,8 +829,8 @@ function clauseSQL(ctx, q) {
       return `${dist(f, chStr(v))} <= ${d}`;
     }
     case 'ids': {
-      ctx.stats.ok++; mapField(ctx, '_id');
-      return `_id IN (${(body.values || []).map(chVal).join(', ')})`;
+      ctx.stats.ok++;
+      return `${mapField(ctx, '_id')} IN (${(body.values || []).map(chVal).join(', ')})`;
     }
     case 'match': case 'match_phrase': case 'match_phrase_prefix': case 'match_bool_prefix': {
       const [field, raw] = fieldEntry(body);

@@ -4,6 +4,10 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Non publié]
 
+### Corrigé
+
+- `ids` : la requête lit la colonne de `field_mapping._id`, comme `term` sur `_id`, au lieu d’une colonne `_id` écrite en dur.
+
 ## [1.3.0] - 2026-10-22
 
 ### À savoir avant de mettre à jour
