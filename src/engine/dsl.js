@@ -905,12 +905,15 @@ function clauseSQL(ctx, q) {
       let pt = body[field]; let lat, lon;
       if (Array.isArray(pt)) [lon, lat] = pt; else if (isObj(pt)) ({ lat, lon } = pt); else if (typeof pt === 'string') [lat, lon] = pt.split(',').map(Number);
       lat = chNum(lat, 'geo_distance (latitude)'); lon = chNum(lon, 'geo_distance (longitude)');
-      const m = /^([\d.]+)\s*(km|m|mi|yd|ft)?$/.exec(String(body.distance));
-      const meters = m ? +m[1] * ({ km: 1000, m: 1, mi: 1609.344, yd: 0.9144, ft: 0.3048 }[m[2] || 'm']) : 0;
+      const meters = geoMeters(body.distance);
       const f = mapField(ctx, field); ctx.stats.approx++;
       ctx.notes.add('warn', 'geo_distance', `Suppose une colonne Point (lon, lat) « ${field} ». Adaptez si la position est stockée en deux colonnes.`);
       H(ctx, 'filters', `${field} à moins de ${body.distance}`);
-      return `geoDistance(${f}.1, ${f}.2, ${lon}, ${lat}) <= ${Math.round(meters)}`;
+      // Formule d’Elasticsearch (haversine, rayon moyen de 6 371 008,7714 m) : geoDistance() suit l’ellipsoïde
+      // et greatCircleDistance() un autre rayon, d’où des points en bord de cercle classés autrement.
+      // distance_type: plane ne change pas le résultat de la requête dans Elasticsearch (vérifié par le banc)
+      const rad = x => `radians(${x})`;
+      return `2 * 6371008.7714 * asin(sqrt(pow(sin((${rad(`${f}.2`)} - ${rad(lat)}) / 2), 2) + cos(${rad(lat)}) * cos(${rad(`${f}.2`)}) * pow(sin((${rad(`${f}.1`)} - ${rad(lon)}) / 2), 2))) <= ${meters}`;
     }
     default:
       return todo(ctx, type, `La clause « ${type} » n’a pas d’équivalent automatique en SQL.`);
@@ -924,6 +927,17 @@ function luceneSQL(ctx, n, defFields, leaf) {
   if (n.op === 'not') { const s = luceneSQL(ctx, n.a[0], defFields, leaf); ctx.schemaGaps.add('must_not'); return s === null ? 'false' : negate(ctx, s); }
   const fields = n.field ? [n.field] : defFields;
   return orJoin(fields.map(f => leaf(ctx, f, n.tok)));
+}
+// Distance de geo_distance en mètres, lue comme Elasticsearch (DistanceUnit) : nombre, suffixe d’unité facultatif
+// (mètres par défaut) ; une unité inconnue fait refuser la requête, comme Elasticsearch la refuse
+const GEO_UNITS = [[['in', 'inch'], 0.0254], [['yd', 'yards'], 0.9144], [['ft', 'feet'], 0.3048], [['km', 'kilometers'], 1000], [['NM', 'nmi', 'nauticalmiles'], 1852], [['mm', 'millimeters'], 0.001], [['cm', 'centimeters'], 0.01], [['mi', 'miles'], 1609.344], [['m', 'meters'], 1]];
+function geoMeters(distance) {
+  if (typeof distance === 'number' && Number.isFinite(distance)) return distance;
+  const s = String(distance).trim();
+  let num = s, factor = 1;
+  for (const [names, f] of GEO_UNITS) { const u = names.find(n => s.endsWith(n)); if (u) { num = s.slice(0, -u.length).trim(); factor = f; break; } }
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(num)) throw new Error(`geo_distance : distance illisible ${JSON.stringify(distance)} (unités : ${GEO_UNITS.flatMap(u => u[0]).join(', ')})`);
+  return Number((Number(num) * factor).toPrecision(12));
 }
 // Terme « mot~n » : la distance écrite l’emporte sur l’option fuzziness de la requête
 function fuzzyTerm(ctx, value, n) {

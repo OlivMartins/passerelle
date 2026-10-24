@@ -334,6 +334,24 @@ export const CASES = [
   { id: 'audit_ids',dsl: { size: 5, sort: [{ [TS]: 'asc' }], query: { ids: { values: ['3', '10', '2999', 'abc'] } } } },
   { id: 'audit_ids_vide', dsl: total({ ids: { values: [] } }) },
 
+  /* ---------- geo_distance : unités, formes du point, formule ---------- */
+  { id: 'geo_rayon_km', dsl: total({ geo_distance: { distance: '3km', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_miles_tableau', dsl: total({ geo_distance: { distance: '1.2mi', location: [2.3522, 48.8566] } }) },
+  { id: 'geo_rayon_milles_marins_chaine', dsl: total({ geo_distance: { distance: '1.5nmi', location: '48.8566,2.3522' } }) },
+  { id: 'geo_rayon_NM', dsl: total({ geo_distance: { distance: '1.4NM', location: { lat: 48.86, lon: 2.35 } } }) },
+  { id: 'geo_rayon_nombre', dsl: total({ geo_distance: { distance: 2500, location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_pieds', dsl: total({ geo_distance: { distance: '6000ft', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_yards', dsl: total({ geo_distance: { distance: '2000yd', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_centimetres', dsl: total({ geo_distance: { distance: '250000cm', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_pouces', dsl: total({ geo_distance: { distance: '120000in', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_mots', dsl: total({ geo_distance: { distance: '2.5kilometers', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_exposant', dsl: total({ geo_distance: { distance: '2.5e3m', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_decimal', dsl: total({ geo_distance: { distance: '1800.5m', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  // Londres est à 343 556 m du centre par la formule d’Elasticsearch, à 343 604 m par greatCircleDistance et à 343 974 m par geoDistance
+  { id: 'geo_londres_formule', dsl: total({ geo_distance: { distance: '343.58km', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_londres_plane', dsl: total({ geo_distance: { distance: '343.58km', distance_type: 'plane', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_unite_inconnue', dsl: total({ geo_distance: { distance: '3furlongs', location: { lat: 48.8566, lon: 2.3522 } } }) },
+
   /* ---------- Écarts relevés par l’audit du 2026-10-21 : agrégations ---------- */
   // Les cinq valeurs de retries ont exactement 450 documents : Elasticsearch départage par clé croissante
   { id: 'audit_terms_ordre_explicite_egalites', known: { D: 'valeur par défaut : 0 compte aussi les documents sans retries' }, dsl: { size: 0, aggs: { r: { terms: { field: 'retries', size: 2, order: { _count: 'desc' } } } } } },

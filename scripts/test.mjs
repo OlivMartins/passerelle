@@ -103,6 +103,9 @@ const badInterval = tr({ size: 0, aggs: { h: { histogram: { field: 'latency_ms',
 check(badInterval.stats.ko === 1 && !/sleep/.test(badInterval.sql), 'intervalle invalide : agrégation à reprendre, rien n’est recopié');
 const badPoint = tr({ query: { geo_distance: { distance: '5km', loc: { lat: '0) OR 1=1 --', lon: 2 } } } });
 check(/latitude/.test(badPoint.error || ''), 'coordonnée invalide : traduction refusée');
+// geo_distance : une unité inconnue est refusée, comme par Elasticsearch, au lieu d’une distance nulle
+check(/distance illisible/.test(tr({ query: { geo_distance: { distance: '3furlongs', loc: { lat: 48.8, lon: 2.3 } } } }).error || ''), 'geo_distance, unité inconnue : traduction refusée');
+check(/<= 0\.4572$/m.test(tr({ query: { geo_distance: { distance: '1.5ft', loc: { lat: 48.8, lon: 2.3 } } } }).sql), 'geo_distance : distance en mètres sans arrondi à l’entier');
 // ids : la colonne est celle de field_mapping._id, comme pour term sur _id
 const renamedId = E.mergeConfig(benchConfig, { clickhouse: { field_mapping: { _id: 'doc_id' } } });
 check(/doc_id IN \('a', 'b'\)/.test(E.translateDSL(JSON.stringify({ query: { ids: { values: ['a', 'b'] } } }), renamedId, { index: INDEX }).sql), 'ids : colonne renommée par field_mapping._id');

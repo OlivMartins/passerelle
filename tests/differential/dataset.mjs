@@ -60,7 +60,9 @@ export function dataset() {
       // Entier facultatif, 0 compris : avec des valeurs par défaut, 0 ne se distingue plus d’un absent
       retries: i % 4 === 0 ? undefined : (i * 3) % 5,
       // Second champ plein texte : un mot peut être dans message et l’autre dans title
-      title: ['payment failed', 'upstream timeout', 'cart updated', 'Payment Timeout', 'user login', 'disk alert', 'retry scheduled'][i % 7]
+      title: ['payment failed', 'upstream timeout', 'cart updated', 'Payment Timeout', 'user login', 'disk alert', 'retry scheduled'][i % 7],
+      // Position : à quelques kilomètres du centre de Paris, ou à Londres (à 344 km, où les formules de distance divergent)
+      location: i % 97 === 3 ? { lat: 51.5074, lon: -0.1278 } : { lat: 48.8566 + (((i * 37) % 201) - 100) * 0.0005, lon: 2.3522 + (((i * 53) % 199) - 99) * 0.0007 }
     });
   }
   return docs;
@@ -85,7 +87,8 @@ export const ES_INDEX = {
       message: { type: 'text', fields: { keyword: { type: 'keyword', ignore_above: 1024 } } },
       nums: { type: 'long' },
       retries: { type: 'long' },
-      title: { type: 'text' }
+      title: { type: 'text' },
+      location: { type: 'geo_point' }
     }
   }
 };
@@ -116,7 +119,8 @@ export function columns(variant) {
     message: 'String',
     nums: 'Array(Int64)',
     retries: variant === 'N' ? 'Nullable(Int64)' : 'Int64',
-    title: 'String'
+    title: 'String',
+    location: 'Point'
   };
 }
 
@@ -161,6 +165,7 @@ export function clickhouseRow(d) {
     if (v === undefined) continue;
     if (k === '@timestamp') o.timestamp = v;
     else if (k === 'method') o['http.method'] = v;
+    else if (k === 'location') o.location = [v.lon, v.lat]; // Point : (longitude, latitude)
     else o[k] = v;
   }
   return o;
