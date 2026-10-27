@@ -1183,7 +1183,7 @@ Object.assign(IngestGen.prototype, {
         if (name === 'toUpperCase') return { c: `upcase(${ch.c})`, t: 'str' };
       }
       if ((cls === 'Integer' || cls === 'Long' || cls === 'Double' || cls === 'Float' || cls === 'Boolean') && name === 'toString' && a.length === 1) return { c: this.plStr(a[0]), t: 'str' };
-      if (cls === 'String' && name === 'join' && a.length === 2) return { c: `(join(${this.plA(a[1])}, ${this.plStr(a[0])}) ?? "")`, t: 'str' };
+      if (cls === 'String' && name === 'join' && a.length === 2) return this.plTmp(`join!(map_values(${this.plA(a[1])}) -> |x| { ${jstrOf('x')} }, ${this.plStr(a[0])})`, 'str');
       if ((cls === 'ZonedDateTime' || cls === 'Instant' || cls === 'OffsetDateTime') && name === 'parse' && a.length === 1) {
         this.approx('Painless : dates', 'Une date illisible fait échouer le script en Painless (le document part en on_failure) ; la traduction donne null et continue.');
         const s = this.plTmp(a[0].c);

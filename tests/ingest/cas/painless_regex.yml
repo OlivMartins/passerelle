@@ -82,3 +82,8 @@ processors:
         ctx.oct = Integer.toOctalString(ctx.mode);
         ctx.empreinte = ctx.h.sha1();
         ctx.json_txt = Json.dump(ctx.json);
+  - script:
+      lang: painless
+      source: |
+        List parts = ctx.tags.subList(0, 2);
+        ctx.joint = String.join('-', parts);
