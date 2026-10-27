@@ -941,6 +941,14 @@ Object.assign(IngestGen.prototype, {
     const A = simple(a); const B = simple(b);
     return `if is_integer(${A}) && is_integer(${B}) { int!(${A}) ${op} int!(${B}) } else if (is_integer(${A}) || is_float(${A})) && (is_integer(${B}) || is_float(${B})) { to_float!(${A}) ${op} to_float!(${B}) } else { ${other} }`;
   },
+  // Conversion d’une valeur de type inconnu en entier ou en flottant (null si impossible), sans fusion d’erreur
+  plCast(kind, a) {
+    const X = /^[\w]+$/.test(a.c) ? a.c : this.plTmp(a.c).c;
+    const code = kind === 'int'
+      ? `if is_integer(${X}) { int!(${X}) } else if is_float(${X}) { to_int!(${X}) } else if is_string(${X}) { to_int(string!(${X})) ?? null } else { null }`
+      : `if is_float(${X}) { float!(${X}) } else if is_integer(${X}) { to_float!(${X}) } else if is_string(${X}) { to_float(string!(${X})) ?? null } else { null }`;
+    return this.plTmp(code);
+  },
   plTmp(code, t) { const v = this.tmp('p'); this.emit(`${v} = ${code}`); return { c: v, t: t || 'any' }; },
   // Chemin de ctx : ctx.a.b, ctx['a.b'], ctx.a?.b ; null si l’expression n’en est pas un
   plPath(e) {
@@ -1013,8 +1021,8 @@ Object.assign(IngestGen.prototype, {
       }
       case 'cast': {
         const a = X(e.e);
-        if (['int', 'long', 'short', 'byte', 'Integer', 'Long'].includes(e.type)) return a.t === 'int' ? a : a.t === 'num' ? { c: `to_int(${a.c})`, t: 'int' } : { c: `(to_int(${a.c}) ?? null)`, t: 'any' };
-        if (['double', 'float', 'Double', 'Float'].includes(e.type)) return a.t === 'num' ? a : a.t === 'int' ? { c: `to_float(${a.c})`, t: 'num' } : { c: `(to_float(${a.c}) ?? null)`, t: 'any' };
+        if (['int', 'long', 'short', 'byte', 'Integer', 'Long'].includes(e.type)) return a.t === 'int' ? a : a.t === 'num' ? { c: `to_int(${a.c})`, t: 'int' } : this.plCast('int', a);
+        if (['double', 'float', 'Double', 'Float'].includes(e.type)) return a.t === 'num' ? a : a.t === 'int' ? { c: `to_float(${a.c})`, t: 'num' } : this.plCast('float', a);
         return a;
       }
       case 'tern': {

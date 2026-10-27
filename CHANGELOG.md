@@ -35,6 +35,7 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
   - Une addition, soustraction ou multiplication Painless sur des valeurs de type inconnu n’utilise plus `?? null` (E651 quand VRL connaît déjà les types) : entiers entre eux, sinon flottants, sinon `null`.
   - Une variable Painless réaffectée avec une valeur d’un autre type perd son type (`String s = …; s = s.substring(1)` laissait croire à une chaîne, d'où E103 sur `split`).
   - Les comparaisons Painless entre valeurs de type inconnu suivent la même forme (entiers, flottants, sinon faux).
+  - Une conversion Painless `(int)` ou `(double)` d’une valeur de type inconnu se fait par `int!` / `to_float!` après contrôle du type, sans fusion d’erreur.
   - Une conversion Painless d’un nombre de type connu (`(int) 2.5`, `(long) 1e18`) n’utilise plus `?? null`.
   - Un littéral flottant à exposant (`1e18`, `1.5e-3`) s’écrit en décimal : VRL ne lit pas cette notation et refusait la configuration (« undefined variable »).
   - `kv` : `trim_key` et `trim_value` qui contiennent une apostrophe donnent une expression régulière valide.
