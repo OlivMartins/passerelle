@@ -485,6 +485,8 @@ function ingPainless(src) {
         expect('('); const a = args();
         if (/^(ArrayList|LinkedList|List)$/.test(ty.v)) return { k: 'list', items: [], from: a[0] || null };
         if (/^(HashMap|LinkedHashMap|TreeMap|Map)$/.test(ty.v)) return { k: 'map', items: [], from: a[0] || null };
+        if (ty.v === 'CIDR' && a.length === 1) return { k: 'cidr', arg: a[0] };
+        if (ty.v === 'StringTokenizer' && (a.length === 1 || a.length === 2)) return { k: 'tok', str: a[0], delims: a[1] || null };
         throw new Error(`« new ${ty.v} » non pris en charge`);
       }
       if (is('(')) { next(); return { k: 'call', name: t.v, args: args() }; }
@@ -965,10 +967,18 @@ Object.assign(IngestGen.prototype, {
         const path = this.plPath(e);
         if (path) {
           if (path.unsafe) env.unsafe = true;
+          // ctx.a.length : la taille d’une liste (comme en Painless), sinon le champ « length » d’une table
+          const parent = e.k === 'member' && e.name === 'length' ? this.plPath(e.obj) : null;
+          if (parent && parent.segs.length) {
+            if (parent.unsafe) env.unsafe = true;
+            const pv = this.plTmp(this.get(this.plRef(parent.segs)));
+            const lv = this.plTmp(this.get(this.plRef(path.segs)));
+            return this.plTmp(`if is_array(${pv.c}) { length(array!(${pv.c})) } else { ${lv.c} }`);
+          }
           return { c: this.get(this.plRef(path.segs)), t: 'any' };
         }
         const o = X(e.obj);
-        if (e.k === 'member' && e.name === 'length') return { c: `(length(${o.c}) ?? null)`, t: 'any' };
+        if (e.k === 'member' && e.name === 'length') return ['list', 'map'].includes(o.t) ? { c: `length(${o.c})`, t: 'int' } : this.plTmp(`if is_array(${o.c}) { length(array!(${o.c})) } else if is_object(${o.c}) { length(object!(${o.c})) } else if is_string(${o.c}) { strlen(string!(${o.c})) } else { null }`);
         const key = e.k === 'member' ? vq(e.name) : (() => { const i = X(e.idx); return i.t === 'int' ? i.c : i.t === 'str' ? i.c : `${i.c}`; })();
         return { c: `(get(${o.c}, [${key}]) ?? null)`, t: 'any' };
       }
@@ -999,6 +1009,17 @@ Object.assign(IngestGen.prototype, {
       case 'bin': return this.plBin(e, env);
       case 'mcall': return this.plCall(e, env);
       case 'call': return this.plInline(e, env);
+      case 'tok': {
+        // StringTokenizer : la liste des mots (délimiteurs : chacun des caractères du second argument, espaces par défaut) et la position
+        const st = this.plTmp(this.plStr(X(e.str))); const dl = e.delims ? this.plTmp(this.plStr(X(e.delims))) : { c: '" \\t\\n\\r\\f"' };
+        const first = this.tmp('p'); const work = this.tmp('p');
+        this.emit(`${first} = slice(${dl.c}, 0, 1) ?? ""`); this.emit(`${work} = ${st.c}`);
+        this.open(`for_each(split(${dl.c}, "")) -> |_i, _c|`); this.emit(`${work} = replace(${work}, string!(_c), ${first})`); this.close();
+        const toks = this.tmp('p'); this.emit(`${toks} = []`);
+        this.open(`if ${first} != ""`); this.open(`for_each(split(${work}, ${first})) -> |_i, _w|`); this.emit(`if _w != "" { ${toks} = push(${toks}, _w) }`); this.close(); this.close();
+        return { c: `{ "t": ${toks}, "i": 0 }`, t: 'tok' };
+      }
+      case 'cidr': { const a = X(e.arg); return { c: this.plStr(a), t: 'cidr' }; }
       case 're': throw new Error('expression régulière hors d’un =~');
     }
     throw new Error(`expression « ${e.k} » non prise en charge`);
@@ -1057,9 +1078,23 @@ Object.assign(IngestGen.prototype, {
     if (name === 'getClass' || name === 'hashCode') throw new Error(`méthode ${name} non prise en charge`);
     const r = this.plExpr(e.obj, env); const a = args();
     const str = this.plStr(r);
+    if (r.t === 'tok') {
+      if (!(e.obj.k === 'id' && env.locals.has(e.obj.v))) throw new Error('StringTokenizer utilisé sans variable locale');
+      const L = r.c;
+      if (name === 'nextToken') {
+        const ix = this.plTmp(`get(${L}, ["i"]) ?? 0`); const lst = this.plTmp(`array(get(${L}, ["t"]) ?? []) ?? []`);
+        const tk = this.plTmp(`get(${lst.c}, [${ix.c}]) ?? null`);
+        this.emit(`${L} = set!(${L}, ["i"], int!(${ix.c}) + 1)`);
+        return tk;
+      }
+      if (name === 'hasMoreTokens') return { c: `((get(${L}, ["i"]) ?? 0) < length(array(get(${L}, ["t"]) ?? []) ?? []))`, t: 'bool' };
+      if (name === 'countTokens') return { c: `(length(array(get(${L}, ["t"]) ?? []) ?? []) - (int(get(${L}, ["i"]) ?? 0) ?? 0))`, t: 'any' };
+      throw new Error(`méthode StringTokenizer.${name} non prise en charge`);
+    }
     if (e.safe && path) env.safeCall = true;
     switch (name) {
       case 'contains':
+        if (r.t === 'cidr') return { c: `((is_string(${a[0].c}) && ip_cidr_contains(${r.c}, string!(${a[0].c}))) ?? false)`, t: 'bool' };
         if (r.t === 'str') return { c: `contains(${r.c}, ${this.plStr(a[0])})`, t: 'bool' };
         if (r.t === 'list') return { c: `includes(${r.c}, ${a[0].c})`, t: 'bool' };
         return { c: `((is_array(${r.c}) && includes(array!(${r.c}), ${a[0].c})) || (is_string(${r.c}) && contains(string!(${r.c}), ${this.plStr(a[0])})))`, t: 'bool' };
@@ -1117,7 +1152,7 @@ Object.assign(IngestGen.prototype, {
     if (loop && loop.brkPossible) g.push(`!${loop.brk}`);
     if (loop && loop.cntPossible) g.push(`!${loop.cnt}`);
     if (g.length && s.k === 'let') this.emit(`p_${s.name} = null`);
-    if (g.length && s.k !== 'nop') { this.open(`if ${g.join(' && ')}`); this.plStmtInner(s, env); this.close(); }
+    if (g.length && s.k !== 'nop') { this.open(`if ${g.join(' && ')}`); this.plStmtInner(s, env); this.close(); if (s.k === 'let') env.locals.set(s.name, 'any'); }
     else this.plStmtInner(s, env);
   },
   plLoop(s, env, listCode, idx) {
@@ -1266,6 +1301,12 @@ Object.assign(IngestGen.prototype, {
   }
 });
 
+// Fuseau d’un processeur date à la manière de Java (GMT-0200, UTC+2, +02:00, Z) → nom que Vector comprend (heures pleines)
+function ingZone(z) {
+  if (z === 'Z' || z === 'GMT' || z === 'UT') return 'UTC';
+  const m = /^(?:GMT|UTC|UT)?([+-])(\d{1,2})(?::?00)?$/.exec(z);
+  return m ? `Etc/GMT${m[1] === '+' ? '-' : '+'}${Number(m[2])}` : z;
+}
 /* ---------- Processeurs ---------- */
 // Options communes à tous les processeurs, lues par la séquence
 const INGEST_COMMON = ['if', 'ignore_failure', 'on_failure', 'tag', 'description'];
@@ -1731,9 +1772,18 @@ Object.assign(IngestGen.prototype, {
     // Fuseau : littéral, ou modèle ({{event.timezone}}) calculé pour chaque document
     let tz = '"UTC"';
     if (o.timezone !== undefined) {
-      tz = hasMustache(o.timezone) ? this.tpl(String(o.timezone)) : vq(String(o.timezone));
+      tz = hasMustache(o.timezone) ? this.tpl(String(o.timezone)) : vq(ingZone(String(o.timezone)));
       this.emit(`tz = ${tz}`); tz = 'tz';
-      if (hasMustache(o.timezone)) this.emit('if tz == "" { tz = "UTC" }');
+      if (hasMustache(o.timezone)) {
+        this.emit('if tz == "" { tz = "UTC" }');
+        // Décalages à la Java (GMT-0200, UTC+2, +02:00) : Vector attend un nom de fuseau, Etc/GMT± en heures pleines
+        this.emit(`tzm = parse_regex(tz, r'^(?:GMT|UTC|UT)?(?P<s>[+-])(?P<h>[0-9]{1,2})(?::?00)?$') ?? null`);
+        this.open('if tzm != null');
+        this.emit('tzs = "-"'); this.emit('if tzm.s == "-" { tzs = "+" }');
+        this.emit('tz = "Etc/GMT" + tzs + to_string(to_int(tzm.h) ?? 0)');
+        this.close('} else if tz == "Z" || tz == "GMT" || tz == "UT" {'); this.ind++; this.emit('tz = "UTC"');
+        this.close();
+      }
     }
     if (o.locale !== undefined && !/^(en|ENGLISH|ROOT)/i.test(String(o.locale)) && formats.some(f => /MMM|EEE/.test(f))) this.approx('date locale', `Les noms de mois et de jours en « ${o.locale} » ne sont pas reconnus : parse_timestamp ne lit que l’anglais.`);
     this.read(r, 'v');
@@ -1827,8 +1877,10 @@ Object.assign(IngestGen.prototype, {
     this.close('} else {'); this.ind++;
     // Captures : posées à leur chemin (les points font des objets), converties selon leur type, les absentes ignorées
     const conv = { int: 'to_int', long: 'to_int', float: 'to_float', double: 'to_float' };
-    this.open('for_each(object!(m)) -> |k, val|');
+    // Un nom capturé plusieurs fois donne « nom », « nom[1]»… côté VRL : seules les captures présentes comptent, la dernière l’emporte
+    this.open('for_each(object!(m)) -> |k0, val|');
     this.open('if val != null && fail == null');
+    this.emit(`k = replace(k0, r'\\[[0-9]+\\]$', "")`);
     this.emit('cv = val');
     for (const [f, t] of types) {
       if (t === 'boolean') this.emit(`if k == ${vq(f)} { cv = downcase(string!(val)) == "true" }`);
@@ -2177,22 +2229,34 @@ Object.assign(IngestGen.prototype, {
     // Champs MaxMind de Vector → champs d’Elasticsearch ; une adresse absente de la base ne pose rien
     this.open('if g != null');
     this.emit('out = {}');
-    if (/asn/i.test(db)) {
-      this.emit('if g.autonomous_system_number != null { out.asn = g.autonomous_system_number }');
-      this.emit('if g.autonomous_system_organization != null { out.organization_name = g.autonomous_system_organization }');
-    }
-    this.emit('if g.continent_code != null { out.continent_code = g.continent_code }');
-    this.emit('if g.country_name != null { out.country_name = g.country_name }');
-    this.emit('if g.country_code != null { out.country_iso_code = g.country_code }');
-    this.emit('if g.region_name != null { out.region_name = g.region_name }');
-    this.emit('if g.country_code != null && g.region_code != null { out.region_iso_code = string!(g.country_code) + "-" + string!(g.region_code) }');
-    this.emit('if g.city_name != null { out.city_name = g.city_name }');
-    this.emit('if g.latitude != null && g.longitude != null { out.location = { "lat": g.latitude, "lon": g.longitude } }');
-    this.emit('if g.timezone != null { out.timezone = g.timezone }');
-    this.emit('if g.postal_code != null { out.postal_code = g.postal_code }');
+    // Propriétés demandées, ou celles qu’Elasticsearch écrit par défaut selon le type de base
+    const kind = /asn/i.test(db) ? 'asn' : /country/i.test(db) ? 'country' : 'city';
+    const DEFAULTS = { asn: ['ip', 'asn', 'organization_name'], country: ['continent_name', 'country_name', 'country_iso_code'], city: ['continent_name', 'country_name', 'country_iso_code', 'region_iso_code', 'region_name', 'city_name', 'location'] };
+    const KNOWN = { asn: ['ip', 'asn', 'organization_name', 'network'], country: ['ip', 'continent_code', 'continent_name', 'country_iso_code', 'country_name'], city: ['ip', 'continent_code', 'continent_name', 'country_iso_code', 'country_name', 'region_iso_code', 'region_name', 'city_name', 'timezone', 'location', 'postal_code'] };
+    const props = o.properties !== undefined ? lsList(o.properties).map(String) : DEFAULTS[kind];
+    const bad = props.filter(p => !KNOWN[kind].includes(p));
+    if (bad.length) return this.ko(label, `propriété${bad.length > 1 ? 's' : ''} ${bad.map(x => `« ${x} »`).join(', ')} inconnue${bad.length > 1 ? 's' : ''} pour une base ${kind} (Elasticsearch refuse ce pipeline)`);
+    const CONT = '{ "AF": "Africa", "AN": "Antarctica", "AS": "Asia", "EU": "Europe", "NA": "North America", "OC": "Oceania", "SA": "South America" }';
+    const LINE = {
+      ip: 'out.ip = ip',
+      asn: 'if g.autonomous_system_number != null { out.asn = g.autonomous_system_number }',
+      organization_name: 'if g.autonomous_system_organization != null { out.organization_name = g.autonomous_system_organization }',
+      continent_code: 'if g.continent_code != null { out.continent_code = g.continent_code }',
+      continent_name: `if g.continent_code != null { cn = get(${CONT}, [string!(g.continent_code)]) ?? null; if cn != null { out.continent_name = cn } }`,
+      country_name: 'if g.country_name != null { out.country_name = g.country_name }',
+      country_iso_code: 'if g.country_code != null { out.country_iso_code = g.country_code }',
+      region_name: 'if g.region_name != null { out.region_name = g.region_name }',
+      region_iso_code: 'if g.country_code != null && g.region_code != null { out.region_iso_code = string!(g.country_code) + "-" + string!(g.region_code) }',
+      city_name: 'if g.city_name != null { out.city_name = g.city_name }',
+      location: 'if g.latitude != null && g.longitude != null { out.location = { "lat": g.latitude, "lon": g.longitude } }',
+      timezone: 'if g.timezone != null { out.timezone = g.timezone }',
+      postal_code: 'if g.postal_code != null { out.postal_code = g.postal_code }'
+    };
+    for (const p of props) if (LINE[p]) this.emit(LINE[p]);
+    if (props.includes('network')) this.approx('geoip : network', 'La table d’enrichissement de Vector ne donne pas le réseau (CIDR) de la plage MaxMind : la propriété network n’est pas écrite.');
     this.emit('if length(out) > 0 {'); this.ind++; this.set(tr, 'out'); this.close();
     this.close(); this.close(); this.close();
-    this.approx('geoip → table d’enrichissement', `Une table geoip (${db}) est déclarée dans enrichment_tables : montez la base MaxMind dans le conteneur Vector. continent_name n’est pas fourni par Vector (continent_code l’est), et properties n’est pas repris.`);
+    this.approx('geoip → table d’enrichissement', `Une table geoip (${db}) est déclarée dans enrichment_tables : montez la base MaxMind dans le conteneur Vector (le nom du continent est déduit de son code).`);
   },
   p_csv(o, label) {
     const r = this.field(o, label); if (!r) return;

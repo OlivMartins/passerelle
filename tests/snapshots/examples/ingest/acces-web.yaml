@@ -147,8 +147,9 @@ transforms:
             if m == null {
               fail = "Provided Grok expressions do not match field value: [" + string!(v) + "]"
             } else {
-              for_each(object!(m)) -> |k, val| {
+              for_each(object!(m)) -> |k0, val| {
                 if val != null && fail == null {
+                  k = replace(k0, r'\[[0-9]+\]$$', "")
                   cv = val
                   if k == "http.response.status_code" { n = to_int(string!(val)) ?? null; if n == null { fail = "For input string: \"" + string!(val) + "\"" } else { cv = n } }
                   if k == "http.response.body.bytes" { n = to_int(string!(val)) ?? null; if n == null { fail = "For input string: \"" + string!(val) + "\"" } else { cv = n } }
@@ -486,15 +487,13 @@ transforms:
             g = get_enrichment_table_record("geoip_geolite2_city", { "ip": ip }) ?? null
             if g != null {
               out = {}
-              if g.continent_code != null { out.continent_code = g.continent_code }
+              if g.continent_code != null { cn = get({ "AF": "Africa", "AN": "Antarctica", "AS": "Asia", "EU": "Europe", "NA": "North America", "OC": "Oceania", "SA": "South America" }, [string!(g.continent_code)]) ?? null; if cn != null { out.continent_name = cn } }
               if g.country_name != null { out.country_name = g.country_name }
               if g.country_code != null { out.country_iso_code = g.country_code }
-              if g.region_name != null { out.region_name = g.region_name }
               if g.country_code != null && g.region_code != null { out.region_iso_code = string!(g.country_code) + "-" + string!(g.region_code) }
+              if g.region_name != null { out.region_name = g.region_name }
               if g.city_name != null { out.city_name = g.city_name }
               if g.latitude != null && g.longitude != null { out.location = { "lat": g.latitude, "lon": g.longitude } }
-              if g.timezone != null { out.timezone = g.timezone }
-              if g.postal_code != null { out.postal_code = g.postal_code }
               if length(out) > 0 {
                 if (!exists(.source) || is_object(.source)) {
                   .source.geo = out

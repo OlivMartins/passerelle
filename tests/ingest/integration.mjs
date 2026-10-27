@@ -24,6 +24,19 @@ if (flags.includes('--notes')) console.log(r.notes.filter(n => n.level === 'err'
 
 const tdir = join(root, '_dev', 'test', 'pipeline');
 if (!existsSync(tdir)) { console.log('Ce data stream n’a pas de tests de pipeline.'); process.exit(0); }
+// elastic-package pose les « fields » du test dans chaque document, les clés pointées (input.type) devenant des objets
+function expand(o) {
+  if (Array.isArray(o)) return o.map(expand);
+  if (!o || typeof o !== 'object') return o;
+  const out = {};
+  for (const [k, v] of Object.entries(o)) {
+    const segs = k.split('.'); let cur = out;
+    segs.slice(0, -1).forEach(s => { if (!cur[s] || typeof cur[s] !== 'object') cur[s] = {}; cur = cur[s]; });
+    const last = segs[segs.length - 1];
+    cur[last] = cur[last] && typeof cur[last] === 'object' && v && typeof v === 'object' ? Object.assign(cur[last], expand(v)) : expand(v);
+  }
+  return out;
+}
 const yml = f => (existsSync(f) ? E.yamlLoad(readFileSync(f, 'utf8')) || {} : {});
 const common = yml(join(tdir, 'test-common-config.yml'));
 let total = 0, same = 0; const diffs = {};
@@ -31,7 +44,7 @@ for (const f of readdirSync(tdir).filter(x => /\.(log|json)$/.test(x) && !/expec
   const exp = JSON.parse(readFileSync(join(tdir, `${f}-expected.json`), 'utf8')).expected;
   const own = yml(join(tdir, `${f.replace(/\.(log|json)$/, '')}-config.yml`)); const own2 = yml(join(tdir, `${f}-config.yml`));
   const conf = Object.assign({}, common, own, own2);
-  const fields = Object.assign({}, common.fields || {}, own.fields || {}, own2.fields || {});
+  const fields = expand(Object.assign({}, common.fields || {}, own.fields || {}, own2.fields || {}));
   const dyn = Object.assign({}, common.dynamic_fields || {}, own.dynamic_fields || {}, own2.dynamic_fields || {});
   let docs;
   if (f.endsWith('.json')) docs = JSON.parse(readFileSync(join(tdir, f), 'utf8')).events.map(d => Object.assign(JSON.parse(JSON.stringify(fields)), d));
