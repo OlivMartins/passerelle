@@ -129,3 +129,19 @@ La raison d’un écart est suivie de « non signalé par la traduction » quand
 ### Ajouter un cas
 
 Ajoutez une entrée dans `tests/pipelines/cases.mjs`, lancez `npm run test:pipelines -- --only=<id> --verbose`, puis `npm run test:update` pour créer son instantané. Un instantané ne garde que les transforms propres au cas : le transport du banc est le même partout.
+
+## Bancs d’ingestion Elasticsearch (travail en cours)
+
+La traduction des ingest pipelines vers VRL se vérifie contre le comportement d’Elasticsearch, sans cluster : les attendus viennent du code d’`IngestDocument` ou des fichiers `*-expected.json` des intégrations Elastic, produits par Elasticsearch lui-même.
+
+```sh
+VECTOR_BIN=vector node tests/ingest/chemins.mjs                     # accès aux champs : messages d’erreur, index de liste
+node tests/ingest/jouer.mjs pipeline.yml documents.json --yaml      # traduire un pipeline et y jouer des documents
+
+export ELASTIC_INTEGRATIONS=~/src/integrations                      # clone de github.com/elastic/integrations
+export MAXMIND_TEST_DATA=~/src/MaxMind-DB/test-data                 # bases GeoLite2-*-Test.mmdb
+node tests/ingest/integration.mjs packages/nginx/data_stream/access # tests de pipeline d’un data stream, champ par champ
+node tests/ingest/corpus.mjs                                        # tous les data streams : verdicts et causes
+```
+
+`PASSERELLE_INGEST_WORK` choisit le dossier de travail (par défaut, un dossier temporaire).
