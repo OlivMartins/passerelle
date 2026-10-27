@@ -85,6 +85,38 @@ jobs:
           CLICKHOUSE_LOCAL: ${{ github.workspace }}/clickhouse local
         run: npm run test:clickhouse
 
+  # Le VRL des pipelines d'ingestion traduits doit compiler : Vector refuse sinon la configuration entière,
+  # quel que soit le verdict de Passerelle
+  ingest:
+    name: Compilation du VRL des pipelines d'ingestion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Installer Vector 0.59.0
+        run: |
+          curl -fsSL https://github.com/vectordotdev/vector/releases/download/v0.59.0/vector-0.59.0-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "VECTOR_BIN=$(ls "$RUNNER_TEMP"/vector-x86_64-unknown-linux-gnu/bin/vector)" >> "$GITHUB_ENV"
+      - name: Récupérer les intégrations Elastic et les bases GeoLite2 de test
+        run: |
+          git init -q "$RUNNER_TEMP/integrations" && cd "$RUNNER_TEMP/integrations"
+          git remote add origin https://github.com/elastic/integrations
+          git sparse-checkout set packages/admin_by_request_epm packages/apache packages/auditd packages/aws packages/nginx packages/system
+          git fetch -q --depth 1 --filter=blob:none origin ec998de916b70ef0ad702606a2813ce2965f296b && git checkout -q FETCH_HEAD
+          git init -q "$RUNNER_TEMP/maxmind" && cd "$RUNNER_TEMP/maxmind"
+          git remote add origin https://github.com/maxmind/MaxMind-DB
+          git fetch -q --depth 1 origin d1551916cff0712d12ff602c309234471b0402a2 && git checkout -q FETCH_HEAD
+          echo "ELASTIC_INTEGRATIONS=$RUNNER_TEMP/integrations" >> "$GITHUB_ENV"
+          echo "MAXMIND_TEST_DATA=$RUNNER_TEMP/maxmind/test-data" >> "$GITHUB_ENV"
+      - name: Compiler le VRL (sortie console)
+        run: node tests/ingest/valider.mjs
+      - name: Compiler le VRL (sortie ClickHouse)
+        run: node tests/ingest/valider.mjs --clickhouse
+
   pipelines:
     name: Banc d'équivalence Logstash / Vector
     runs-on: ubuntu-latest

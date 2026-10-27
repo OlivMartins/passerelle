@@ -923,7 +923,8 @@ class IngestGen {
  */
 const PL_INST = { double: 'is_float', float: 'is_float', long: 'is_integer', int: 'is_integer', short: 'is_integer', boolean: 'is_boolean', String: 'is_string', CharSequence: 'is_string', Map: 'is_object', HashMap: 'is_object', LinkedHashMap: 'is_object', List: 'is_array', ArrayList: 'is_array', Collection: 'is_array', Integer: 'is_integer', Long: 'is_integer', Short: 'is_integer', Double: 'is_float', Float: 'is_float', Boolean: 'is_boolean' };
 Object.assign(IngestGen.prototype, {
-  plStr(e) { return e.t === 'str' ? e.c : e.t === 'null' ? '""' : ['int', 'num', 'bool'].includes(e.t) ? `to_string(${e.c})` : `(to_string(${e.c}) ?? "")`; },
+  // Texte d’une valeur : « to_string(x) ?? "" » est refusé (E651) quand Vector sait déjà x chaîne ou nombre ; cette forme passe pour tous les types
+  plStr(e) { return e.t === 'str' ? e.c : e.t === 'null' ? '""' : ['int', 'num', 'bool'].includes(e.t) ? `to_string(${e.c})` : this.plTmp(`if is_string(${e.c}) { string!(${e.c}) } else if is_null(${e.c}) { "" } else { encode_json(${e.c}) }`, 'str').c; },
   plBool(e) { return e.t === 'bool' ? e.c : `(${e.c} == true)`; },
   plTmp(code, t) { const v = this.tmp('p'); this.emit(`${v} = ${code}`); return { c: v, t: t || 'any' }; },
   // Chemin de ctx : ctx.a.b, ctx['a.b'], ctx.a?.b ; null si l’expression n’en est pas un
@@ -1957,12 +1958,14 @@ Object.assign(IngestGen.prototype, {
     if (o.field === undefined) return this.ko(label, 'option field absente');
     const base = o.path ? o.path.split('.') : [];
     const override = this.bool(o.override, false);
+    // Chemin complet : en VRL, + ne concatène pas deux listes (append le fait)
+    const cat = tail => (base.length ? `append(${this.arr(base)}, ${tail})` : tail);
     const expandOne = (keyExpr, segsExpr) => {
       this.emit(`segs = ${segsExpr}`);
       this.emit(`cur = get!(., segs)`);
       this.open('if cur != null');
-      this.emit(`x = get!(., ${this.arr(base)} + [${keyExpr}])`);
-      this.emit(`. = remove!(., ${this.arr(base)} + [${keyExpr}])`);
+      this.emit(`x = get!(., ${cat(`[${keyExpr}]`)})`);
+      this.emit(`. = remove!(., ${cat(`[${keyExpr}]`)})`);
       this.emit('curl = if is_array(cur) { array!(cur) } else { [cur] }');
       this.emit('xl = if is_array(x) { array!(x) } else { [x] }');
       this.emit(override ? '. = set!(., segs, x)' : '. = set!(., segs, append(curl, xl))');
@@ -1971,8 +1974,8 @@ Object.assign(IngestGen.prototype, {
       this.emit('acc = []');
       this.emit(`for_each(slice!(segs, 0, length(segs) - 1)) -> |_i, sg| { acc = push(acc, sg); p = get!(., acc); if fail == null && p != null && !is_object(p) { fail = "cannot expand [" + join!(segs, ".") + "], because [" + join!(acc, ".") + "] is not an object field, but a value field" } }`);
       this.open('if fail == null');
-      this.emit(`x = get!(., ${this.arr(base)} + [${keyExpr}])`);
-      this.emit(`. = remove!(., ${this.arr(base)} + [${keyExpr}])`);
+      this.emit(`x = get!(., ${cat(`[${keyExpr}]`)})`);
+      this.emit(`. = remove!(., ${cat(`[${keyExpr}]`)})`);
       this.emit('. = set!(., segs, x)');
       this.close(); this.close();
     };
@@ -1982,12 +1985,12 @@ Object.assign(IngestGen.prototype, {
       this.open('for_each(keys(object!(src))) -> |_i, k0|');
       this.emit('k = string!(k0)');
       this.open('if fail == null && contains(k, ".") && !starts_with(k, ".")');
-      expandOne('k', base.length ? `${this.arr(base)} + split(k, ".")` : 'split(k, ".")');
+      expandOne('k', base.length ? `${cat('split(k, ".")')}` : 'split(k, ".")');
       this.close(); this.close();
     } else {
       const f = String(o.field);
-      this.open(`if fail == null && (get!(., ${this.arr(base)} + [${vq(f)}]) != null || exists(${this.vpath(base.concat([f]).map(x => x))}))`);
-      expandOne(vq(f), `${this.arr(base)} + [${f.split('.').map(vq).join(', ')}]`);
+      this.open(`if fail == null && (get!(., ${cat(`[${vq(f)}]`)}) != null || exists(${this.vpath(base.concat([f]).map(x => x))}))`);
+      expandOne(vq(f), `${cat(`[${f.split('.').map(vq).join(', ')}]`)}`);
       this.close();
     }
     this.t.stats.ok++;

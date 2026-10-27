@@ -1,0 +1,11 @@
+# Data streams des intégrations Elastic dont le VRL traduit doit compiler dans Vector (tests/ingest/valider.mjs).
+# Chacun a déjà fait échouer la compilation : dot_expander sur tous les champs, concaténations Painless sur des types connus.
+admin_by_request_epm/auditlog
+apache/access
+auditd/log
+aws/billing
+aws/dynamodb
+aws/elb_logs
+nginx/access
+system/auth
+system/syslog

@@ -1,0 +1,14 @@
+---
+description: dot_expander sur tous les champs, avec et sans chemin, champ nommé
+processors:
+  - dot_expander:
+      field: '*'
+  - dot_expander:
+      field: '*'
+      path: http
+  - dot_expander:
+      field: 'a.b.c'
+      override: true
+  - dot_expander:
+      field: 'x.y'
+      path: http
