@@ -132,7 +132,12 @@ function fieldSegs(ref) {
   if (ref.startsWith('[')) { const segs = []; ref.replace(/\[([^\]]+)\]/g, (m, x) => segs.push(x.trim())); return segs; }
   return [ref];
 }
-const segName = x => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(x) ? x : JSON.stringify(x));
+/*
+ * Chaîne littérale VRL. Les guillemets doubles de VRL interpolent « {{ variable }} » : sans échappement, "a{{b" vaut
+ * silencieusement "a" (Vector 0.59). Chaque accolade ouvrante suivie d’une autre devient \{, ce que VRL lit comme « { ».
+ */
+const vq = s => JSON.stringify(String(s)).replace(/\\u([0-9a-fA-F]{4})/g, '\\u{$1}').replace(/\{(?=\{)/g, '\\{');
+const segName = x => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(x) ? x : vq(x));
 const KAFKA_META = { topic: 'topic', partition: 'partition', offset: 'offset', key: 'message_key', timestamp: 'timestamp', headers: 'headers', consumer_group: 'consumer_group' };
 function vPathOf(segs, ns) {
   if (segs[0] === '@metadata') {
@@ -146,7 +151,6 @@ function vPathOf(segs, ns) {
   }
   return '.' + segs.map(segName).join('.');
 }
-const vq = s => JSON.stringify(String(s)).replace(/\\u([0-9a-fA-F]{4})/g, '\\u{$1}');
 const vraw = (s, pre) => `${pre}'${String(s).replace(/\\'/g, "\\\\'").replace(/'/g, "\\'")}'`;
 /*
  * Expression régulière de Ruby (Onigmo, celle des conditions =~, de gsub et de prune) → moteur regex de VRL (Rust).
