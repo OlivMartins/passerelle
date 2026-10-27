@@ -1070,14 +1070,15 @@ Object.assign(IngestGen.prototype, {
       case 'equals': return { c: `(${r.c} == ${a[0].c})`, t: 'bool' };
       case 'equalsIgnoreCase': return { c: `(is_string(${r.c}) && is_string(${a[0].c}) && downcase(string!(${r.c})) == downcase(string!(${a[0].c})))`, t: 'bool' };
       case 'isEmpty': return { c: `((is_string(${r.c}) && string!(${r.c}) == "") || (is_array(${r.c}) && length(array!(${r.c})) == 0) || (is_object(${r.c}) && length(object!(${r.c})) == 0))`, t: 'bool' };
-      case 'size': return ['list', 'map'].includes(r.t) ? { c: `length(${r.c})`, t: 'int' } : { c: `(length(${r.c}) ?? null)`, t: 'any' };
+      case 'size': return ['list', 'map'].includes(r.t) ? { c: `length(${r.c})`, t: 'int' } : this.plTmp(`if is_array(${r.c}) { length(array!(${r.c})) } else if is_object(${r.c}) { length(object!(${r.c})) } else { null }`);
       case 'length': return { c: r.t === 'str' ? `strlen(${r.c})` : `strlen(string(${r.c}) ?? "")`, t: 'int' };
       case 'toLowerCase': return { c: `downcase(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`})`, t: 'str' };
       case 'toUpperCase': return { c: `upcase(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`})`, t: 'str' };
       case 'trim': return { c: `replace(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, r'^[\\x00-\\x20]+|[\\x00-\\x20]+$', "")`, t: 'str' };
       case 'toString': return { c: str, t: 'str' };
       case 'substring': return { c: `(slice(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${a.map(x => x.c).join(', ')}) ?? null)`, t: 'any' };
-      case 'indexOf': return { c: `find(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${this.plStr(a[0])})`, t: 'int' };
+      // find() est typé « entier ou null » par VRL : int() rend la comparaison infaillible
+      case 'indexOf': return { c: `(int(find(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${this.plStr(a[0])})) ?? -1)`, t: 'int' };
       case 'replace': return { c: `replace(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${this.plStr(a[0])}, ${this.plStr(a[1])})`, t: 'str' };
       case 'split': env.regex = true; return { c: `split(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${a[0].t === 'str' && e.args[0].k === 'str' ? vraw(javaRe(e.args[0].v), 'r') : a[0].c})`, t: 'list' };
       case 'get': return { c: `(get(${r.c}, [${a[0].c}]) ?? null)`, t: 'any' };
@@ -1115,6 +1116,7 @@ Object.assign(IngestGen.prototype, {
     const loop = env.loops && env.loops[env.loops.length - 1];
     if (loop && loop.brkPossible) g.push(`!${loop.brk}`);
     if (loop && loop.cntPossible) g.push(`!${loop.cnt}`);
+    if (g.length && s.k === 'let') this.emit(`p_${s.name} = null`);
     if (g.length && s.k !== 'nop') { this.open(`if ${g.join(' && ')}`); this.plStmtInner(s, env); this.close(); }
     else this.plStmtInner(s, env);
   },
@@ -1499,9 +1501,11 @@ Object.assign(IngestGen.prototype, {
     const r = this.field(o, label); if (!r) return;
     const tr = this.field(o, label, 'target_field'); if (!tr) return;
     const ignore = this.bool(o.ignore_missing, false); const override = this.bool(o.override, false);
-    this.open(`if !(${this.has(r)})`);
+    // has() peut émettre des instructions (chemin pointé) : elles précèdent le if, pas une de ses branches
+    const hasR = this.has(r); const hasT = override ? 'false' : this.has(tr);
+    this.open(`if !(${hasR})`);
     if (!ignore) this.emit(`fail = ${vq(`field [${r.path}] doesn't exist`)}`);
-    this.close(`} else if ${override ? 'false' : this.has(tr)} {`); this.ind++;
+    this.close(`} else if ${hasT} {`); this.ind++;
     this.emit(`fail = ${vq(`field [${tr.path}] already exists`)}`);
     this.close('} else {'); this.ind++;
     this.emit(`v = ${this.get(r)}`);
@@ -1923,9 +1927,10 @@ Object.assign(IngestGen.prototype, {
     if (base.length) { this.emit(`basev = get!(., ${this.arr(base)})`); this.emit(`if !is_object(basev) { fail = ${vq(`field [${o.path}] not present as part of path [${o.path}]`)} }`); }
     if (String(o.field) === '*') {
       this.emit(`src = ${base.length ? 'object(basev) ?? {}' : '.'}`);
-      this.open('for_each(keys(object!(src))) -> |_i, k|');
+      this.open('for_each(keys(object!(src))) -> |_i, k0|');
+      this.emit('k = string!(k0)');
       this.open('if fail == null && contains(k, ".") && !starts_with(k, ".")');
-      expandOne('k', `${this.arr(base)} + split(k, ".")`);
+      expandOne('k', base.length ? `${this.arr(base)} + split(k, ".")` : 'split(k, ".")');
       this.close(); this.close();
     } else {
       const f = String(o.field);
