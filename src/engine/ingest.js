@@ -926,6 +926,11 @@ Object.assign(IngestGen.prototype, {
   // Texte d’une valeur : « to_string(x) ?? "" » est refusé (E651) quand Vector sait déjà x chaîne ou nombre ; cette forme passe pour tous les types
   plStr(e) { return e.t === 'str' ? e.c : e.t === 'null' ? '""' : ['int', 'num', 'bool'].includes(e.t) ? `to_string(${e.c})` : this.plTmp(`if is_string(${e.c}) { string!(${e.c}) } else if is_null(${e.c}) { "" } else { encode_json(${e.c}) }`, 'str').c; },
   plBool(e) { return e.t === 'bool' ? e.c : `(${e.c} == true)`; },
+  // Opération sur deux valeurs de type inconnu : entiers entre eux restent entiers, sinon flottants, sinon null. Écrite
+  // avec des assertions (!) plutôt qu’une fusion d’erreur (?? null), que VRL refuse (E651) quand il connaît déjà les types
+  plNum(op, A, B) {
+    return `if is_integer(${A}) && is_integer(${B}) { int!(${A}) ${op} int!(${B}) } else if (is_integer(${A}) || is_float(${A})) && (is_integer(${B}) || is_float(${B})) { to_float!(${A}) ${op} to_float!(${B}) } else { null }`;
+  },
   plTmp(code, t) { const v = this.tmp('p'); this.emit(`${v} = ${code}`); return { c: v, t: t || 'any' }; },
   // Chemin de ctx : ctx.a.b, ctx['a.b'], ctx.a?.b ; null si l’expression n’en est pas un
   plPath(e) {
@@ -1047,8 +1052,9 @@ Object.assign(IngestGen.prototype, {
     if (op === '+') {
       if (a.t === 'str' || b.t === 'str') return { c: `(${this.plStr(a)} + ${this.plStr(b)})`, t: 'str' };
       if (known) return { c: `(${a.c} + ${b.c})`, t: a.t === 'int' && b.t === 'int' ? 'int' : 'num' };
-      return this.plTmp(`if is_string(${a.c}) || is_string(${b.c}) { ${this.plStr(a)} + ${this.plStr(b)} } else { (${a.c} + ${b.c}) ?? null }`);
+      return this.plTmp(`if is_string(${a.c}) || is_string(${b.c}) { ${this.plStr(a)} + ${this.plStr(b)} } else ${this.plNum('+', a.c, b.c)}`);
     }
+    if (['-', '*'].includes(op) && !known) return this.plTmp(this.plNum(op, a.c, b.c));
     if (['-', '*', '/', '%'].includes(op)) {
       if (op === '/') env.division = true;
       return known && op !== '/' && op !== '%' ? { c: `(${a.c} ${op} ${b.c})`, t: a.t === 'int' && b.t === 'int' ? 'int' : 'num' } : { c: `((${a.c} ${op} ${b.c}) ?? null)`, t: 'any' };
@@ -1226,7 +1232,9 @@ Object.assign(IngestGen.prototype, {
     if (path) { if (path.unsafe) env.unsafe = true; return this.set(this.plRef(path.segs), v.c); }
     if (target.k === 'id') {
       if (target.v === 'ctx') throw new Error('ctx ne peut pas être remplacé');
-      if (!env.locals.has(target.v)) env.locals.set(target.v, v.t);
+      // Un type n’est gardé que si chaque valeur affectée le respecte : sinon la variable devient inconnue (« any »)
+      if (!env.locals.has(target.v)) env.locals.set(target.v, v.t === 'null' ? 'any' : v.t);
+      else if (env.locals.get(target.v) !== v.t) env.locals.set(target.v, 'any');
       this.emit(`p_${target.v} = ${v.c}`); return;
     }
     // Variable locale de type table ou liste : m.k = v, m['k'] = v, l[0] = v
@@ -1921,7 +1929,7 @@ Object.assign(IngestGen.prototype, {
     const prefix = (o.target_field ? `${o.target_field}.` : '') + (o.prefix || '');
     const inc = o.include_keys !== undefined ? lsList(o.include_keys).map(String) : null;
     const exc = o.exclude_keys !== undefined ? lsList(o.exclude_keys).map(String) : null;
-    const trim = c => (c ? `replace(KEY, r'^[${javaRe(c)}]+|[${javaRe(c)}]+$', "")` : 'KEY');
+    const trim = c => (c ? `replace(KEY, ${vraw(`^[${javaRe(c)}]+|[${javaRe(c)}]+$`, 'r')}, "")` : 'KEY');
     this.open(`if !(${this.has(r)})`);
     if (!ignore) this.emit(`fail = ${vq(`field [${r.path}] doesn't exist`)}`);
     this.close('} else {'); this.ind++;

@@ -32,6 +32,9 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
   - `dot_expander` concaténait des tableaux avec `+`, que VRL refuse (E110) ; il utilise `append()`.
   - Un motif `gsub` qui contient des caractères de contrôle (`\u0000-\u001F`) s’écrit `\xNN` dans le VRL : bruts, ils faisaient refuser le YAML par Vector.
   - `keySet`, `values` et les boucles sur `params` ne portent plus de fusion d’erreur inutile (E651).
+  - Une addition, soustraction ou multiplication Painless sur des valeurs de type inconnu n’utilise plus `?? null` (E651 quand VRL connaît déjà les types) : entiers entre eux, sinon flottants, sinon `null`.
+  - Une variable Painless réaffectée avec une valeur d’un autre type perd son type (`String s = …; s = s.substring(1)` laissait croire à une chaîne, d'où E103 sur `split`).
+  - `kv` : `trim_key` et `trim_value` qui contiennent une apostrophe donnent une expression régulière valide.
   - Les conversions en chaîne des scripts Painless ne produisent plus d’erreur E651 (« fusion d’erreur inutile ») sur un type déjà connu.
 - Analyseurs :
   - `elision` : `articles_case` n’était pas appliqué dans le bon sens (faux : sensible à la casse, vrai : insensible), et le filtre prédéfini cherchait toujours sans tenir compte de la casse ; un filtre défini sans `articles` ni `articles_path` est refusé, comme par Elasticsearch.
