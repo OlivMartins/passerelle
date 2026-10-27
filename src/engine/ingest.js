@@ -1014,7 +1014,7 @@ Object.assign(IngestGen.prototype, {
         const st = this.plTmp(this.plStr(X(e.str))); const dl = e.delims ? this.plTmp(this.plStr(X(e.delims))) : { c: '" \\t\\n\\r\\f"' };
         const first = this.tmp('p'); const work = this.tmp('p');
         this.emit(`${first} = slice(${dl.c}, 0, 1) ?? ""`); this.emit(`${work} = ${st.c}`);
-        this.open(`for_each(split(${dl.c}, "")) -> |_i, _c|`); this.emit(`${work} = replace(${work}, string!(_c), ${first})`); this.close();
+        this.open(`for_each(split(${dl.c}, "")) -> |_i, _c|`); this.emit(`if _c != "" { ${work} = replace(${work}, string!(_c), ${first}) }`); this.close();
         const toks = this.tmp('p'); this.emit(`${toks} = []`);
         this.open(`if ${first} != ""`); this.open(`for_each(split(${work}, ${first})) -> |_i, _w|`); this.emit(`if _w != "" { ${toks} = push(${toks}, _w) }`); this.close(); this.close();
         return { c: `{ "t": ${toks}, "i": 0 }`, t: 'tok' };
