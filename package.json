@@ -15,7 +15,7 @@
     "test:attributes": "node tests/attributes/run.mjs",
     "test:clickhouse": "node tests/clickhouse/run.mjs",
     "test:ui": "node tests/ui/run.mjs",
-    "test:ingest": "node tests/ingest/valider.mjs && node tests/ingest/valider.mjs --clickhouse && node tests/ingest/tls.mjs"
+    "test:ingest": "node tests/ingest/valider.mjs && node tests/ingest/valider.mjs --clickhouse && node tests/ingest/tls.mjs && node tests/ingest/painless.mjs"
   },
   "engines": {
     "node": ">=24"

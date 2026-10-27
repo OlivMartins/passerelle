@@ -429,7 +429,7 @@ Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc diffé
 | Entrées et sorties | Kafka en entrée et en sortie (SASL, TLS, clés de message, compression) ; aussi `beats`, `tcp`, `udp`, `http`, `file`, `elasticsearch`, `stdout` |
 | Conditions Logstash | `if` / `else if` / `else`, `and`, `or`, `xor`, `nand`, `not`, `in`, `not in`, `=~`, `!~`, comparaisons |
 
-**Limites connues.** Les boucles Painless ne sont pas traduites. Une requête `nested` dont la corrélation entre sous-champs compte doit être réécrite avec `arrayExists`. Les filtres `ruby` et `aggregate` sont signalés « à reprendre », avec le code d’origine recopié en commentaire et la piste à suivre dans Vector.
+**Limites connues.** Dans une requête, les boucles Painless ne sont pas traduites. Dans un pipeline d’ingestion, les scripts sont traduits avec leurs boucles `for`, lambdas, expressions régulières, ensembles, dates et fonctions récursives (bornées en profondeur) ; `while`, le tri d’une liste, `stream()`, `DateTimeFormatter` et une fonction qui modifie son argument sont à reprendre. Une requête `nested` dont la corrélation entre sous-champs compte doit être réécrite avec `arrayExists`. Les filtres `ruby` et `aggregate` sont signalés « à reprendre », avec le code d’origine recopié en commentaire et la piste à suivre dans Vector.
 
 </details>
 

@@ -1,0 +1,50 @@
+#!/usr/bin/env node
+/*
+ * Scripts Painless traduits : les documents rejoués dans Vector donnent ce que Painless donnerait. Chaque cas de
+ * tests/ingest/cas/ est joué sur des documents dont le résultat attendu est écrit ici, à la main, d’après la sémantique de Java.
+ *
+ *   VECTOR_BIN=vector node tests/ingest/painless.mjs
+ */
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { E, play } from './commun.mjs';
+
+const cas = join(dirname(fileURLToPath(import.meta.url)), 'cas');
+let failed = 0;
+const check = (ok, name, detail) => { console.log(`${ok ? '✓' : '✗'} ${name}${ok ? '' : ` — ${detail}`}`); if (!ok) failed++; };
+const canon = x => Array.isArray(x) ? x.map(canon) : x && typeof x === 'object' ? Object.fromEntries(Object.keys(x).sort().map(k => [k, canon(x[k])])) : x;
+const same = (a, b) => JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+const traduire = f => { const r = E.translateIngest([{ name: f, text: readFileSync(join(cas, f), 'utf8') }], E.DEFAULT_CONFIG); const err = r.notes.filter(n => n.level === 'err'); if (err.length) throw new Error(`${f} non traduit : ${err[0].detail}`); return r; };
+
+// Expressions régulières, lambdas, ensembles, StringBuilder, caractères, bits, dates, throw, gsub MAC
+{
+  const r = traduire('painless_regex.yml');
+  const base = { nom: 'fooBarBaz', num: '123', total: 9, cat: { a: 1, b_c: 2 }, event: {}, items: ['x', null, '', 'y'], tags: ['a', 'b', 'a', 'c'], seen: [], debut: '2020-04-01T12:03:00Z', fin: '2020-04-01T12:03:02.5Z', _conf: { z: 1 }, flags: 13, big: 72057594037927936, mac: 'aabbccddeeff', json: { a: 1, b: null, workspace_id: null }, h: '0x1F', mode: 420 };
+  const [d] = play(r, [base]);
+  const att = {
+    snake: 'foo_Bar_Baz', snake2: 'foo_bar_baz', est_num: true, a_num: false, event: { a: 1, b_c: 2 }, items: ['x', 'y'], seen: ['a', 'b', 'a', 'c'],
+    uniques: ['a', 'b', 'c'], sb: 'fooBarBaz-4', res: 'foo_bar_baz', n: 1, sous: ['b', 'a', 'c'], duree: 2500000000, sec: 1585742580,
+    conf_vu: { z: 1 }, bit: true, bas: 5, haut: true, milieu: 'a', plus: 1585915380, apres: false, mac: 'aa-bb-cc-dd-ee-ff', apres_throw: true, hex: 31, oct: '644', json: { a: 1, workspace_id: 'Default' }, json_txt: '{"a":1,"workspace_id":"Default"}',
+    empreinte: 'dbea8cd007898de3c8a902068e956c9cd09ab50e'
+  };
+  for (const [k, v] of Object.entries(att)) check(same(d[k], v), `Painless ${k}`, `attendu ${JSON.stringify(v)}, obtenu ${JSON.stringify(d[k])}`);
+  check(d._conf === undefined, 'Painless ctx.remove supprime le champ', JSON.stringify(d._conf));
+  const [impair, arret] = play(r, [{ ...base, mac: 'aabbc' }, { ...base, stop: 'oui' }]);
+  check(impair.mac === 'aa-bb-c', 'gsub (..)(?!$) : longueur impaire', impair.mac);
+  check(arret.__echec && /arrêt demandé : oui/.test(arret.__echec.message), 'throw : le processeur échoue avec le message', JSON.stringify(arret.__echec));
+}
+
+// Fonction récursive : recopiée sur des niveaux bornés ; trop profond, le document échoue
+{
+  const r = traduire('painless_recursion.yml');
+  const [ok, trop] = play(r, [
+    { donnees: { firstName: 'A', subObj: { userId: 1, itemList: [{ someKey: 2, deepObj: { xY: 3 } }] } } },
+    { donnees: { a: { b: { c: { d: { e: { f: { g: { h: 1 } } } } } } } } }
+  ]);
+  check(same(ok.donnees, { first_name: 'A', sub_obj: { user_id: 1, item_list: [{ some_key: 2, deep_obj: { x_y: 3 } }] } }), 'récursion : snake_case à tous les niveaux', JSON.stringify(ok.donnees));
+  check(trop.__echec && /plus profond/.test(trop.__echec.message), 'récursion : un document trop profond échoue, il n’est pas traité de travers', JSON.stringify(trop.__echec));
+}
+
+if (failed) { console.log(`\n${failed} échec(s)`); process.exit(1); }
+console.log('\nTous les tests Painless passent.');

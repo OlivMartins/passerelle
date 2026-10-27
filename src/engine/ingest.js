@@ -1,6 +1,9 @@
 /* Passerelle — moteur partie 5 : ingest pipelines Elasticsearch → VRL */
 
 // VRL ne lit pas la notation 1e18 : le flottant est écrit en décimal
+// Plafond de niveaux recopiés en ligne pour une fonction récursive (la taille réelle du code produit le réduit : INLINE_LINES)
+const INLINE_LINES = 8000;
+function recursionLimit(fn, name) { return fn.rec <= 1 ? 12 : 7; }
 function vrlExp(lit) {
   const n = Number(lit);
   if (!Number.isFinite(n)) return lit;
@@ -351,7 +354,7 @@ function ingPainless(src) {
   const is = (v, k) => { const t = toks[p + (k || 0)]; return !!t && t.t !== 'str' && t.t !== 'num' && t.v === v; };
   const next = () => toks[p++];
   const expect = v => { if (!is(v)) throw new Error(`« ${v} » attendu${peek() ? `, trouvé « ${peek().v} »` : ''}`); p++; };
-  const BIN = { '||': 2, '&&': 3, '==': 7, '!=': 7, '===': 7, '!==': 7, '<': 8, '>': 8, '<=': 8, '>=': 8, '=~': 8, '==~': 8, instanceof: 8, '+': 9, '-': 9, '*': 10, '/': 10, '%': 10 };
+  const BIN = { '||': 2, '&&': 3, '|': 4, '^': 5, '&': 6, '==': 7, '!=': 7, '===': 7, '!==': 7, '<': 8, '>': 8, '<=': 8, '>=': 8, '=~': 8, '==~': 8, instanceof: 8, '+': 9, '-': 9, '*': 10, '/': 10, '%': 10 };
   const fns = new Map();
   function block() { const out = []; while (p < toks.length && !is('}')) out.push(stmt()); return out; }
   const endStmt = () => { if (is(';')) p++; };
@@ -368,7 +371,7 @@ function ingPainless(src) {
     }
     if (t.t === 'id' && t.v === 'for') {
       next(); expect('(');
-      // for (int i = 0; i < liste.size(); i++) : un parcours par indice
+      // for (int i = A; i < liste.size() [- K]; i++) : un parcours par indice
       if (isType(0) && peek(1) && peek(1).t === 'id' && is('=', 2)) {
         next(); const name = next().v; next(); const init = expr(0); expect(';');
         const c = expr(0); expect(';');
@@ -377,10 +380,12 @@ function ingPainless(src) {
         if (!okUpd) throw new Error('boucle for à compteur : seul « i++ » est pris en charge');
         next(); if (u2.v === '+=') next();
         expect(')');
-        const bound = c.k === 'bin' && c.op === '<' && c.l.k === 'id' && c.l.v === name ? c.r : null;
+        let bound = c.k === 'bin' && c.op === '<' && c.l.k === 'id' && c.l.v === name ? c.r : null;
+        let trim = 0;
+        if (bound && bound.k === 'bin' && bound.op === '-' && bound.r.k === 'num' && bound.r.int) { trim = Number(bound.r.v); bound = bound.l; }
         const list = bound && ((bound.k === 'mcall' && (bound.name === 'size' || bound.name === 'length') && !bound.args.length) ? bound.obj : (bound.k === 'member' && bound.name === 'length') ? bound.obj : null);
-        if (!list || init.k !== 'num' || Number(init.v) !== 0) throw new Error('boucle for à compteur : seul « for (int i = 0; i < liste.size(); i++) » est pris en charge');
-        return { k: 'forIdx', name, list, body: stmt() };
+        if (!list || init.k !== 'num' || !init.int) throw new Error('boucle for à compteur : seul « for (int i = 0; i < liste.size(); i++) » est pris en charge');
+        return { k: 'forIdx', name, list, from: Number(init.v), trim, body: stmt() };
       }
       // for (def x : liste) ou for (x in liste)
       let name;
@@ -403,7 +408,8 @@ function ingPainless(src) {
       return { k: 'try', body, fin };
     }
     if (t.t === 'id' && (t.v === 'break' || t.v === 'continue')) { next(); endStmt(); return { k: t.v }; }
-    if (t.t === 'id' && ['while', 'do', 'throw', 'switch'].includes(t.v)) throw new Error(`instruction « ${t.v} » non prise en charge`);
+    if (t.t === 'id' && t.v === 'throw') { next(); const v = expr(0); endStmt(); return { k: 'throw', v }; }
+    if (t.t === 'id' && ['while', 'do', 'switch'].includes(t.v)) throw new Error(`instruction « ${t.v} » non prise en charge`);
     // Fonction déclarée dans le script : « type nom(…) { … } »
     if ((isType(0) || (peek() && peek().t === 'id' && peek().v === 'void')) && peek(1) && peek(1).t === 'id' && is('(', 2)) {
       let k = 3; let d = 1; while (p + k < toks.length && d > 0) { if (is('(', k)) d++; else if (is(')', k)) d--; k++; }
@@ -436,6 +442,7 @@ function ingPainless(src) {
       }
     }
     const e = expr(0);
+    if (e.k === 'incdec') { endStmt(); return { k: 'set', target: e.e, v: { k: 'bin', op: e.op[0], l: e.e, r: { k: 'num', v: '1', int: true } } }; }
     if (is('=') || is('+=') || is('-=') || is('*=') || is('/=')) {
       const op = next().v; const r = expr(0); endStmt();
       if (!['id', 'member', 'index'].includes(e.k)) throw new Error('affectation à une expression qui n’est pas un champ ou une variable');
@@ -464,7 +471,24 @@ function ingPainless(src) {
     }
     return postfix(primary());
   }
-  function args() { const a = []; while (!is(')')) { if (is('->', 1) || is('->', 3)) throw new Error('lambda non prise en charge'); a.push(expr(0)); if (is(',')) next(); else break; } expect(')'); return a; }
+  // Lambda « x -> … » ou « (k, v) -> … », corps expression ou bloc ; employée par forEach et removeIf
+  function lambdaAhead() {
+    if (peek() && peek().t === 'id' && is('->', 1)) return true;
+    if (!is('(')) return false;
+    let k = 1;
+    while (peek(k) && peek(k).t === 'id' && (is(',', k + 1) || is(')', k + 1))) { if (is(')', k + 1)) return is('->', k + 2); k += 2; }
+    return false;
+  }
+  function lambda() {
+    const params = [];
+    if (peek().t === 'id') params.push(next().v);
+    else { next(); while (!is(')')) { params.push(next().v); if (is(',')) next(); } next(); }
+    expect('->');
+    let body;
+    if (is('{')) { next(); body = block(); expect('}'); } else body = [stmt()];
+    return { k: 'lambda', params, body };
+  }
+  function args() { const a = []; while (!is(')')) { a.push(lambdaAhead() ? lambda() : expr(0)); if (is(',')) next(); else break; } expect(')'); return a; }
   function primary() {
     const t = next();
     if (!t) throw new Error('expression incomplète');
@@ -492,6 +516,9 @@ function ingPainless(src) {
         if (is('<')) { let d = 0; do { if (is('<')) d++; else if (is('>')) d--; next(); } while (d > 0 && p < toks.length); }
         expect('('); const a = args();
         if (/^(ArrayList|LinkedList|List)$/.test(ty.v)) return { k: 'list', items: [], from: a[0] || null };
+        if (/^(HashSet|LinkedHashSet|Set)$/.test(ty.v)) return { k: 'list', items: [], from: a[0] || null, set: true };
+        if (/(Exception|Error)$/.test(ty.v)) return { k: 'exc', type: ty.v, args: a };
+        if (ty.v === 'StringBuilder' && a.length <= 1) return { k: 'sbnew', arg: a[0] || null };
         if (/^(HashMap|LinkedHashMap|TreeMap|Map)$/.test(ty.v)) return { k: 'map', items: [], from: a[0] || null };
         if (ty.v === 'CIDR' && a.length === 1) return { k: 'cidr', arg: a[0] };
         if (ty.v === 'StringTokenizer' && (a.length === 1 || a.length === 2)) return { k: 'tok', str: a[0], delims: a[1] || null };
@@ -512,7 +539,7 @@ function ingPainless(src) {
         continue;
       }
       if (is('[')) { next(); const idx = expr(0); expect(']'); e = { k: 'index', obj: e, idx }; continue; }
-      if (is('++') || is('--')) throw new Error('++ et -- non pris en charge');
+      if (is('++') || is('--')) { e = { k: 'incdec', e, op: next().v }; continue; }
       if (is('->') || is('::')) throw new Error('lambda non prise en charge');
       break;
     }
@@ -932,6 +959,11 @@ class IngestGen {
 const PL_INST = { double: 'is_float', float: 'is_float', long: 'is_integer', int: 'is_integer', short: 'is_integer', boolean: 'is_boolean', String: 'is_string', CharSequence: 'is_string', Map: 'is_object', HashMap: 'is_object', LinkedHashMap: 'is_object', List: 'is_array', ArrayList: 'is_array', Collection: 'is_array', Integer: 'is_integer', Long: 'is_integer', Short: 'is_integer', Double: 'is_float', Float: 'is_float', Boolean: 'is_boolean' };
 Object.assign(IngestGen.prototype, {
   // Texte d’une valeur : « to_string(x) ?? "" » est refusé (E651) quand Vector sait déjà x chaîne ou nombre ; cette forme passe pour tous les types
+  // Texte, liste ou table d’une valeur de type inconnu, vide si la valeur n’en est pas un. Sans fusion d’erreur (?? "") :
+  // VRL la refuse (E651) quand il connaît déjà le type de la variable, ce que le traducteur ne sait pas toujours
+  plS(e) { if (e.t === 'str') return e.c; const x = /^\w+$/.test(e.c) ? e.c : this.plTmp(e.c).c; return this.plTmp(`if is_string(${x}) { string!(${x}) } else { "" }`, 'str').c; },
+  plA(e) { if (e.t === 'list') return e.c; const x = /^\w+$/.test(e.c) ? e.c : this.plTmp(e.c).c; return this.plTmp(`if is_array(${x}) { array!(${x}) } else { [] }`, 'list').c; },
+  plO(e) { if (e.t === 'map') return e.c; const x = /^\w+$/.test(e.c) ? e.c : this.plTmp(e.c).c; return this.plTmp(`if is_object(${x}) { object!(${x}) } else { {} }`, 'map').c; },
   plStr(e) { return e.t === 'str' ? e.c : e.t === 'null' ? '""' : ['int', 'num', 'bool'].includes(e.t) ? `to_string(${e.c})` : this.plTmp(`if is_string(${e.c}) { string!(${e.c}) } else if is_null(${e.c}) { "" } else { encode_json(${e.c}) }`, 'str').c; },
   plBool(e) { return e.t === 'bool' ? e.c : `(${e.c} == true)`; },
   // Opération sur deux valeurs de type inconnu : entiers entre eux restent entiers, sinon flottants, sinon `other`. Écrite
@@ -974,16 +1006,23 @@ Object.assign(IngestGen.prototype, {
       case 'bool': return { c: String(e.v), t: 'bool' };
       case 'null': return { c: 'null', t: 'null' };
       case 'list': {
-        if (e.from) { const f = X(e.from); return { c: f.t === 'list' ? f.c : `(array(${f.c}) ?? [])`, t: 'list' }; }
+        if (e.from) {
+          const f = X(e.from); const arr = this.plA(f);
+          if (e.set) { this.approx('Painless : HashSet', 'L’ordre des éléments d’un HashSet n’est pas défini en Java ; la traduction garde l’ordre d’insertion (les doublons sont retirés).'); return { c: `unique(${arr})`, t: 'list' }; }
+          return { c: arr, t: 'list' };
+        }
         return { c: `[${e.items.map(i => X(i).c).join(', ')}]`, t: 'list' };
       }
       case 'map': {
-        if (e.from) { const f = X(e.from); return { c: f.t === 'map' ? f.c : `(object(${f.c}) ?? {})`, t: 'map' }; }
+        if (e.from) { const f = X(e.from); return { c: this.plO(f), t: 'map' }; }
         return { c: `{ ${e.items.map(([k, v]) => { if (k.k !== 'str') throw new Error('clé de table non littérale'); return `${vq(k.v)}: ${X(v).c}`; }).join(', ')} }`, t: 'map' };
       }
       case 'id': {
         if (e.v === 'ctx') return { c: '.', t: 'map' };
-        if (env.locals.has(e.v)) return { c: `p_${e.v}`, t: env.locals.get(e.v) || 'any' };
+        if (env.locals.has(e.v)) {
+          if (env.locals.get(e.v) === 're') throw new Error('expression régulière employée hors de matcher()');
+          return { c: `p_${e.v}`, t: env.locals.get(e.v) || 'any' };
+        }
         if (e.v === 'params') { env.usesParams = true; return { c: 'p_params', t: 'map' }; }
         throw new Error(`variable inconnue « ${e.v} »`);
       }
@@ -1044,6 +1083,10 @@ Object.assign(IngestGen.prototype, {
         return { c: `{ "t": ${toks}, "i": 0 }`, t: 'tok' };
       }
       case 'cidr': { const a = X(e.arg); return { c: this.plStr(a), t: 'cidr' }; }
+      case 'lambda': throw new Error('lambda hors de forEach ou removeIf');
+      case 'exc': throw new Error('exception employée hors de throw');
+      case 'incdec': throw new Error('++ et -- ne sont pris en charge qu’en instruction');
+      case 'sbnew': return { c: e.arg ? this.plStr(X(e.arg)) : '""', t: 'str' };
       case 're': throw new Error('expression régulière hors d’un =~');
     }
     throw new Error(`expression « ${e.k} » non prise en charge`);
@@ -1057,6 +1100,19 @@ Object.assign(IngestGen.prototype, {
       env.regex = true;
       const re = javaRe(e.r.v); const full = op === '==~' ? `^(?:${re})$` : re;
       return { c: a.t === 'str' ? `match(${a.c}, ${vraw(full, 'r')})` : `(is_string(${a.c}) && match(string!(${a.c}), ${vraw(full, 'r')}))`, t: 'bool' };
+    }
+    if (op === '&' || op === '|' || op === '^') {
+      // Masque constant seulement : VRL n’a pas d’opérateur sur les bits ; chaque bit du masque est extrait par division et reste
+      const k = e.r.k === 'num' && e.r.int ? e.r : e.l.k === 'num' && e.l.int ? e.l : null;
+      if (op !== '&' || !k) throw new Error(`opérateur « ${op} » sans masque constant non pris en charge`);
+      const m = BigInt(k.v); if (m < 0n || m >= (1n << 62n)) throw new Error('masque binaire hors de 0..2^62 non pris en charge');
+      this.approx('Painless : opérateur &', 'Le masque binaire est calculé par divisions et restes : exact pour des entiers positifs, pas pour des négatifs.');
+      const x = this.plTmp(this.plExpr(k === e.r ? e.l : e.r, env).c);
+      if (m === 0n) return { c: '0', t: 'int' };
+      const terms = [];
+      if (((m + 1n) & m) === 0n) terms.push(`mod(int!(${x.c}), ${m + 1n})`);
+      else for (let b = 0n; (1n << b) <= m; b++) if ((m >> b) & 1n) terms.push(`mod(to_int(floor(int!(${x.c}) / ${1n << b})), 2) * ${1n << b}`);
+      return this.plTmp(`if is_integer(${x.c}) { ${terms.join(' + ')} } else { null }`);
     }
     const a = this.plExpr(e.l, env); const b = this.plExpr(e.r, env);
     if (op === '==' || op === '===') return { c: `(${a.c} == ${b.c})`, t: 'bool' };
@@ -1075,12 +1131,37 @@ Object.assign(IngestGen.prototype, {
     if (['-', '*'].includes(op) && !known) return this.plTmp(this.plNum(op, a, b));
     if (['-', '*', '/', '%'].includes(op)) {
       if (op === '/') env.division = true;
-      return known && op !== '/' && op !== '%' ? { c: `(${a.c} ${op} ${b.c})`, t: a.t === 'int' && b.t === 'int' ? 'int' : 'num' } : { c: `((${a.c} ${op} ${b.c}) ?? null)`, t: 'any' };
+      // VRL n’a pas d’opérateur % : le reste est la fonction mod()
+      if (op === '%') return { c: `(mod(${a.c}, ${b.c}) ?? null)`, t: 'any' };
+      return known && op !== '/' ? { c: `(${a.c} ${op} ${b.c})`, t: a.t === 'int' && b.t === 'int' ? 'int' : 'num' } : { c: `((${a.c} ${op} ${b.c}) ?? null)`, t: 'any' };
     }
     throw new Error(`opérateur « ${op} » non pris en charge`);
   },
   plCall(e, env) {
     const name = e.name; const args = () => e.args.map(a => this.plExpr(a, env));
+    // /motif/.matcher(texte).replaceAll(…) | replaceFirst(…) | matches() | find()
+    const reNode = e.obj.k === 'mcall' && e.obj.name === 'matcher' && e.obj.args.length === 1
+      ? (e.obj.obj.k === 're' ? e.obj.obj : e.obj.obj.k === 'id' && env.reLocals && env.reLocals.get(e.obj.obj.v)) : null;
+    if (reNode) {
+      env.regex = true;
+      const re = javaRe(reNode.v); const s = this.plTmp(this.plStr(this.plExpr(e.obj.args[0], env)), 'str');
+      if (name === 'matches') return { c: `match(${s.c}, ${vraw(`^(?:${re})$`, 'r')})`, t: 'bool' };
+      if (name === 'find') return { c: `match(${s.c}, ${vraw(re, 'r')})`, t: 'bool' };
+      if ((name === 'replaceAll' || name === 'replaceFirst') && e.args.length === 1 && e.args[0].k === 'str') {
+        // $1 de Java → ${1} : en Rust, « $1_ » désignerait le groupe nommé « 1_ »
+        const rep = this.plExpr({ k: 'str', v: e.args[0].v.replace(/\$(\d+)/g, '${$1}') }, env);
+        return { c: `replace(${s.c}, ${vraw(re, 'r')}, ${rep.c}${name === 'replaceFirst' ? ', count: 1' : ''})`, t: 'str' };
+      }
+      throw new Error(`Matcher.${name} non pris en charge`);
+    }
+    // ChronoUnit.NANOS.between(début, fin)
+    if (name === 'between' && e.obj.k === 'member' && e.obj.obj.k === 'id' && e.obj.obj.v === 'ChronoUnit' && e.args.length === 2) {
+      const f = { NANOS: 1, MICROS: 1000, MILLIS: 1000000, SECONDS: 1000000000, MINUTES: 60000000000, HOURS: 3600000000000, DAYS: 86400000000000 }[e.obj.name];
+      if (!f) throw new Error(`ChronoUnit.${e.obj.name} non pris en charge`);
+      const a = args(); const x = this.plTmp(a[0].c); const y = this.plTmp(a[1].c);
+      const d = `to_unix_timestamp(timestamp!(${y.c}), unit: "nanoseconds") - to_unix_timestamp(timestamp!(${x.c}), unit: "nanoseconds")`;
+      return this.plTmp(`if is_timestamp(${x.c}) && is_timestamp(${y.c}) { ${f === 1 ? d : `to_int((${d}) / ${f})`} } else { null }`);
+    }
     // Méthodes statiques courantes
     if (e.obj.k === 'id' && !env.locals.has(e.obj.v) && e.obj.v !== 'ctx' && e.obj.v !== 'params') {
       const cls = e.obj.v; const a = args();
@@ -1089,6 +1170,42 @@ Object.assign(IngestGen.prototype, {
       if (cls === 'String' && name === 'valueOf') return { c: this.plStr(a[0]), t: 'str' };
       if (cls === 'Math' && ['abs', 'floor', 'ceil', 'round'].includes(name)) return { c: `(${name === 'round' ? 'round' : name}(${a[0].c}) ?? null)`, t: 'any' };
       if (cls === 'Math' && (name === 'max' || name === 'min')) return this.plTmp(`if ((${a[0].c} ${name === 'max' ? '>=' : '<='} ${a[1].c}) ?? false) { ${a[0].c} } else { ${a[1].c} }`);
+      if (cls === 'Character' && a.length >= 1) {
+        const ch = this.plTmp(this.plStr(a[0]), 'str');
+        const is = re => { env.regex = true; return { c: `match(${ch.c}, ${vraw(re, 'r')})`, t: 'bool' }; };
+        if (name === 'isUpperCase') return is('^\\p{Lu}$');
+        if (name === 'isLowerCase') return is('^\\p{Ll}$');
+        if (name === 'isDigit') return is('^\\p{Nd}$');
+        if (name === 'isLetter') return is('^\\p{L}$');
+        if (name === 'isLetterOrDigit') return is('^[\\p{L}\\p{Nd}]$');
+        if (name === 'isWhitespace') return is('^\\s$');
+        if (name === 'toLowerCase') return { c: `downcase(${ch.c})`, t: 'str' };
+        if (name === 'toUpperCase') return { c: `upcase(${ch.c})`, t: 'str' };
+      }
+      if ((cls === 'Integer' || cls === 'Long' || cls === 'Double' || cls === 'Float' || cls === 'Boolean') && name === 'toString' && a.length === 1) return { c: this.plStr(a[0]), t: 'str' };
+      if (cls === 'String' && name === 'join' && a.length === 2) return { c: `(join(${this.plA(a[1])}, ${this.plStr(a[0])}) ?? "")`, t: 'str' };
+      if ((cls === 'ZonedDateTime' || cls === 'Instant' || cls === 'OffsetDateTime') && name === 'parse' && a.length === 1) {
+        this.approx('Painless : dates', 'Une date illisible fait échouer le script en Painless (le document part en on_failure) ; la traduction donne null et continue.');
+        const s = this.plTmp(a[0].c);
+        return this.plTmp(`if is_string(${s.c}) { parse_timestamp(string!(${s.c}), "%+") ?? null } else { null }`, 'ts');
+      }
+      if (cls === 'Instant' && (name === 'ofEpochMilli' || name === 'ofEpochSecond') && a.length === 1) {
+        this.approx('Painless : dates', 'Une date illisible fait échouer le script en Painless (le document part en on_failure) ; la traduction donne null et continue.');
+        return this.plTmp(`if is_integer(${a[0].c}) { from_unix_timestamp(int!(${a[0].c}), unit: "${name === 'ofEpochMilli' ? 'milliseconds' : 'seconds'}") ?? null } else { null }`, 'ts');
+      }
+      if (cls === 'Json' && name === 'dump' && a.length === 1) {
+        this.approx('Painless : Json.dump', 'encode_json écrit les clés dans l’ordre alphabétique ; Json.dump les écrit dans l’ordre du document. Le contenu est le même, pas le texte.');
+        return { c: `encode_json(${a[0].c})`, t: 'str' };
+      }
+      if (cls === 'Long' && name === 'decode' && a.length === 1) {
+        // Long.decode : 0x… ou #… en hexadécimal, 0… en octal, sinon décimal ; un texte illisible lève une exception en Painless, donne null ici
+        const x = this.plTmp(`replace(strip_whitespace(${this.plStr(a[0])}), r'^([+-]?)#', "${'${1}'}0x")`, 'str');
+        return this.plTmp(`if match(${x.c}, r'^[+-]?0[xX][0-9a-fA-F]+$') { parse_int(${x.c}) ?? null } else if match(${x.c}, r'^[+-]?0[0-7]+$') { parse_int(${x.c}, base: 8) ?? null } else if match(${x.c}, r'^[+-]?[0-9]+$') { parse_int(${x.c}, base: 10) ?? null } else { null }`);
+      }
+      if (cls === 'Integer' && (name === 'toOctalString' || name === 'toHexString' || name === 'toBinaryString') && a.length === 1) {
+        const x = this.plTmp(a[0].c);
+        return this.plTmp(`if is_integer(${x.c}) { format_int(int!(${x.c}), ${{ toOctalString: 8, toHexString: 16, toBinaryString: 2 }[name]}) ?? null } else { null }`, 'any');
+      }
       if (cls === 'Objects' && name === 'isNull') return { c: `(${a[0].c} == null)`, t: 'bool' };
       if (cls === 'Objects' && name === 'nonNull') return { c: `(${a[0].c} != null)`, t: 'bool' };
       throw new Error(`méthode ${cls}.${name} non prise en charge`);
@@ -1131,36 +1248,61 @@ Object.assign(IngestGen.prototype, {
       case 'equalsIgnoreCase': return { c: `(is_string(${r.c}) && is_string(${a[0].c}) && downcase(string!(${r.c})) == downcase(string!(${a[0].c})))`, t: 'bool' };
       case 'isEmpty': return { c: `((is_string(${r.c}) && string!(${r.c}) == "") || (is_array(${r.c}) && length(array!(${r.c})) == 0) || (is_object(${r.c}) && length(object!(${r.c})) == 0))`, t: 'bool' };
       case 'size': return ['list', 'map'].includes(r.t) ? { c: `length(${r.c})`, t: 'int' } : this.plTmp(`if is_array(${r.c}) { length(array!(${r.c})) } else if is_object(${r.c}) { length(object!(${r.c})) } else { null }`);
-      case 'length': return { c: r.t === 'str' ? `strlen(${r.c})` : `strlen(string(${r.c}) ?? "")`, t: 'int' };
-      case 'toLowerCase': return { c: `downcase(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`})`, t: 'str' };
-      case 'toUpperCase': return { c: `upcase(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`})`, t: 'str' };
-      case 'trim': return { c: `replace(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, r'^[\\x00-\\x20]+|[\\x00-\\x20]+$', "")`, t: 'str' };
+      case 'length': return { c: `strlen(${this.plS(r)})`, t: 'int' };
+      case 'toLowerCase': return { c: `downcase(${this.plS(r)})`, t: 'str' };
+      case 'toUpperCase': return { c: `upcase(${this.plS(r)})`, t: 'str' };
+      case 'trim': return { c: `replace(${this.plS(r)}, r'^[\\x00-\\x20]+|[\\x00-\\x20]+$', "")`, t: 'str' };
       case 'toString': return { c: str, t: 'str' };
-      case 'substring': return { c: `(slice(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${a.map(x => x.c).join(', ')}) ?? null)`, t: 'any' };
+      case 'toInstant': case 'toZonedDateTime': if (r.t === 'ts') return r; break;
+      case 'toEpochSecond': case 'toEpochMilli': {
+        const x = this.plTmp(r.c);
+        return this.plTmp(`if is_timestamp(${x.c}) { to_unix_timestamp(timestamp!(${x.c}), unit: "${name === 'toEpochMilli' ? 'milliseconds' : 'seconds'}") } else { null }`);
+      }
+      case 'remove': {
+        // def v = ctx.a.remove('b') : la valeur est lue puis le champ supprimé
+        if (a.length !== 1 || e.args[0].k !== 'str' || !(path || isRoot)) throw new Error('méthode « remove » non prise en charge');
+        const segs = (path ? path.segs : []).concat(e.args[0].v);
+        const v = this.plTmp(this.get(this.plRef(segs)));
+        this.emit(`del(${this.vpath(segs)})`);
+        return v;
+      }
+      case 'plusDays': case 'plusHours': case 'plusMinutes': case 'plusSeconds': case 'minusDays': case 'minusHours': case 'minusMinutes': case 'minusSeconds': {
+        const f = { Days: 86400, Hours: 3600, Minutes: 60, Seconds: 1 }[name.replace(/^(plus|minus)/, '')]; const sg = name.startsWith('minus') ? '-' : '+';
+        const x = this.plTmp(r.c); const n = this.plTmp(a[0].c);
+        return this.plTmp(`if is_timestamp(${x.c}) && is_integer(${n.c}) { from_unix_timestamp(to_unix_timestamp(timestamp!(${x.c})) ${sg} int!(${n.c}) * ${f}) ?? null } else { null }`, 'ts');
+      }
+      case 'isAfter': case 'isBefore': {
+        const x = this.plTmp(r.c); const y = this.plTmp(a[0].c);
+        return this.plTmp(`if is_timestamp(${x.c}) && is_timestamp(${y.c}) { to_unix_timestamp(timestamp!(${x.c}), unit: "nanoseconds") ${name === 'isAfter' ? '>' : '<'} to_unix_timestamp(timestamp!(${y.c}), unit: "nanoseconds") } else { false }`, 'bool');
+      }
+      case 'sha1': return { c: `sha1(${this.plStr(r)})`, t: 'str' };
+      case 'decodeBase64': return { c: `(decode_base64(${this.plStr(r)}) ?? null)`, t: 'any' };
+      case 'subList': return { c: `(slice(${this.plA(r)}, ${a[0].c}, ${a[1].c}) ?? [])`, t: 'list' };
+      case 'substring': return { c: `(slice(${this.plS(r)}, ${a.map(x => x.c).join(', ')}) ?? null)`, t: 'any' };
       // find() est typé « entier ou null » par VRL : int() rend la comparaison infaillible
-      case 'indexOf': return { c: `(int(find(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${this.plStr(a[0])})) ?? -1)`, t: 'int' };
-      case 'replace': return { c: `replace(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${this.plStr(a[0])}, ${this.plStr(a[1])})`, t: 'str' };
-      case 'split': env.regex = true; return { c: `split(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${a[0].t === 'str' && e.args[0].k === 'str' ? vraw(javaRe(e.args[0].v), 'r') : a[0].c})`, t: 'list' };
+      case 'indexOf': return { c: `(int(find(${this.plS(r)}, ${this.plStr(a[0])})) ?? -1)`, t: 'int' };
+      case 'replace': return { c: `replace(${this.plS(r)}, ${this.plStr(a[0])}, ${this.plStr(a[1])})`, t: 'str' };
+      case 'split': env.regex = true; return { c: `split(${this.plS(r)}, ${a[0].t === 'str' && e.args[0].k === 'str' ? vraw(javaRe(e.args[0].v), 'r') : a[0].c})`, t: 'list' };
       case 'get': return { c: `(get(${r.c}, [${a[0].c}]) ?? null)`, t: 'any' };
-      case 'keySet': return { c: r.t === 'map' ? `keys(${r.c})` : `keys(object(${r.c}) ?? {})`, t: 'list' };
-      case 'values': return { c: r.t === 'map' ? `values(${r.c})` : `values(object(${r.c}) ?? {})`, t: 'list' };
+      case 'keySet': return { c: `keys(${this.plO(r)})`, t: 'list' };
+      case 'values': return { c: `values(${this.plO(r)})`, t: 'list' };
       case 'containsKey': return { c: `(is_object(${r.c}) && includes(keys(object!(${r.c})), ${a[0].c}))`, t: 'bool' };
       case 'entrySet': {
         const v = this.tmp('p'); this.emit(`${v} = []`);
-        this.open(`for_each(${r.t === 'map' ? r.c : `(object(${r.c}) ?? {})`}) -> |_k, _v|`);
+        this.open(`for_each(${this.plO(r)}) -> |_k, _v|`);
         this.emit(`${v} = push(${v}, { "key": _k, "value": _v })`);
         this.close();
         return { c: v, t: 'list' };
       }
       case 'getKey': return { c: `(get(${r.c}, ["key"]) ?? null)`, t: 'any' };
       case 'getValue': return { c: `(get(${r.c}, ["value"]) ?? null)`, t: 'any' };
-      case 'splitOnToken': return { c: `split(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${this.plStr(a[0])})`, t: 'list' };
+      case 'splitOnToken': return { c: `split(${this.plS(r)}, ${this.plStr(a[0])})`, t: 'list' };
       case 'lastIndexOf': {
-        const sv = this.plTmp(r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`, 'str'); const xv = this.plTmp(this.plStr(a[0]), 'str');
+        const sv = this.plTmp(this.plS(r), 'str'); const xv = this.plTmp(this.plStr(a[0]), 'str');
         const parts = this.plTmp(`split(${sv.c}, ${xv.c})`, 'list');
         return this.plTmp(`if length(${parts.c}) > 1 { strlen(${sv.c}) - strlen(${xv.c}) - strlen(string(${parts.c}[-1]) ?? "") } else { -1 }`, 'any');
       }
-      case 'charAt': return { c: `(slice(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${a[0].c}, ${a[0].c} + 1) ?? null)`, t: 'any' };
+      case 'charAt': return { c: `(slice(${this.plS(r)}, ${a[0].c}, ${a[0].c} + 1) ?? null)`, t: 'any' };
       case 'intValue': case 'longValue': return { c: `(to_int(${r.c}) ?? null)`, t: 'any' };
       case 'getOrDefault': return this.plTmp(`if (get(${r.c}, [${a[0].c}]) ?? null) != null { get(${r.c}, [${a[0].c}]) ?? null } else { ${a[1].c} }`);
     }
@@ -1180,7 +1322,7 @@ Object.assign(IngestGen.prototype, {
     if (g.length && s.k !== 'nop') { this.open(`if ${g.join(' && ')}`); this.plStmtInner(s, env); this.close(); if (s.k === 'let') env.locals.set(s.name, 'any'); }
     else this.plStmtInner(s, env);
   },
-  plLoop(s, env, listCode, idx) {
+  plLoop(s, env, listCode, idx, guard) {
     env.loops = env.loops || [];
     const loop = { brk: this.tmp('brk'), cnt: this.tmp('cnt') };
     const prev = env.locals.get(s.name);
@@ -1189,7 +1331,7 @@ Object.assign(IngestGen.prototype, {
     this.open(`for_each(${listCode}) -> |${idx ? `p_${s.name}, _v` : `_i, p_${s.name}`}|`);
     this.emit(`${loop.cnt} = false`);
     env.loops.push(loop);
-    this.open(`if !${loop.brk}`);
+    this.open(`if !${loop.brk}${guard ? ` && ${guard}` : ''}`);
     this.plStmt(s.body, env);
     this.close();
     env.loops.pop();
@@ -1200,7 +1342,14 @@ Object.assign(IngestGen.prototype, {
     switch (s.k) {
       case 'nop': return;
       case 'block': return this.plStmts(s.body, env);
-      case 'let': { const v = s.v ? this.plExpr(s.v, env) : { c: 'null', t: 'null' }; env.locals.set(s.name, v.t === 'null' ? 'any' : v.t); this.emit(`p_${s.name} = ${v.c}`); return; }
+      case 'let': {
+        // Pattern.compile('…') ou /…/ : l’expression régulière est retenue, pas calculée
+        let sv = s.v;
+        if (sv && sv.k === 'mcall' && sv.name === 'compile' && sv.obj.k === 'id' && sv.obj.v === 'Pattern' && sv.args.length === 1 && sv.args[0].k === 'str') sv = { k: 're', v: sv.args[0].v };
+        if (sv && sv.k === 're') { (env.reLocals = env.reLocals || new Map()).set(s.name, sv); env.locals.set(s.name, 're'); return; }
+        if (sv && sv.k === 'sbnew') (env.sbs = env.sbs || new Set()).add(s.name);
+        if (sv && sv.k === 'list' && sv.set) (env.sets = env.sets || new Set()).add(s.name);
+        const v = s.v ? this.plExpr(s.v, env) : { c: 'null', t: 'null' }; env.locals.set(s.name, v.t === 'null' ? 'any' : v.t); this.emit(`p_${s.name} = ${v.c}`); return; }
       case 'set': return this.plAssign(s.target, this.plExpr(s.v, env), env);
       case 'if': {
         const c = this.plExpr(s.c, env);
@@ -1215,7 +1364,27 @@ Object.assign(IngestGen.prototype, {
       case 'for': case 'forIdx': {
         const l = this.plExpr(s.list, env);
         // Une table parcourue (map.values(), keySet()) l’est comme une liste ; un ctx.a qui n’est pas une liste : aucun tour
-        return this.plLoop(s, env, l.t === 'list' ? l.c : `array(${l.c}) ?? []`, s.k === 'forIdx');
+        if (s.k === 'forIdx') {
+          // for (int i = A; i < liste.length - K; i++) : les éléments d’indice A à longueur - K - 1 ; pour un texte, ses caractères
+          const chars = x => `filter(split(${x}, "")) -> |_i, _c| { _c != "" }`;
+          const src = l.t === 'list' ? this.plTmp(l.c, 'list').c
+            : l.t === 'str' ? this.plTmp(chars(l.c), 'list').c
+              : this.plTmp(`if is_string(${l.c}) { ${chars(`string!(${l.c})`)} } else if is_array(${l.c}) { array!(${l.c}) } else { [] }`, 'list').c;
+          const guards = [];
+          if (s.from > 0) guards.push(`p_${s.name} >= ${s.from}`);
+          if (s.trim > 0) guards.push(`p_${s.name} < length(${src}) - ${s.trim}`);
+          return this.plLoop(s, env, src, true, guards.join(' && '));
+        }
+        return this.plLoop(s, env, this.plA(l), false);
+      }
+      case 'throw': {
+        // throw : le script s’arrête et le processeur échoue avec le message de l’exception
+        if (!env.canFail || !s.v || s.v.k !== 'exc') throw new Error('throw non pris en charge ici');
+        const msg = s.v.args.length ? this.plStr(this.plExpr(s.v.args[0], env)) : '""';
+        this.emit(`fail = ${msg}`);
+        this.emit(`${env.retVar} = true`); env.retPossible = true;
+        for (const loop of env.loops || []) { this.emit(`${loop.brk} = true`); loop.brkPossible = true; }
+        return;
       }
       case 'try': {
         this.approx('Painless : try/catch', 'Le bloc try est traduit, pas le catch : là où Painless lèverait une exception (conversion impossible, valeur nulle), la traduction donne une valeur nulle et continue.');
@@ -1237,6 +1406,21 @@ Object.assign(IngestGen.prototype, {
       }
       case 'expr': {
         const e = s.e;
+        if (e.k === 'mcall' && ['append', 'insert', 'setLength', 'deleteCharAt', 'reverse'].includes(e.name)) {
+          const chain = []; let b = e;
+          while (b.k === 'mcall' && b.name === 'append' && b.args.length === 1) { chain.unshift(b.args[0]); b = b.obj; }
+          if (b.k === 'id' && env.sbs && env.sbs.has(b.v)) {
+            if (chain.length) { this.emit(`p_${b.v} = ${[`p_${b.v}`].concat(chain.map(x => this.plStr(this.plExpr(x, env)))).join(' + ')}`); return; }
+          }
+          if (e.obj.k === 'id' && env.sbs && env.sbs.has(e.obj.v)) {
+            const v = `p_${e.obj.v}`;
+            if (e.name === 'setLength' && e.args.length === 1 && e.args[0].k === 'num' && e.args[0].v === '0') { this.emit(`${v} = ""`); return; }
+            if (e.name === 'insert' && e.args.length === 2 && e.args[0].k === 'num' && e.args[0].v === '0') { this.emit(`${v} = ${this.plStr(this.plExpr(e.args[1], env))} + ${v}`); return; }
+            throw new Error(`StringBuilder.${e.name} non pris en charge`);
+          }
+        }
+        if (e.k === 'mcall' && e.name === 'forEach' && e.args.length === 1 && e.args[0].k === 'lambda') return this.plForEach(e, env);
+        if (e.k === 'mcall' && e.name === 'removeIf' && e.args.length === 1 && e.args[0].k === 'lambda') return this.plRemoveIf(e, env);
         if (e.k === 'mcall' && ['add', 'put', 'remove', 'addAll', 'clear', 'putAll'].includes(e.name)) return this.plMutate(e, env);
         if (env.cond && !env.res) { const v = this.plExpr(e, env); this.emit(`${env.cond} = ${v.c}`); return; }
         // Une expression sans effet (appel de méthode qui ne modifie rien) : évaluée pour rien en Painless
@@ -1244,6 +1428,49 @@ Object.assign(IngestGen.prototype, {
       }
     }
     throw new Error(`instruction « ${s.k} » non prise en charge`);
+  },
+  // obj.forEach(x -> …) sur une liste, obj.forEach((k, v) -> …) sur une table : boucle sur place
+  plForEach(e, env) {
+    const lam = e.args[0];
+    if (/"k":"(ret|break|continue)"/.test(JSON.stringify(lam.body))) throw new Error('lambda avec return, break ou continue non prise en charge');
+    if (lam.params.length > 2) throw new Error('lambda à plus de deux paramètres non prise en charge');
+    const o = this.plExpr(e.obj, env); const two = lam.params.length === 2;
+    const src = two ? (this.plO(o)) : (this.plA(o));
+    const prev = lam.params.map(n => env.locals.get(n));
+    lam.params.forEach((n, i) => env.locals.set(n, two && i === 0 ? 'str' : 'any'));
+    this.open(`for_each(${src}) -> |${two ? `p_${lam.params[0]}, p_${lam.params[1]}` : `_i, p_${lam.params[0]}`}|`);
+    this.plStmts(lam.body, env);
+    this.close();
+    lam.params.forEach((n, i) => { if (prev[i] === undefined) env.locals.delete(n); else env.locals.set(n, prev[i]); });
+  },
+  // liste.removeIf(x -> condition) : la liste est reconstruite sans les éléments qui vérifient la condition
+  plRemoveIf(e, env) {
+    const lam = e.args[0]; const b = lam.body;
+    const cond = lam.params.length === 1 && b.length === 1 ? (b[0].k === 'expr' ? b[0].e : b[0].k === 'ret' ? b[0].v : null) : null;
+    if (!cond) throw new Error('removeIf : seule une lambda à une condition est prise en charge');
+    if (e.obj.k === 'mcall' && e.obj.name === 'entrySet' && !e.obj.args.length) {
+      // table.entrySet().removeIf(e -> …) : la table est reconstruite sans les entrées qui vérifient la condition
+      const m = this.plExpr(e.obj.obj, env); const n = lam.params[0]; const out = this.tmp('p');
+      this.emit(`${out} = {}`);
+      const prev = env.locals.get(n); env.locals.set(n, 'any');
+      this.open(`for_each(${this.plO(m)}) -> |_k, _v|`);
+      this.emit(`p_${n} = { "key": _k, "value": _v }`);
+      const c = this.plExpr(cond, env);
+      this.emit(`if !${this.plBool(c)} { ${out} = set!(${out}, [_k], _v) }`);
+      this.close();
+      if (prev === undefined) env.locals.delete(n); else env.locals.set(n, prev);
+      this.plAssign(e.obj.obj, { c: out, t: 'map' }, env);
+      return;
+    }
+    const cur = this.plExpr(e.obj, env); const out = this.tmp('p'); const n = lam.params[0];
+    this.emit(`${out} = []`);
+    const prev = env.locals.get(n); env.locals.set(n, 'any');
+    this.open(`for_each(${this.plA(cur)}) -> |_i, p_${n}|`);
+    const c = this.plExpr(cond, env);
+    this.emit(`if !${this.plBool(c)} { ${out} = push(${out}, p_${n}) }`);
+    this.close();
+    if (prev === undefined) env.locals.delete(n); else env.locals.set(n, prev);
+    this.plAssign(e.obj, { c: out, t: 'list' }, env);
   },
   plAssign(target, v, env) {
     const path = this.plPath(target);
@@ -1254,6 +1481,16 @@ Object.assign(IngestGen.prototype, {
       if (!env.locals.has(target.v)) env.locals.set(target.v, v.t === 'null' ? 'any' : v.t);
       else if (env.locals.get(target.v) !== v.t) env.locals.set(target.v, 'any');
       this.emit(`p_${target.v} = ${v.c}`); return;
+    }
+    // ctx.a[clé] = v avec une clé calculée : chemin construit à l’exécution
+    {
+      let y = target; const parts = [];
+      while (y.k === 'member' || y.k === 'index') { parts.unshift(y.k === 'member' ? vq(y.name) : y.idx.k === 'num' && y.idx.int ? String(Number(y.idx.v)) : this.plStr(this.plExpr(y.idx, env))); y = y.obj; }
+      if (y.k === 'id' && y.v === 'ctx' && parts.length) {
+        if (INGEST_META.some(m => parts[0] === vq(m))) throw new Error('affectation à une métadonnée par une clé calculée non prise en charge');
+        env.unsafe = true;
+        this.emit(`. = set!(., [${parts.join(', ')}], ${v.c})`); return;
+      }
     }
     // Variable locale de type table ou liste : m.k = v, m['k'] = v, l[0] = v
     let x = target; const segs = [];
@@ -1266,7 +1503,37 @@ Object.assign(IngestGen.prototype, {
   plInline(e, env) {
     const fn = env.fns && env.fns.get(e.name);
     if (!fn) throw new Error(`fonction « ${e.name} » non prise en charge`);
-    if ((env.stack || []).includes(e.name)) throw new Error(`fonction « ${e.name} » récursive : non prise en charge`);
+    // Appel d’une fonction récursive depuis le script : on garde le plus grand nombre de niveaux dont la copie reste de taille raisonnable
+    if (!(env.stack || []).includes(e.name) && fn.rec === undefined) {
+      let sites = 0;
+      const walk = x => { if (Array.isArray(x)) x.forEach(walk); else if (x && typeof x === 'object') { if (x.k === 'call' && x.name === e.name) sites++; Object.values(x).forEach(walk); } };
+      walk(fn.body); fn.rec = sites;
+    }
+    if (fn.rec && !(env.stack || []).includes(e.name)) {
+      if (!env.canFail) throw new Error(`fonction « ${e.name} » récursive : non prise en charge hors d’un script de processeur`);
+      const start = this.lines.length; const ind = this.ind; const t0 = this.t.k;
+      for (let d = recursionLimit(fn, e.name); d >= 1; d--) {
+        fn.limit = d;
+        const r = this.plInline1(e, env);
+        if (this.lines.length - start <= INLINE_LINES || d === 1) { if (this.lines.length - start > INLINE_LINES) throw new Error(`fonction « ${e.name} » récursive : copie trop volumineuse`); return r; }
+        this.lines.length = start; this.ind = ind;
+      }
+    }
+    return this.plInline1(e, env);
+  },
+  plInline1(e, env) {
+    const fn = env.fns.get(e.name);
+    const inStack = (env.stack || []).filter(x => x === e.name).length;
+    let terminal = !!env.terminal; let limitGuard = null;
+    if (inStack > 0) {
+      // Appel récursif : la fonction est recopiée sur un nombre borné de niveaux ; au-delà, un conteneur (table ou liste) fait
+      // échouer le processeur, un texte ou un nombre passe par une dernière copie où tout nouvel appel récursif échoue.
+      if (!env.canFail) throw new Error(`fonction « ${e.name} » récursive : non prise en charge hors d’un script de processeur`);
+      const msg = `fonction ${e.name} : document plus profond que les ${fn.limit} niveaux traduits`;
+      if (terminal) { this.emit(`fail = ${vq(msg)}`); return { c: 'null', t: 'null' }; }
+      if (inStack >= fn.limit) { terminal = true; limitGuard = msg; }
+      this.approx('Painless : récursion bornée', `Une fonction récursive du script est recopiée sur un nombre borné de niveaux d’imbrication (une table ou une liste dans une autre). Au-delà, le processeur échoue au lieu de traiter le document : une donnée plus profonde est refusée, jamais traitée de travers.`);
+    }
     if (e.args.length !== fn.params.length) throw new Error(`fonction « ${e.name} » appelée avec ${e.args.length} argument(s) pour ${fn.params.length} attendu(s)`);
     const args = e.args.map(a => this.plExpr(a, env));
     const n = ++this.t.k; const names = new Set(fn.params);
@@ -1276,10 +1543,17 @@ Object.assign(IngestGen.prototype, {
       ? Object.fromEntries(Object.entries(x).map(([k, v]) => [k, (k === 'v' && x.k === 'id' && names.has(v)) || (k === 'name' && ['let', 'for', 'forIdx'].includes(x.k) && names.has(v)) ? `${v}_f${n}` : ren(v)]))
       : x;
     const body = ren(fn.body);
-    const env2 = { locals: new Map(), retVar: this.tmp('ret'), res: this.tmp('res'), fns: env.fns, stack: (env.stack || []).concat(e.name), loops: [], noMutate: new Set(fn.params.map(x => `${x}_f${n}`)) };
-    fn.params.forEach((x, i) => { env2.locals.set(`${x}_f${n}`, args[i].t === 'null' ? 'any' : args[i].t); this.emit(`p_${x}_f${n} = ${args[i].c}`); });
+    const env2 = { locals: new Map(), retVar: this.tmp('ret'), res: this.tmp('res'), fns: env.fns, stack: (env.stack || []).concat(e.name), loops: [], canFail: env.canFail, terminal, noMutate: new Set(fn.params.map(x => `${x}_f${n}`)) };
     this.emit(`${env2.res} = null`); this.emit(`${env2.retVar} = false`);
+    if (limitGuard) {
+      const subject = this.plTmp(args[0] ? args[0].c : 'null');
+      this.open(`if is_object(${subject.c}) || is_array(${subject.c})`);
+      this.emit(`fail = ${vq(limitGuard)}`);
+      this.close('} else {'); this.ind++;
+    }
+    fn.params.forEach((x, i) => { env2.locals.set(`${x}_f${n}`, args[i].t === 'null' ? 'any' : args[i].t); this.emit(`p_${x}_f${n} = ${args[i].c}`); });
     this.plStmts(body, env2);
+    if (limitGuard) this.close();
     if (env2.usesParams) env.usesParams = true;
     if (env2.unsafe) env.unsafe = true;
     return { c: env2.res, t: 'any' };
@@ -1294,15 +1568,15 @@ Object.assign(IngestGen.prototype, {
     const segs = path ? path.segs : [];
     const target = local || (isRoot ? '.' : this.vpath(segs));
     switch (e.name) {
-      case 'add': { if (isRoot) break; const cur = this.plTmp(local || this.get(this.plRef(segs))); const arr = this.tmp('p'); this.emit(`${arr} = if is_array(${cur.c}) { array!(${cur.c}) } else { [] }`); this.emit(`${target} = push(${arr}, ${a[0].c})`); return; }
-      case 'addAll': { if (isRoot) break; const cur = this.plTmp(local || this.get(this.plRef(segs))); const arr = this.tmp('p'); const add = this.tmp('p'); this.emit(`${arr} = if is_array(${cur.c}) { array!(${cur.c}) } else { [] }`); this.emit(`${add} = if is_array(${a[0].c}) { array!(${a[0].c}) } else { [] }`); this.emit(`${target} = append(${arr}, ${add})`); return; }
+      case 'add': { if (isRoot) break; const cur = this.plTmp(local || this.get(this.plRef(segs))); const arr = this.tmp('p'); this.emit(`${arr} = if is_array(${cur.c}) { array!(${cur.c}) } else { [] }`); this.emit(`${target} = ${local && env.sets && env.sets.has(e.obj.v) ? `if includes(${arr}, ${a[0].c}) { ${arr} } else { push(${arr}, ${a[0].c}) }` : `push(${arr}, ${a[0].c})`}`); return; }
+      case 'addAll': { if (isRoot) break; const cur = this.plTmp(local || this.get(this.plRef(segs))); const arr = this.tmp('p'); const add = this.tmp('p'); this.emit(`${arr} = if is_array(${cur.c}) { array!(${cur.c}) } else { [] }`); this.emit(`${add} = if is_array(${a[0].c}) { array!(${a[0].c}) } else { [] }`); this.emit(`${target} = ${local && env.sets && env.sets.has(e.obj.v) ? `unique(append(${arr}, ${add}))` : `append(${arr}, ${add})`}`); return; }
       case 'clear': if (isRoot) break; this.emit(`${target} = if is_array(${target}) { [] } else { {} }`); return;
       case 'put': {
         if (local) { this.emit(`${local} = set!(${local}, [${this.plStr(a[0])}], ${a[1].c})`); return; }
         if (e.args[0].k !== 'str') throw new Error('put avec une clé calculée non pris en charge');
         return this.set(this.plRef(segs.concat(e.args[0].v)), a[1].c);
       }
-      case 'putAll': if (local) { this.emit(`${local} = merge(${local}, object(${a[0].c}) ?? {})`); return; } this.emit(`${target} = merge(object(${this.get(this.plRef(segs))}) ?? {}, object(${a[0].c}) ?? {})`); return;
+      case 'putAll': if (local) { this.emit(`${local} = merge(${local}, ${this.plO(a[0])})`); return; } this.emit(`${target} = merge(object(${this.get(this.plRef(segs))}) ?? {}, object(${a[0].c}) ?? {})`); return;
       case 'remove': {
         if (local) { this.emit(`${local} = remove!(${local}, [${a[0].c}])`); return; }
         if (e.args[0].k !== 'str') throw new Error('remove avec une clé calculée non pris en charge');
@@ -1743,6 +2017,13 @@ Object.assign(IngestGen.prototype, {
   p_gsub(o, label) {
     if (o.pattern === undefined || o.replacement === undefined) return this.ko(label, 'options pattern et replacement obligatoires');
     const rep = javaReplacement(o.replacement);
+    // « (..)(?!$) » remplacé par « $1- » (adresse MAC) : l’anticipation signifie « sauf le dernier groupe ». On remplace tous
+    // les groupes de deux caractères, puis on retire le séparateur de queue quand le texte est de longueur paire.
+    const sep = o.pattern === '(..)(?!$)' && /^\$1[^$\\]*$/.test(String(o.replacement)) ? String(o.replacement).slice(2) : null;
+    if (sep) {
+      this.strProc(o, label, x => `if strlen(${x}) > 0 && mod(strlen(${x}), 2) == 0 { slice(replace(${x}, r'(..)', ${vq('${1}' + sep)}), 0, -${[...sep].length}) ?? "" } else { replace(${x}, r'(..)', ${vq('${1}' + sep)}) }`);
+      this.t.stats.ok++; return;
+    }
     this.strProc(o, label, x => `replace(${x}, ${vraw(javaRe(o.pattern), 'r')}, ${vq(rep)})`);
     this.t.stats.ok++;
   },
@@ -2119,7 +2400,7 @@ Object.assign(IngestGen.prototype, {
     if (typeof o.source !== 'string') return this.ko(label, 'option source absente');
     const idiom = ingestPruneIdiom(o.source);
     if (idiom && this.pruneIdiom(idiom, label)) { this.t.stats.ok++; return; }
-    const env = { locals: new Map(), retVar: this.tmp('ret') };
+    const env = { locals: new Map(), retVar: this.tmp('ret'), canFail: true };
     const start = this.lines.length; const ind = this.ind;
     try {
       const prog = ingPainless(o.source); env.fns = prog.fns;

@@ -1,0 +1,42 @@
+description: fonction récursive de script recopiée sur un nombre borné de niveaux ; au-delà, le processeur échoue
+processors:
+  - script:
+      lang: painless
+      source: |
+        String camelToSnake(String str) {
+          def result = "";
+          def last = false;
+          for (int i = 0; i < str.length(); i++) {
+            char c = str.charAt(i);
+            if (Character.isUpperCase(c)) {
+              if (i > 0 && !last) { result += "_"; }
+              result += Character.toLowerCase(c);
+              last = true;
+            } else {
+              result += c;
+              last = false;
+            }
+          }
+          return result;
+        }
+        def convertToSnakeCase(def obj) {
+          if (obj instanceof Map) {
+            def newObj = [:];
+            for (entry in obj.entrySet()) {
+              String newKey = camelToSnake(entry.getKey());
+              newObj[newKey] = convertToSnakeCase(entry.getValue());
+            }
+            return newObj;
+          } else if (obj instanceof List) {
+            def newList = [];
+            for (item in obj) {
+              newList.add(convertToSnakeCase(item));
+            }
+            return newList;
+          } else {
+            return obj;
+          }
+        }
+        if (ctx.donnees != null) {
+          ctx.donnees = convertToSnakeCase(ctx.donnees);
+        }

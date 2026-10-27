@@ -152,7 +152,7 @@ function vPathOf(segs, ns) {
   return '.' + segs.map(segName).join('.');
 }
 // Une expression régulière (r'…') reçoit les caractères de contrôle sous la forme \xNN : bruts, ils font refuser le YAML
-const vraw = (s, pre) => `${pre}'${String(s).replace(/\\'/g, "\\\\'").replace(/'/g, "\\'")}'`.replace(pre === 'r' ? /[\x00-\x1f\x7f]/g : /(?!)/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
+const vraw = (s, pre) => `${pre}'${String(s).replace(/\\'/g, "\\\\'").replace(/'/g, "\\'")}'`.replace(pre === 'r' || pre === 's' ? /[\x00-\x1f\x7f]/g : /(?!)/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
 /*
  * Expression régulière de Ruby (Onigmo, celle des conditions =~, de gsub et de prune) → moteur regex de VRL (Rust).
  * - ^ et $ valent pour chaque ligne en Ruby : (?m) leur donne ce sens en Rust ;

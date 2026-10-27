@@ -237,7 +237,9 @@ snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut
     const fn = E.translateIngest([{ name: 'f', text: JSON.stringify({ processors: [{ script: { source: src } }] }) }], E.DEFAULT_CONFIG);
     check(fn.pipelines[0].verdict !== 'todo' && /privee/.test(fn.yaml), 'ingest : les fonctions déclarées dans un script Painless sont recopiées sur place', JSON.stringify(fn.notes.filter(n => n.level === 'err').map(n => n.detail)));
     const rec = E.translateIngest([{ name: 'r', text: JSON.stringify({ processors: [{ script: { source: 'int f(int n) { return f(n); }\nctx.a = f(1);' } }] }) }], E.DEFAULT_CONFIG);
-    check(rec.pipelines[0].verdict === 'todo' && rec.notes.some(n => /récursive/.test(n.detail)), 'ingest : une fonction récursive est à reprendre avec sa raison');
+    check(rec.pipelines[0].verdict === 'review' && rec.notes.some(n => /récursion bornée/.test(n.title)), 'ingest : une fonction récursive est recopiée sur des niveaux bornés, à vérifier');
+    const recCond = E.translateIngest([{ name: 'r', text: JSON.stringify({ processors: [{ set: { field: 'a', value: 1, if: 'int f(int n) { return f(n); } f(1) == 1' } }] }) }], E.DEFAULT_CONFIG);
+    check(recCond.pipelines[0].verdict === 'todo' && recCond.notes.some(n => /récursive/.test(n.detail)), 'ingest : une fonction récursive dans une condition est à reprendre avec sa raison');
   }
   {
     // TLS des sources qui écoutent

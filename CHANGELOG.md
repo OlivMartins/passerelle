@@ -23,6 +23,19 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
 - **Interface** : deux nouvelles sections, « Ingestion » et « Autres sources » (Kibana, Grafana, schéma, analyseurs), avec dépôt de fichiers par type ; l’API et la ligne de commande y sont listées.
 - **CI** : le job `ingest` compile avec `vector validate` (0.59.0) le VRL de la traduction des exemples, des cas de `tests/ingest/cas/` et d’une sélection de data streams des intégrations Elastic, pour les sorties console et ClickHouse (`npm run test:ingest`). Le banc ClickHouse exécute aussi la chaîne complète des analyseurs, et le job `interface` ouvre la page assemblée dans Chromium (`npm run test:ui`) : chaque section traduit son exemple, sans erreur de page.
 
+- **Scripts Painless d’ingestion** : le traducteur reprend davantage de constructions, ce qui fait passer les data streams des intégrations Elastic « à reprendre » de 481 à 293 sur 1 154 (voir `tests/README.md`) :
+  - littéraux d’expression régulière `/…/` partout, `Pattern.compile`, `matcher(…).replaceAll`, `replaceFirst`, `matches`, `find` (`$1` de Java devient `${1}`) ;
+  - lambdas de `forEach` (liste ou table), `removeIf` (liste, `entrySet()`) ; affectation `ctx.a[clé] = v` à clé calculée ;
+  - `HashSet`/`LinkedHashSet` (sans doublons), `StringBuilder`, `subList`, `String.join`, `Integer.toString`, `Json.dump`, `Long.decode`, `Integer.toOctalString`/`toHexString`, `sha1()`, `decodeBase64()`, `Character.isUpperCase`, `isLowerCase`, `isDigit`, `toLowerCase`… ;
+  - `x++`, `--x`, boucles `for (int i = A; i < liste.size() - K; i++)` sur une liste ou sur les caractères d’un texte ;
+  - `x & masque` (masque constant), littéraux hexadécimaux ;
+  - dates : `ZonedDateTime.parse`, `Instant.parse`, `ofEpochMilli`, `toInstant`, `toEpochSecond`/`toEpochMilli`, `plusDays`… , `isAfter`/`isBefore`, `ChronoUnit.X.between` ;
+  - `throw` : le processeur échoue avec le message de l’exception ;
+  - `ctx.remove('champ')` en expression ;
+  - fonctions récursives : recopiées sur un nombre borné de niveaux (jusqu’à 7, moins si le code devient trop long), le processeur échoue au lieu de traiter de travers un document plus profond ; signalé « à vérifier » ;
+  - `gsub` de `(..)(?!$)` (adresses MAC), sans anticipation.
+- Un banc (`tests/ingest/painless.mjs`, job `ingest`) rejoue ces cas dans Vector et compare chaque champ à ce que Java donnerait.
+
 ### Sécurité
 
 - Release : les fichiers joints portent une attestation de provenance (`gh attestation verify <fichier> -R OlivMartins/passerelle`) ; un fichier déjà joint n’est plus remplacé en silence (`--clobber` retiré) ; le jeton en écriture n’est plus laissé dans le dépôt cloné pendant la construction.
@@ -31,6 +44,8 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
 ### Corrigé
 
 - Pipelines d’ingestion :
+  - Painless : le reste de la division (`%`) produisait un VRL invalide (VRL n’a pas cet opérateur) ; il utilise `mod()`.
+  - Painless : `for (int i = 0; i < texte.length(); i++)` parcourait un texte comme une liste vide ; il parcourt maintenant ses caractères.
   - `dot_expander` concaténait des tableaux avec `+`, que VRL refuse (E110) ; il utilise `append()`.
   - Un motif `gsub` qui contient des caractères de contrôle (`\u0000-\u001F`) s’écrit `\xNN` dans le VRL : bruts, ils faisaient refuser le YAML par Vector.
   - `keySet`, `values` et les boucles sur `params` ne portent plus de fusion d’erreur inutile (E651).

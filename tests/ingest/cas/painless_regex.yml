@@ -1,0 +1,84 @@
+description: littéral regex Painless avec Matcher (replaceAll avec $1, matches, find), division conservée
+processors:
+  - script:
+      lang: painless
+      source: |
+        String k = ctx.nom;
+        ctx.snake = /_?([a-z])([A-Z]+)/.matcher(k).replaceAll('$1_$2');
+        ctx.est_num = /[0-9]+/.matcher(ctx.num).matches();
+        ctx.a_num = /[0-9]+/.matcher(k).find();
+        ctx.moitie = ctx.total / 2;
+  - script:
+      lang: painless
+      source: |
+        def hm = new HashMap(ctx.cat);
+        hm.forEach((k, v) -> ctx.event[k] = v);
+        List l = ctx.items;
+        l.removeIf(x -> x == null || x == '');
+        ctx.items = l;
+        ctx.tags.forEach(t -> ctx.seen.add(t));
+  - script:
+      lang: painless
+      source: |
+        def regex = /_?([a-z])([A-Z]+)/;
+        String m = ctx.nom;
+        ctx.snake2 = regex.matcher(m).replaceAll('$1_$2').toLowerCase();
+        Set seen = new HashSet();
+        for (def t : ctx.tags) { seen.add(t); }
+        ctx.uniques = new ArrayList(seen);
+        StringBuilder sb = new StringBuilder();
+        sb.append(m).append('-').append(ctx.tags.size());
+        ctx.sb = sb.toString();
+        String res = '';
+        for (int i = 0; i < m.length(); i++) {
+          char c = m.charAt(i);
+          if (Character.isUpperCase(c)) { res += '_' + Character.toLowerCase(c); } else { res += c; }
+        }
+        ctx.res = res;
+        int n = 0;
+        n++;
+        ctx.n = n;
+        ctx.sous = ctx.tags.subList(1, ctx.tags.size());
+  - script:
+      lang: painless
+      if: ctx.debut != null && ctx.fin != null
+      source: |
+        Instant a = ZonedDateTime.parse(ctx.debut).toInstant();
+        Instant b = ZonedDateTime.parse(ctx.fin).toInstant();
+        ctx.duree = ChronoUnit.NANOS.between(a, b);
+        ctx.sec = ZonedDateTime.parse(ctx.debut).toEpochSecond();
+  - script:
+      lang: painless
+      source: |
+        def conf = ctx.remove('_conf');
+        ctx.conf_vu = conf;
+        ctx.bit = (ctx.flags & 4) != 0;
+        ctx.bas = ctx.flags & 0x7;
+        ctx.haut = (ctx.big & 0x0100000000000000L) != 0;
+        List p = ctx.tags;
+        for (int i = 1; i < p.size() - 1; ++i) { ctx.milieu = p[i]; }
+        ZonedDateTime d = ZonedDateTime.parse(ctx.debut);
+        ctx.plus = d.plusDays(2).toEpochSecond();
+        ctx.apres = d.isAfter(ZonedDateTime.parse(ctx.fin));
+  - gsub:
+      field: mac
+      pattern: '(..)(?!$)'
+      replacement: '$1-'
+  - script:
+      lang: painless
+      source: |
+        if (ctx.stop != null) {
+          throw new IllegalArgumentException('arrêt demandé : ' + ctx.stop);
+        }
+        ctx.apres_throw = true;
+  - script:
+      lang: painless
+      source: |
+        if (ctx.json.containsKey('workspace_id') && ctx.json.workspace_id == null) {
+          ctx.json.workspace_id = 'Default';
+        }
+        ctx.json.entrySet().removeIf(e -> e.getValue() == null);
+        ctx.hex = Long.decode(ctx.h);
+        ctx.oct = Integer.toOctalString(ctx.mode);
+        ctx.empreinte = ctx.h.sha1();
+        ctx.json_txt = Json.dump(ctx.json);

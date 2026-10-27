@@ -447,12 +447,16 @@ function ptokens(src) {
       }
       t.push({ t: 'str', v }); i = j + 1; continue;
     }
-    if (c === '/' && t.length && (t[t.length - 1].v === '=~' || t[t.length - 1].v === '==~')) {
+    // « / » ouvre une expression régulière après =~, un opérateur, « ( », « , », « = », « return » ou en tête ; ailleurs, c’est une division
+    const pv = t[t.length - 1];
+    if (c === '/' && (!pv || (pv.t === 'op' && ![')', ']', '}', '++', '--'].includes(pv.v)) || (pv.t === 'id' && pv.v === 'return'))) {
       let j = i + 1, v = '';
       while (j < n && src[j] !== '/') { if (src[j] === '\\' && src[j + 1] === '/') { v += '/'; j += 2; } else v += src[j++]; }
       j++; while (/[a-zA-Z]/.test(src[j] || '')) j++;
       t.push({ t: 're', v }); i = j; continue;
     }
+    const hx = /^0[xX]([0-9a-fA-F]+)[Ll]?/.exec(src.slice(i));
+    if (hx) { t.push({ t: 'num', v: BigInt('0x' + hx[1]).toString(), int: true }); i += hx[0].length; continue; }
     let m = /^(\d+\.\d+|\d+)([eE][+-]?\d+)?[LlFfDd]?/.exec(src.slice(i));
     // int : littéral entier (12, 12L), par opposition à 1.5, 1e3, 12f ou 12d ; la division en dépend
     if (m) { t.push({ t: 'num', v: m[0].replace(/[LlFfDd]$/, ''), int: !/[.eEFfDd]/.test(m[0]) }); i += m[0].length; continue; }

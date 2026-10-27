@@ -142,7 +142,12 @@ export ELASTIC_INTEGRATIONS=~/src/integrations                      # clone de g
 export MAXMIND_TEST_DATA=~/src/MaxMind-DB/test-data                 # bases GeoLite2-*-Test.mmdb
 node tests/ingest/integration.mjs packages/nginx/data_stream/access # tests de pipeline d’un data stream, champ par champ
 node tests/ingest/corpus.mjs                                        # tous les data streams : verdicts et causes
+VECTOR_BIN=vector node tests/ingest/painless.mjs                    # scripts Painless : documents rejoués, résultat attendu écrit à la main
 ```
+
+`painless.mjs` rejoue dans Vector les cas de `tests/ingest/cas/` (expressions régulières, lambdas, ensembles, dates, bits, `throw`, fonction récursive) et compare chaque champ à ce que Java donnerait. La CI le joue dans le job `ingest`.
+
+Couverture sur les 1 154 data streams des intégrations Elastic (clone épinglé de la CI), mesurée par `corpus.mjs` : **224 prêts, 635 à vérifier, 293 à reprendre**, 5 flux sans pipeline lisible. Avant l’extension du traducteur Painless : 224 prêts, 447 à vérifier, 481 à reprendre. Un flux « à vérifier » est traduit avec des écarts signalés (`corpus.mjs` en donne les causes) ; seul « prêt » promet des documents identiques.
 
 `PASSERELLE_INGEST_WORK` choisit le dossier de travail (par défaut, un dossier temporaire).
 
