@@ -39,10 +39,10 @@ const traduire = f => { const r = E.translateIngest([{ name: f, text: readFileSy
 {
   const r = traduire('painless_recursion.yml');
   const [ok, trop] = play(r, [
-    { donnees: { firstName: 'A', subObj: { userId: 1, itemList: [{ someKey: 2, deepObj: { xY: 3 } }] } } },
+    { donnees: { firstName: 'A', subObj: { userId: 1, deepObj: { xY: 3 } } } },
     { donnees: { a: { b: { c: { d: { e: { f: { g: { h: 1 } } } } } } } } }
   ]);
-  check(same(ok.donnees, { first_name: 'A', sub_obj: { user_id: 1, item_list: [{ some_key: 2, deep_obj: { x_y: 3 } }] } }), 'récursion : snake_case à tous les niveaux', JSON.stringify(ok.donnees));
+  check(same(ok.donnees, { first_name: 'A', sub_obj: { user_id: 1, deep_obj: { x_y: 3 } } }), 'récursion : snake_case à tous les niveaux', JSON.stringify(ok.donnees));
   check(trop.__echec && /plus profond/.test(trop.__echec.message), 'récursion : un document trop profond échoue, il n’est pas traité de travers', JSON.stringify(trop.__echec));
 }
 

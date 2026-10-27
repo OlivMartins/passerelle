@@ -2,7 +2,7 @@
 
 // VRL ne lit pas la notation 1e18 : le flottant est écrit en décimal
 // Plafond de niveaux recopiés en ligne pour une fonction récursive (la taille réelle du code produit le réduit : INLINE_LINES)
-const INLINE_LINES = 8000;
+const INLINE_LINES = 2500;
 function recursionLimit(fn, name) { return fn.rec <= 1 ? 12 : 7; }
 function vrlExp(lit) {
   const n = Number(lit);

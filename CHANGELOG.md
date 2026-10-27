@@ -32,7 +32,7 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
   - dates : `ZonedDateTime.parse`, `Instant.parse`, `ofEpochMilli`, `toInstant`, `toEpochSecond`/`toEpochMilli`, `plusDays`… , `isAfter`/`isBefore`, `ChronoUnit.X.between` ;
   - `throw` : le processeur échoue avec le message de l’exception ;
   - `ctx.remove('champ')` en expression ;
-  - fonctions récursives : recopiées sur un nombre borné de niveaux (jusqu’à 7, moins si le code devient trop long), le processeur échoue au lieu de traiter de travers un document plus profond ; signalé « à vérifier » ;
+  - fonctions récursives : recopiées sur un nombre borné de niveaux (en pratique 3 ou 4 tables ou listes imbriquées : au-delà, Vector consommerait plusieurs gigaoctets à compiler), le processeur échoue au lieu de traiter de travers un document plus profond ; signalé « à vérifier » ;
   - `gsub` de `(..)(?!$)` (adresses MAC), sans anticipation.
 - Un banc (`tests/ingest/painless.mjs`, job `ingest`) rejoue ces cas dans Vector et compare chaque champ à ce que Java donnerait.
 
