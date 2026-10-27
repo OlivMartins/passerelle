@@ -15,9 +15,11 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
 - **Sortie ClickHouse** : avec `vector.elasticsearch_output: clickhouse`, la sortie `elasticsearch` d’un pipeline Logstash devient un puits ClickHouse (table, colonnes inconnues ignorées signalées).
 - **Plusieurs pipelines** : `pipelines.yml` est lu (`passerelle ls2vector pipelines.yml`, `POST /v1/translate/logstash/pipelines`), les pipelines qui s’appellent entre eux sont reliés.
 - **Analyseurs personnalisés** (`passerelle schema analyzers`) : un analyseur Elasticsearch (char_filters, tokenizers, filtres) devient une colonne `MATERIALIZED` et un index plein texte ClickHouse, avec l’aperçu des termes produits et la requête de recherche correspondante. Voir [docs/ANALYSEURS.md](docs/ANALYSEURS.md).
+- Sortie ClickHouse : `clickhouse.sink_user` et `clickhouse.sink_password` donnent à Vector un compte d’écriture distinct du compte de validation (lecture seule) ; sans eux, le puits reprend `clickhouse.user` et la traduction le signale « à vérifier ».
+- API : `POST /v1/schema/ddl` et `POST /v1/schema/analyzers`, comme `passerelle schema ddl` et `schema analyzers`.
 - Filtres Logstash : `prune`, `de_dot`, `syslog_pri`, `clone`, `throttle`, `environment`, `bytes`.
 - **Interface** : deux nouvelles sections, « Ingestion » et « Autres sources » (Kibana, Grafana, schéma, analyseurs), avec dépôt de fichiers par type ; l’API et la ligne de commande y sont listées.
-- **CI** : le job `ingest` compile avec `vector validate` (0.59.0) le VRL de la traduction des exemples, des cas de `tests/ingest/cas/` et d’une sélection de data streams des intégrations Elastic, pour les sorties console et ClickHouse (`npm run test:ingest`). Le banc ClickHouse exécute aussi la chaîne complète des analyseurs.
+- **CI** : le job `ingest` compile avec `vector validate` (0.59.0) le VRL de la traduction des exemples, des cas de `tests/ingest/cas/` et d’une sélection de data streams des intégrations Elastic, pour les sorties console et ClickHouse (`npm run test:ingest`). Le banc ClickHouse exécute aussi la chaîne complète des analyseurs, et le job `interface` ouvre la page assemblée dans Chromium (`npm run test:ui`) : chaque section traduit son exemple, sans erreur de page.
 
 ### Sécurité
 

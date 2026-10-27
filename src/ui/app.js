@@ -365,6 +365,7 @@ const CFG_FORM = [
   { title: 'ClickHouse', intro: 'Utilisé pour résoudre les tables cibles, renommer les champs et générer les commandes de vérification.', fields: [
     ['clickhouse.endpoint', 'Endpoint HTTP(S)', 'text', 'Port 8443 en TLS, 8123 en clair.'], ['clickhouse.database', 'Base de données', 'text'],
     ['clickhouse.user', 'Utilisateur', 'text', 'Une variable ${…} est résolue au déploiement.'], ['clickhouse.password', 'Mot de passe', 'text', 'Jamais en clair : gardez ${CLICKHOUSE_PASSWORD}.'],
+    ['clickhouse.sink_user', 'Utilisateur d’écriture (sortie Vector)', 'text', 'Compte qui a INSERT, pour vector.elasticsearch_output: clickhouse. Vide : l’utilisateur ci-dessus.'], ['clickhouse.sink_password', 'Mot de passe d’écriture', 'text', 'Gardez ${CLICKHOUSE_SINK_PASSWORD}.'],
     ['clickhouse.default_table', 'Table par défaut', 'text'], ['clickhouse.cluster', 'Cluster (optionnel)', 'text', 'Pour cibler des tables Distributed.'],
     ['clickhouse.time_field', 'Colonne temporelle', 'text', 'Tri par défaut des documents.'], ['clickhouse.timezone', 'Fuseau du serveur', 'text', 'UTC si le serveur et les colonnes de date sont en UTC. Vide : le SQL précise « UTC » dans chaque calcul de date, comme le fait Elasticsearch.'],
     ['clickhouse.composite_mode', 'Agrégations composite', 'select', 'page : une requête par page, avec curseur. stream : une seule requête sans pagination, à lire en flux.', ['page', 'stream']],
@@ -433,6 +434,8 @@ function renderAPI() {
         ['POST', '/v1/translate/ingest?format=yaml', 'Traduit des pipelines d’ingestion Elasticsearch (YAML, JSON ou requête PUT _ingest/pipeline, ou { files }) en VRL, avec verdict par pipeline.'],
         ['POST', '/v1/inventory/kibana?format=json', 'Inventaire d’un export Kibana (.ndjson) : objets, requêtes traduites, verdict et effort par objet. Formats json, md, html, csv.'],
         ['POST', '/v1/translate/grafana?format=md', 'Convertit un tableau de bord Grafana de la source Elasticsearch au plugin ClickHouse. Sans format, renvoie le tableau converti et son rapport.'],
+        ['POST', '/v1/schema/ddl?preset=otel&format=sql', 'CREATE TABLE ClickHouse déduit d’un mapping ou d’un modèle d’index (ou { files }). Sans format, renvoie verdict, sql, profils par table et remarques.'],
+        ['POST', '/v1/schema/analyzers?text=…&field=…', 'Plan ClickHouse des analyseurs personnalisés d’un mapping : colonne de mots, index, requêtes, et aperçu des mots pour le texte donné. format=md pour le rapport.'],
         ['POST', '/v1/validate/sql', 'Vérifie les tables lues (EXPLAIN AST), puis exécute EXPLAIN indexes = 1 sur le ClickHouse de recette et renvoie le plan. Paramètres : param_nom=… dans l’adresse.'],
         ['POST', '/v1/validate/vector', 'Compile la configuration et son VRL avec vector validate.'],
         ['GET', '/v1/config', 'Configuration active, secrets masqués.']

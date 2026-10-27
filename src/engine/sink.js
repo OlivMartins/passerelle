@@ -144,7 +144,9 @@ function clickhouseOutput(v, cfg, index, label) {
     lines.push('%clickhouse.table = if length(parts) == 2 { parts[1] } else { parts[0] }');
     notes.push(['info', `${label} → table selon l’index`, `L’index est calculé pour chaque événement et confronté aux motifs de clickhouse.index_mapping (${tables.join(', ')}) ; sans correspondance, ${dflt}.`]);
   }
-  const user = String(ch.user || ''); const password = String(ch.password || '');
+  // Le puits écrit : il prend son propre compte quand il est donné, car clickhouse.user est celui de la validation (SELECT seul)
+  const dedicated = !!(ch.sink_user || ch.sink_password);
+  const user = String(dedicated ? ch.sink_user || '' : ch.user || ''); const password = String(dedicated ? ch.sink_password || '' : ch.password || '');
   [user, password].forEach(x => { const m = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(x); if (m) v.env.add(m[1]); });
   const fixed = tables.length === 1 ? chSplitTable(cfg, tables[0]) : null;
   const sink = {
@@ -156,6 +158,7 @@ function clickhouseOutput(v, cfg, index, label) {
   if (user || password) sink.auth = { strategy: 'basic', user, password };
   if (cfg.vector.acknowledgements) sink.acknowledgements = { enabled: true };
   if (!fixed) sink.dangerously_allow_unconfined_template_resolution = true;
+  if (!dedicated && (user || password)) notes.push(['warn', 'Compte d’écriture de la sortie ClickHouse', 'Le puits écrit avec clickhouse.user, qui sert aussi à la validation et n’a en principe que SELECT : donnez à Vector un compte qui a INSERT avec clickhouse.sink_user et clickhouse.sink_password.']);
   notes.push(['info', 'Sortie ClickHouse', `Les événements sont écrits en JSONEachRow dans ${tables.join(', ')} : champs inconnus de la table ignorés (skip_unknown_fields), dates lues au mieux (date_time_best_effort).`]);
   return { shape: lines.join('\n') + '\n', sink, tables, notes };
 }

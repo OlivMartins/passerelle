@@ -183,6 +183,21 @@ try {
   r = await request(prod, 'POST', '/v1/translate/ingest', { body: 'rien de lisible', headers: auth });
   check(r.status === 422 && r.json.verdict === 'unrecognized', 'ingest : texte illisible refusé', `statut ${r.status}`);
 
+  /* ---------- Schéma et analyseurs ---------- */
+  const mapping = rd('examples/schema/logs_app.txt'); const catalogue = rd('examples/analyseurs/catalogue.txt');
+  r = await request(prod, 'POST', '/v1/schema/ddl', { body: mapping, headers: auth });
+  check(r.status === 200 && /CREATE TABLE IF NOT EXISTS logs\.events/.test(r.json.sql) && r.json.tables.length >= 1 && ['ready', 'review'].includes(r.json.verdict), 'schéma : CREATE TABLE depuis un modèle d’index', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/ddl?format=sql', { body: JSON.stringify({ files: { modele: mapping } }), headers: auth });
+  check(r.status === 200 && /^-- Généré par Passerelle/.test(r.body) && /CREATE TABLE/.test(r.body), 'schéma : plusieurs documents ({ files }) et sortie SQL', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/ddl?preset=zzz', { body: mapping, headers: auth });
+  check(r.status === 422 && r.json.verdict === 'unrecognized', 'schéma : préréglage inconnu refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/ddl', { body: '{"files":3}', headers: auth });
+  check(r.status === 400, 'schéma : « files » mal formé refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/analyzers?text=' + encodeURIComponent('L’éléphant d’Été'), { body: catalogue, headers: auth });
+  check(r.status === 200 && r.json.plans.length >= 3 && r.json.plans.every(x => x.plan.verdict) && ['ready', 'review', 'todo'].includes(r.json.verdict), 'analyseurs : un plan par champ, avec verdict', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/analyzers?format=md&field=titre', { body: catalogue, headers: auth });
+  check(r.status === 200 && /^# Analyseurs personnalisés/.test(r.body), 'analyseurs : rapport Markdown, champ choisi', `statut ${r.status}`);
+
   /* ---------- Inventaire Kibana ---------- */
   const ndjson = rd('examples/kibana/supervision_web.ndjson');
   r = await request(prod, 'POST', '/v1/inventory/kibana', { body: ndjson, headers: auth });

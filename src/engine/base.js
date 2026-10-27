@@ -8,6 +8,9 @@ const DEFAULT_CONFIG = {
     database: 'logs',
     user: '${CLICKHOUSE_USER}',
     password: '${CLICKHOUSE_PASSWORD}',
+    // Compte d’écriture de la sortie Vector (vector.elasticsearch_output: clickhouse) ; vide : user et password
+    sink_user: '',
+    sink_password: '',
     cluster: '',
     default_table: 'logs.events',
     time_field: 'timestamp',

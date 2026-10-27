@@ -77,12 +77,22 @@ Une table par entrée de `index_mapping`. Aucun autre droit : sans `CREATE TEMPO
 
 ### Compte ClickHouse de la sortie Vector
 
-Avec `vector.elasticsearch_output: clickhouse`, la configuration Vector générée écrit dans les tables ClickHouse avec les identifiants de `clickhouse.user` et `clickhouse.password` de `passerelle.yaml`. Ce sont ceux du compte de validation ci-dessus, qui n’a que `SELECT` : les écritures y échoueraient. Deux façons de procéder :
+Avec `vector.elasticsearch_output: clickhouse`, la configuration Vector générée écrit dans les tables ClickHouse. Le compte de validation ci-dessus n’a que `SELECT` : donnez à Vector son propre compte, avec `INSERT` sur les tables de `index_mapping`.
 
-- utiliser pour la génération un fichier de configuration dédié, dont `clickhouse.user` désigne un compte d’écriture (`GRANT INSERT ON logs.events TO vector_ecriture;`), et garder le compte de lecture pour `passerelle serve` ;
-- ou ne pas accorder `INSERT` au compte de validation, et remplacer l’utilisateur dans la configuration Vector avant de la déployer.
+```yaml
+clickhouse:
+  user: ${CLICKHOUSE_USER}                    # lecture seule, pour la validation
+  password: ${CLICKHOUSE_PASSWORD}
+  sink_user: ${CLICKHOUSE_SINK_USER}          # écriture, pour Vector
+  sink_password: ${CLICKHOUSE_SINK_PASSWORD}
+```
 
-Dans les deux cas, les identifiants restent des références à des variables d’environnement (`${CLICKHOUSE_USER}`, `${CLICKHOUSE_PASSWORD}`), listées dans le résultat de la traduction.
+```sql
+CREATE USER vector_ecriture IDENTIFIED WITH sha256_password BY '…';
+GRANT INSERT ON logs.events TO vector_ecriture;
+```
+
+Sans `sink_user` ni `sink_password`, le puits reprend `clickhouse.user` et la traduction le signale « à vérifier ». Les deux restent des références à des variables d’environnement, listées dans le résultat de la traduction : Vector les lit au démarrage.
 
 ## Accès à l’interface
 
@@ -122,6 +132,8 @@ Toutes les routes `/v1/*` exigent l’en-tête `Authorization: Bearer <PASSERELL
 | POST | `/v1/translate/ingest?format=yaml` | Pipeline d’ingestion Elasticsearch (YAML, JSON ou requête `PUT _ingest/pipeline` de la console Kibana ; ou JSON `{ "files": { "nom": "contenu" } }`) vers Vector, VRL compris |
 | POST | `/v1/inventory/kibana?format=json` | Export d’objets sauvegardés Kibana (NDJSON) vers un inventaire (`json`, `md`, `html`, `csv`) ; `timezone=` fixe le fuseau des dates relatives |
 | POST | `/v1/translate/grafana?index=logs-*` | Tableau de bord Grafana (JSON) vers un rapport par panneau et le tableau réécrit (`format=md` pour le rapport seul) |
+| POST | `/v1/schema/ddl?preset=otel&format=sql` | Mapping, modèle d’index ou réponse d’API Elasticsearch (ou JSON `{ "files": { "nom": "contenu" } }`) vers le `CREATE TABLE` ClickHouse. `preset` (`otel`, `otel-json`), `compact`, `json`, `table` comme en ligne de commande ; sans `format=sql`, JSON avec verdict, profils par table et remarques |
+| POST | `/v1/schema/analyzers?text=…&field=…` | Plan ClickHouse des analyseurs personnalisés d’un mapping, avec l’aperçu des mots du texte donné ; `format=md` pour le rapport |
 | POST | `/v1/validate/sql?param_nom=…` | Tables vérifiées par `EXPLAIN AST`, puis `EXPLAIN indexes = 1` sur le ClickHouse configuré (SELECT seul, `readonly=1`). Les `param_*` renseignent les paramètres `{nom:Type}` |
 | POST | `/v1/validate/vector?format=yaml` | Compilation complète de la configuration et du VRL par `vector validate` |
 
@@ -133,7 +145,7 @@ curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
 
 Chaque traduction porte un `verdict` : `ready` (prête), `review` (à vérifier), `todo` (à reprendre : le SQL s’arrête sur `throwIf`). Une entrée que Passerelle refuse, comme Elasticsearch la refuserait, répond 422 avec `verdict: "unrecognized"`.
 
-Les corps de requête sont limités à 2 Mio, et à 32 Mio pour `/v1/inventory/kibana`, `/v1/translate/grafana`, `/v1/translate/ingest` et `/v1/translate/logstash/pipelines`. Au plus deux validations, Vector et SQL confondues, tournent en parallèle.
+Les corps de requête sont limités à 2 Mio, et à 32 Mio pour `/v1/inventory/kibana`, `/v1/translate/grafana`, `/v1/translate/ingest`, `/v1/translate/logstash/pipelines`, `/v1/schema/ddl` et `/v1/schema/analyzers`. Au plus deux validations, Vector et SQL confondues, tournent en parallèle.
 
 Un navigateur ne peut pas appeler l’API depuis un autre site : `/v1/*` refuse les requêtes intersites. Sans jeton, cas d’un `passerelle serve` lancé sur un poste, l’API ne répond qu’aux requêtes adressées à `localhost`, `127.0.0.1` ou `[::1]`.
 

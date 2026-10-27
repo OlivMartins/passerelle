@@ -159,6 +159,10 @@ Vector refuse la configuration entière si un seul VRL ne compile pas, quel que 
 
 La CI joue ce banc dans le job `ingest`, avec Vector 0.59.0 et des clones épinglés des intégrations Elastic et de MaxMind-DB.
 
+## Interface : `npm run test:ui`
+
+Ouvre `dist/passerelle.html` dans Chromium avec Playwright : les sections requête, Logstash, ingestion et « Autres sources » (Kibana, Grafana, schéma, analyseurs) traduisent leur exemple et affichent un verdict, leurs onglets s’ouvrent, et la page ne produit aucune erreur. Playwright n’est pas une dépendance du projet : `npm run build:ui`, puis `npm install --no-save playwright` et `npx playwright install chromium` (ou `PLAYWRIGHT_FROM=<dossier où playwright se résout>`). La CI joue ce test dans le job `interface`.
+
 ## Bancs ClickHouse : `npm run test:attributes` et `npm run test:clickhouse`
 
 Sans Elasticsearch, avec le binaire `clickhouse local` (`CLICKHOUSE_LOCAL`, extrait par `tests/differential/clickhouse.sh`).

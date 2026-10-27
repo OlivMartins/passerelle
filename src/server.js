@@ -54,7 +54,7 @@ const ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 function expand(s) { return String(s || '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, v) => process.env[v] || ''); }
 function configWarnings(cfg) {
   const w = [];
-  for (const [sec, key] of [['clickhouse', 'password'], ['kafka', 'password']]) {
+  for (const [sec, key] of [['clickhouse', 'password'], ['clickhouse', 'sink_password'], ['kafka', 'password']]) {
     const v = cfg[sec][key];
     if (v && !ENV_REF.test(v)) w.push(`${sec}.${key} est écrit en clair : remplacez-le par une référence \${VARIABLE} définie dans le fichier d’environnement.`);
   }
@@ -65,6 +65,7 @@ function configWarnings(cfg) {
 function publicConfig(cfg) {
   const c = clone(cfg);
   if (c.clickhouse.password && !ENV_REF.test(c.clickhouse.password)) c.clickhouse.password = '${CLICKHOUSE_PASSWORD}';
+  if (c.clickhouse.sink_password && !ENV_REF.test(c.clickhouse.sink_password)) c.clickhouse.sink_password = '${CLICKHOUSE_SINK_PASSWORD}';
   if (c.kafka.password && !ENV_REF.test(c.kafka.password)) c.kafka.password = '${KAFKA_PASSWORD}';
   return c;
 }
@@ -286,7 +287,7 @@ function serve(opts) {
       if (req.method === 'GET' && url.pathname === '/v1/config') return json(res, 200, publicConfig(cfg));
       if (req.method !== 'POST') return json(res, 405, { error: 'méthode non autorisée' });
       // Un export Kibana complet ou un gros tableau de bord dépassent vite 2 Mio : leurs routes acceptent davantage
-      const body = await readBody(req, url.pathname === '/v1/inventory/kibana' || url.pathname === '/v1/translate/grafana' || url.pathname === '/v1/translate/ingest' || url.pathname === '/v1/translate/logstash/pipelines' ? INVENTORY_LIMIT : LIMIT);
+      const body = await readBody(req, url.pathname === '/v1/inventory/kibana' || url.pathname === '/v1/translate/grafana' || url.pathname === '/v1/translate/ingest' || url.pathname === '/v1/translate/logstash/pipelines' || url.pathname === '/v1/schema/ddl' || url.pathname === '/v1/schema/analyzers' ? INVENTORY_LIMIT : LIMIT);
       switch (url.pathname) {
         case '/v1/translate/dsl': {
           const r = translateDSL(body, cfg, { index: url.searchParams.get('index') || '' });
@@ -347,6 +348,29 @@ function serve(opts) {
           if (r.empty) return json(res, 422, { error: 'aucune requête Elasticsearch dans ce tableau de bord', verdict: 'unrecognized' });
           if (url.searchParams.get('format') === 'md') return send(res, 200, grafanaReportMarkdown(r), { 'content-type': 'text/markdown; charset=utf-8' });
           return json(res, 200, { verdict: r.verdict, summary: r.summary, report: r.report, dashboard: r.dashboard });
+        }
+        case '/v1/schema/ddl': {
+          // Corps : un mapping, un modèle d'index ou une réponse d'API (texte ou JSON), ou JSON { "files": { "nom": "contenu" } }
+          const sp = url.searchParams;
+          const fmt = sp.get('format') === 'sql' ? 'sql' : 'json';
+          const blocks = schemaBlocks(body);
+          if (!blocks) return json(res, 400, { error: '« files » attend un objet { nom: contenu }' });
+          const r = schemaFromDocuments(blocks, cfg, { preset: sp.get('preset') || undefined, compact: sp.get('compact') === 'true', json: sp.get('json') === 'true', table: sp.get('table') || undefined });
+          if (r.empty) return json(res, 400, { error: 'aucun mapping lisible', verdict: 'unrecognized' });
+          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized' });
+          if (fmt === 'sql') return send(res, 200, `-- Généré par Passerelle ${VERSION} — verdict : ${VERDICTS[verdictOf(r)]}\n\n${r.sql}`, { 'content-type': 'text/plain; charset=utf-8' });
+          return json(res, 200, { verdict: verdictOf(r), sql: r.sql, profiles: r.yaml, tables: r.tables.map(t => ({ table: t.table, error: t.error || null })), notes: r.notes, coverage: coverage(r.stats), summary: r.sentence });
+        }
+        case '/v1/schema/analyzers': {
+          const sp = url.searchParams;
+          const blocks = schemaBlocks(body);
+          if (!blocks) return json(res, 400, { error: '« files » attend un objet { nom: contenu }' });
+          const r = schemaFromDocuments(blocks, cfg, {});
+          if (r.empty) return json(res, 400, { error: 'aucun mapping lisible', verdict: 'unrecognized' });
+          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized' });
+          const rep = anReport(r.tables, sp.get('text') || undefined, sp.get('field') || undefined);
+          if (sp.get('format') === 'md') return send(res, 200, rep.markdown, { 'content-type': 'text/markdown; charset=utf-8' });
+          return json(res, 200, { verdict: rep.verdict, plans: rep.plans });
         }
         case '/v1/validate/vector': return json(res, 200, await limited(() => validateVector(body, url.searchParams.get('format') || 'yaml')));
         case '/v1/validate/sql': return json(res, 200, await limited(() => validateSQL(cfg, body, url.searchParams)));
@@ -619,6 +643,16 @@ function schemaAnalyzers(o) {
   } else process.stdout.write(body);
   for (const p of rep.plans) process.stderr.write(`${p.plan.verdict === 'todo' ? '✗' : p.plan.verdict === 'review' ? '≈' : '✓'} ${p.plan.table} · ${p.plan.field} (${p.plan.name}) : ${VERDICTS[p.plan.verdict]}\n`);
   if (o['fail-on'] && VERDICT_RANK[rep.verdict] >= VERDICT_RANK[o['fail-on']]) process.exit(2);
+}
+// Corps d'une route schema : un seul document, ou { "files": { nom: contenu } } ; null si « files » est mal formé
+function schemaBlocks(body) {
+  let j = null;
+  if (/^\s*\{/.test(body)) { try { j = JSON.parse(body); } catch (e) { j = null; } }
+  if (j && Object.prototype.hasOwnProperty.call(j, 'files')) {
+    if (typeof j.files !== 'object' || j.files === null || Array.isArray(j.files) || Object.values(j.files).some(x => typeof x !== 'string')) return null;
+    return Object.values(j.files).map(x => x.trim());
+  }
+  return [body.trim()];
 }
 // Plusieurs fichiers JSON (réponses d’API) : chacun est lu pour lui-même, puis tous sont traduits ensemble
 function schemaFromDocuments(blocks, cfg, opts) {

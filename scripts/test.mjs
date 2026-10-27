@@ -222,6 +222,11 @@ snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut
     const ls = E.translateLogstash('input { kafka { topics => ["a"] } }\noutput { elasticsearch { hosts => ["http://es:9200"] index => "app-events" action => "create" } }', c2, {});
     check(ls.config.sinks.elasticsearch_out && ls.config.sinks.elasticsearch_out.type === 'clickhouse' && ls.config.sinks.elasticsearch_out.table === 'app' && ls.config.transforms.elasticsearch_out_lignes, 'F10 : une sortie elasticsearch devient un sink clickhouse précédé de sa mise en forme');
     check(ls.notes.some(n => n.level === 'warn' && /action/.test(n.title)), 'F10 : une option sans équivalent (action) est signalée');
+    const sk = ls.config.sinks.elasticsearch_out;
+    check(sk.auth.user === '${CLICKHOUSE_USER}' && ls.notes.some(n => n.level === 'warn' && /Compte d’écriture/.test(n.title)), 'F10 : sans compte dédié, le puits prend clickhouse.user et le signale');
+    const c3 = JSON.parse(JSON.stringify(c2)); c3.clickhouse.sink_user = '${CLICKHOUSE_SINK_USER}'; c3.clickhouse.sink_password = '${CLICKHOUSE_SINK_PASSWORD}';
+    const ls3 = E.translateLogstash('input { kafka { topics => ["a"] } }\noutput { elasticsearch { hosts => ["http://es:9200"] index => "app-events" } }', c3, {});
+    check(ls3.config.sinks.elasticsearch_out.auth.user === '${CLICKHOUSE_SINK_USER}' && ls3.env.includes('CLICKHOUSE_SINK_PASSWORD') && !ls3.env.includes('CLICKHOUSE_USER') && !ls3.notes.some(n => /Compte d’écriture/.test(n.title)), 'F10 : le compte d’écriture dédié remplace clickhouse.user, sans avertissement');
     const dyn = E.translateLogstash('input { kafka { topics => ["a"] } }\noutput { elasticsearch { hosts => ["http://es:9200"] index => "%{idx}-%{+YYYY.MM.dd}" } }', c2, {});
     check(/%clickhouse\.table/.test(dyn.yaml) && dyn.config.sinks.elasticsearch_out.dangerously_allow_unconfined_template_resolution === true, 'F10 : un index calculé choisit la table pour chaque événement');
     const ig = E.translateIngest([{ name: 'p', text: JSON.stringify({ processors: [{ set: { field: 'a', value: 1 } }] }) }], c2);

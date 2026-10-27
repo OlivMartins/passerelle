@@ -117,6 +117,25 @@ jobs:
       - name: Compiler le VRL (sortie ClickHouse)
         run: node tests/ingest/valider.mjs --clickhouse
 
+  # L'interface ouverte dans un vrai navigateur : chaque section traduit son exemple, sans erreur de page
+  interface:
+    name: Interface dans Chromium
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - run: npm ci
+      - run: npm run build:ui
+      - name: Installer Playwright et Chromium
+        run: |
+          npm install --no-save --no-package-lock playwright@1.63.0
+          npx playwright install --with-deps chromium
+      - run: npm run test:ui
+
   pipelines:
     name: Banc d'équivalence Logstash / Vector
     runs-on: ubuntu-latest
