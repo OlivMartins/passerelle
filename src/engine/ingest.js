@@ -1123,7 +1123,7 @@ Object.assign(IngestGen.prototype, {
       case 'containsKey': return { c: `(is_object(${r.c}) && includes(keys(object!(${r.c})), ${a[0].c}))`, t: 'bool' };
       case 'entrySet': {
         const v = this.tmp('p'); this.emit(`${v} = []`);
-        this.open(`for_each(object(${r.c}) ?? {}) -> |_k, _v|`);
+        this.open(`for_each(${r.t === 'map' ? r.c : `(object(${r.c}) ?? {})`}) -> |_k, _v|`);
         this.emit(`${v} = push(${v}, { "key": _k, "value": _v })`);
         this.close();
         return { c: v, t: 'list' };

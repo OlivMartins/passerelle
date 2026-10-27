@@ -1,0 +1,7 @@
+# Un motif qui décode en caractères de contrôle (NUL, DEL) : brut dans le YAML généré, Vector refusait le fichier
+description: caractères de contrôle dans un motif gsub
+processors:
+  - gsub:
+      field: message
+      pattern: "[\u0000-\u001F\u007F]"
+      replacement: ""

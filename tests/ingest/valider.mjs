@@ -34,7 +34,13 @@ for (const d of ['examples/ingest', 'tests/ingest/cas']) {
 if (INTEGRATIONS) {
   const listed = existsSync(join(ROOT, 'tests/ingest/integrations.txt')) ? readFileSync(join(ROOT, 'tests/ingest/integrations.txt'), 'utf8').split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#')) : [];
   const re = only ? new RegExp(only) : null;
-  for (const ds of listed) {
+  // Avec --only, tous les data streams des intégrations sont candidats, pas seulement la sélection de la CI
+  const all = [];
+  if (re) for (const pkg of readdirSync(join(INTEGRATIONS, 'packages')).sort()) {
+    const dsd = join(INTEGRATIONS, 'packages', pkg, 'data_stream');
+    if (existsSync(dsd)) for (const ds of readdirSync(dsd).sort()) all.push(`${pkg}/${ds}`);
+  }
+  for (const ds of re ? all : listed) {
     if (re && !re.test(ds)) continue;
     const pd = join(INTEGRATIONS, 'packages', ds.split('/')[0], 'data_stream', ds.split('/')[1], 'elasticsearch', 'ingest_pipeline');
     if (!existsSync(pd)) { console.log(`✗ ${ds} — introuvable dans ELASTIC_INTEGRATIONS`); process.exitCode = 1; continue; }
