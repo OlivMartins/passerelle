@@ -38,10 +38,12 @@ function anChain(spec) {
   if (typeof spec === 'string') spec = { name: spec, type: spec };
   const defs = spec.definitions || {};
   const type = spec.type || 'custom';
+  // name : libellé du composant dans les aperçus ; name_param : le paramètre « name » écrit dans sa définition (alias de language pour un stemmer) ;
+  // builtin : composant prédéfini appelé par son nom, sans définition (son comportement par défaut diffère d’un composant défini)
   const comp = (kind, ref) => {
-    if (ref && typeof ref === 'object') return Object.assign({ name: ref.type }, ref);
+    if (ref && typeof ref === 'object') return Object.assign({}, ref, { name: ref.type, name_param: ref.name });
     const d = defs[kind] && defs[kind][ref];
-    return d ? Object.assign({ name: String(ref) }, d) : { type: String(ref), name: String(ref) };
+    return d ? Object.assign({}, d, { name: String(ref), name_param: d.name }) : { type: String(ref), name: String(ref), builtin: true };
   };
   let chars = []; let tokenizer; let filters = [];
   const stop = () => {
@@ -68,6 +70,31 @@ function anChain(spec) {
     default: throw new Error(`analyseur prédéfini « ${type} » : non pris en charge (langues, fingerprint…)`);
   }
   return { chars, tokenizer, filters };
+}
+
+// Articles d’un filtre elision. Appelé par son nom, il retire les articles français sans tenir compte de la casse ; défini dans
+// les réglages, il exige articles (ou articles_path) et ne distingue majuscules et minuscules que si articles_case vaut true.
+function anElision(f) {
+  if (f.articles_path) throw new Error('filtre elision : articles_path (fichier) non lu');
+  if (f.articles === undefined) {
+    if (!f.builtin) throw new Error('filtre elision : Elasticsearch refuse un filtre défini sans articles ni articles_path');
+    return { arts: AN_ELISION, ic: true };
+  }
+  return { arts: anList(f.articles).map(String), ic: f.articles_case === true || f.articles_case === 'true' };
+}
+
+// Synonymes de mots simples ramenés à un terme canonique : { from, to } (listes de même longueur). Les règles « a => b, c »
+// (un mot qui devient plusieurs) ne s’y ramènent pas.
+function anSynonymMap(f) {
+  if (f.synonyms_path || f.synonyms_set) throw new Error('fichier ou ensemble de synonymes non lu');
+  const rules = anList(f.synonyms).map(String);
+  if (rules.some(r => r.split(/=>|,/).some(z => /\s/.test(z.trim())))) throw new Error('synonyme de plusieurs mots non traduit');
+  const from = []; const to = [];
+  for (const r of rules) {
+    if (r.includes('=>')) { const [l, rt] = r.split('=>'); const outs = rt.split(',').map(z => z.trim()); if (outs.length > 1) throw new Error('règle « a => b, c » non traduite (un mot devient plusieurs)'); l.split(',').map(z => z.trim()).forEach(k => { from.push(k); to.push(outs[0]); }); }
+    else { const g = r.split(',').map(z => z.trim()).filter(Boolean); g.slice(1).forEach(k => { from.push(k); to.push(g[0]); }); }
+  }
+  return { from, to };
 }
 
 /* ---------- Aperçu : ce qu’Elasticsearch produirait ---------- */
@@ -170,7 +197,7 @@ function anTokenize(tk, text, notes) {
   throw new Error(`tokenizer « ${T} » non pris en charge`);
 }
 
-function anFilter(f, tokens, notes) {
+function anFilter(f, tokens, notes, canonical) {
   const T = f.type; const map = fn => tokens.map(x => Object.assign({}, x, { t: fn(x.t) }));
   switch (T) {
     case 'lowercase': if (f.language && !/^(english|)$/i.test(f.language)) throw new Error('filtre lowercase : langue spécifique non reproduite'); return map(anLower);
@@ -210,12 +237,13 @@ function anFilter(f, tokens, notes) {
       return map(s => s.replace(re2, anRepl(f.replacement)));
     }
     case 'elision': {
-      const arts = f.articles !== undefined ? anList(f.articles).map(String) : AN_ELISION;
-      const ic = f.articles_case === true || f.articles_case === 'true';
-      const re = new RegExp(`^(?:${arts.map(escRe).join('|')})['’]`, ic ? 'u' : 'iu');
+      const el = anElision(f);
+      const re = new RegExp(`^(?:${el.arts.map(escRe).join('|')})['’]`, el.ic ? 'iu' : 'u');
       return map(s => s.replace(re, ''));
     }
     case 'synonym': case 'synonym_graph': {
+      // Mots tels que la colonne du plan les stocke : chaque synonyme remplacé par son terme canonique
+      if (canonical) { const m = anSynonymMap(f); return map(t => { const k = m.from.indexOf(t); return k < 0 ? t : m.to[k]; }); }
       const rules = anList(f.synonyms);
       if (f.synonyms_path || f.synonyms_set) throw new Error('filtre synonym : fichier ou ensemble de synonymes non lu');
       if (f.expand === false || f.expand === 'false') { /* règles « a, b » : tout devient le premier terme */ }
@@ -262,7 +290,7 @@ function anCharFilter(c, text, notes) {
  * Aperçu : { tokens: [{ t, pos }], stages: [{ stage, text|tokens }], notes, error }. Sur un composant que l’on ne
  * reproduit pas, error dit lequel : aucun mot n’est inventé.
  */
-function anAnalyze(spec, text) {
+function anAnalyze(spec, text, canonical) {
   const notes = []; const stages = [];
   try {
     const ch = anChain(spec);
@@ -270,7 +298,7 @@ function anAnalyze(spec, text) {
     for (const c of ch.chars) { s = anCharFilter(c, s, notes); stages.push({ stage: `char_filter ${c.name}`, text: s }); }
     let tokens = anTokenize(ch.tokenizer, s, notes);
     stages.push({ stage: `tokenizer ${ch.tokenizer.name}`, tokens: tokens.map(x => x.t) });
-    for (const f of ch.filters) { tokens = anFilter(f, tokens, notes); stages.push({ stage: `filtre ${f.name}`, tokens: tokens.map(x => x.t) }); }
+    for (const f of ch.filters) { tokens = anFilter(f, tokens, notes, canonical); stages.push({ stage: `filtre ${f.name}`, tokens: tokens.map(x => x.t) }); }
     return { tokens, stages, notes: [...new Set(notes)] };
   } catch (e) { return { tokens: null, stages, notes: [...new Set(notes)], error: e.message }; }
 }
@@ -398,29 +426,23 @@ function anPlan(spec, col) {
           map(`${all ? 'replaceRegexpAll' : 'replaceRegexpOne'}(t, ${chStr(re)}, ${chStr(anSqlRepl(f.replacement))})`); step(`filtre ${f.name}`, !f.flags, f.flags ? 'drapeaux non repris' : null); break;
         }
         case 'elision': {
-          const arts = f.articles !== undefined ? anList(f.articles).map(String) : AN_ELISION;
-          map(`replaceRegexpOne(t, ${chStr(`^(?i:${arts.map(escRe).join('|')})['’]`)}, '')`); step(`filtre ${f.name}`, !(f.articles_case === true), f.articles_case === true ? 'articles_case non repris' : null); break;
+          const el = anElision(f);
+          map(`replaceRegexpOne(t, ${chStr(`^${el.ic ? '(?i:' : '(?:'}${el.arts.map(escRe).join('|')})['’]`)}, '')`); step(`filtre ${f.name}`, true); break;
         }
         case 'synonym': case 'synonym_graph': {
-          if (f.synonyms_path || f.synonyms_set) throw new Error('fichier ou ensemble de synonymes non lu');
-          const rules = anList(f.synonyms).map(String);
-          if (rules.some(r => r.split(/=>|,/).some(z => /\s/.test(z.trim())))) throw new Error('synonyme de plusieurs mots non traduit');
           // Les deux côtés (index et recherche) ramenés à un terme canonique : mêmes correspondances qu’avec les synonymes d’Elasticsearch, pour des mots simples
-          const from = []; const to = [];
-          for (const r of rules) {
-            if (r.includes('=>')) { const [l, rt] = r.split('=>'); const outs = rt.split(',').map(z => z.trim()); if (outs.length > 1) throw new Error('règle « a => b, c » non traduite (un mot devient plusieurs)'); l.split(',').map(z => z.trim()).forEach(k => { from.push(k); to.push(outs[0]); }); }
-            else { const g = r.split(',').map(z => z.trim()).filter(Boolean); g.slice(1).forEach(k => { from.push(k); to.push(g[0]); }); }
-          }
+          const { from, to } = anSynonymMap(f);
           if (from.length) map(`transform(t, [${from.map(chStr).join(', ')}], [${to.map(chStr).join(', ')}], t)`);
           step(`filtre ${f.name}`, false, 'les mots sont ramenés à un terme canonique, à l’indexation comme à la recherche : mêmes résultats, mais les mots indexés ne sont pas ceux d’Elasticsearch');
           break;
         }
         case 'stemmer': case 'snowball': case 'porter_stem': {
-          const lang = String(f.type === 'porter_stem' ? 'porter' : (f.language || f.name_ || 'english')).toLowerCase();
+          // Elasticsearch lit language, ou son ancien nom name ; sans l’un ni l’autre, le stemmer est Porter. Un snowball lit language (english par défaut).
+          const lang = String(f.type === 'porter_stem' ? 'porter' : (f.language !== undefined ? f.language : f.name_param !== undefined && f.type === 'stemmer' ? f.name_param : f.type === 'snowball' ? 'english' : 'porter')).toLowerCase();
           const L = { english: 'en', porter: 'en', porter2: 'en', french: 'fr', german: 'de', spanish: 'es', italian: 'it', portuguese: 'pt', dutch: 'nl', swedish: 'sv', norwegian: 'no', danish: 'da', finnish: 'fi', russian: 'ru', romanian: 'ro', turkish: 'tr', hungarian: 'hu' }[lang];
           if (!L) throw new Error(`stemmer « ${lang} » sans équivalent dans stem() de ClickHouse (Snowball)`);
           map(`stem(t, '${L}')`);
-          step(`filtre ${f.name}`, false, `stem(mot, '${L}') suit Snowball (Porter2 pour l’anglais) ; le stemmer « ${lang} » d’Elasticsearch peut en différer sur certains mots : comparez sur vos données. Demande allow_experimental_nlp_functions = 1`);
+          step(`filtre ${f.name}`, false, `stem(mot, '${L}') suit Snowball${L === 'en' ? ' (Porter2)' : ''}${['english', 'porter'].includes(lang) ? ' alors que le stemmer « ' + lang + ' » d’Elasticsearch est le Porter d’origine' : ''} : certains mots n’ont pas la même racine, comparez sur vos données. Demande allow_experimental_nlp_functions = 1`);
           break;
         }
         default: throw new Error(`filtre « ${f.type} » non pris en charge`);
@@ -461,11 +483,11 @@ function anFieldPlan(table, field, spec, sample, src) {
   ];
   out.wordsColumn = tname;
   if (sample !== undefined) {
-    const a = anAnalyze(spec, sample);
-    if (a.tokens) {
-      const w = [...new Set(a.tokens.map(x => x.t))];
-      out.query = { sample, tokens: a.tokens.map(x => x.t), match_and: `hasAll(${tcol}, [${w.map(chStr).join(', ')}])`, match_or: `hasAny(${tcol}, [${w.map(chStr).join(', ')}])`, match_phrase: `hasSubstr(${tcol}, [${a.tokens.map(x => chStr(x.t)).join(', ')}])` };
-    } else out.query = { sample, error: a.error };
+    // Le texte cherché passe par la même expression que la colonne : mêmes mots des deux côtés, y compris là où l’aperçu n’existe pas (stemmer)
+    const lit = anPlan(spec, chStr(sample));
+    const a = anAnalyze(spec, sample, true);
+    if (lit.expr) out.query = { sample, tokens: a.tokens ? a.tokens.map(x => x.t) : null, match_and: `hasAll(${tcol}, arrayDistinct(${lit.expr}))`, match_or: `hasAny(${tcol}, arrayDistinct(${lit.expr}))`, match_phrase: `hasSubstr(${tcol}, ${lit.expr})` };
+    else out.query = { sample, error: a.error };
   }
   return out;
 }

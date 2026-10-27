@@ -175,6 +175,24 @@ snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut
     check(la.expr === null && la.verdict === 'todo' && /anticipation/.test(la.notes[0].detail), 'analyseur : une rétrospection est à reprendre avec sa raison');
     const lang = E.anPlan('english', "'x'");
     check(lang.expr === null && lang.verdict === 'todo', 'analyseur : un analyseur de langue prédéfini est à reprendre');
+    // elision : la casse suit articles_case (faux par défaut), un filtre défini exige ses articles, le filtre prédéfini ignore la casse
+    const elis = (def, ref = 'x') => ({ name: 'a', type: 'custom', tokenizer: 'standard', filter: [ref], definitions: { filter: def ? { x: def } : {} } });
+    const el1 = E.anAnalyze(elis({ type: 'elision', articles: ['l'] }), 'L’avion l’oiseau');
+    check(JSON.stringify(el1.tokens.map(x => x.t)) === JSON.stringify(['L’avion', 'oiseau']), 'analyseur : elision sans articles_case distingue la casse (comme Elasticsearch)');
+    const el2 = E.anAnalyze(elis({ type: 'elision', articles: ['l'], articles_case: true }), 'L’avion l’oiseau');
+    check(JSON.stringify(el2.tokens.map(x => x.t)) === JSON.stringify(['avion', 'oiseau']), 'analyseur : elision avec articles_case: true ignore la casse');
+    check(/\(\?:l\)/.test(E.anPlan(elis({ type: 'elision', articles: ['l'] }), 'c').expr) && /\(\?i:l\)/.test(E.anPlan(elis({ type: 'elision', articles: ['l'], articles_case: true }), 'c').expr), 'analyseur : le plan de elision suit la même casse que l’aperçu');
+    check(E.anAnalyze(elis({ type: 'elision' }), 'L’avion').error && E.anPlan(elis({ type: 'elision' }), 'c').verdict === 'todo', 'analyseur : un filtre elision défini sans articles est refusé, comme par Elasticsearch');
+    check(JSON.stringify(E.anAnalyze(elis(null, 'elision'), 'QU’il').tokens.map(x => x.t)) === JSON.stringify(['il']), 'analyseur : le filtre elision prédéfini retire les articles français sans tenir compte de la casse');
+    // stemmer : language, ou son ancien nom name ; une variante light_ ou minimal_ n’a pas d’équivalent
+    const stemOf = def => (E.anPlan(elis(def), 'c').expr || '').match(/stem\(t, '(\w+)'\)/);
+    check(stemOf({ type: 'stemmer', language: 'french' })[1] === 'fr' && stemOf({ type: 'stemmer', name: 'german' })[1] === 'de' && stemOf({ type: 'snowball', language: 'Spanish' })[1] === 'es', 'analyseur : language et son alias name désignent la langue du stemmer');
+    check(stemOf({ type: 'stemmer', name: 'light_french' }) === null && E.anPlan(elis({ type: 'stemmer', name: 'light_french' }), 'c').verdict === 'todo', 'analyseur : light_french n’a pas d’équivalent, il n’est pas pris pour l’anglais');
+    // synonymes : la requête cherche les mots que la colonne stocke (le terme canonique), pas les synonymes développés de l’aperçu
+    const sy = { name: 's', type: 'custom', tokenizer: 'standard', filter: ['lowercase', 'sy'], definitions: { filter: { sy: { type: 'synonym', synonyms: ['tv, television'] } } } };
+    const syq = E.anFieldPlan('t', 'titre', sy, 'Television').query;
+    check(/'television'/.test(syq.match_and) === false || /transform\(t, \['television'\], \['tv'\], t\)/.test(syq.match_and), 'analyseur : la requête passe par la même expression que la colonne (synonymes ramenés à tv)');
+    check(JSON.stringify(syq.tokens) === JSON.stringify(['tv']), 'analyseur : les mots de la requête sont ceux de la colonne');
     const ex = rd('examples/analyseurs/catalogue.txt').trim();
     const sc = E.schemaFromElastic(ex, E.DEFAULT_CONFIG, {});
     const rep = E.anReport(sc.tables, 'Les téléviseurs d’été');

@@ -19,7 +19,7 @@ Aperçu de « Les téléviseurs d’été » (ce qu’Elasticsearch indexerait) 
 - ℹ asciifolding : la table de Lucene compte plus d’un millier de remplacements ; sont reproduits ici les lettres accentuées (décomposition Unicode) et æ œ ß ø đ ł þ ð ı.
 
 ```sql
-ALTER TABLE logs.catalogue ADD COLUMN titre_mots Array(String) MATERIALIZED if(isNull(titre), [], arrayFilter(t -> NOT has(['le', 'la', 'les', 'un', 'une', 'des', 'de', 'du', 'et'], t), arrayMap(t -> replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll(normalizeUTF8NFD(t), '\\p{M}', ''), 'Æ', 'AE'), 'æ', 'ae'), 'Œ', 'OE'), 'œ', 'oe'), 'ß', 'ss'), 'Ø', 'O'), 'ø', 'o'), 'Đ', 'D'), 'đ', 'd'), 'Ł', 'L'), 'ł', 'l'), 'Þ', 'TH'), 'þ', 'th'), 'Ð', 'D'), 'ð', 'd'), 'ı', 'i'), arrayMap(t -> replaceRegexpOne(t, '^(?i:l|d|qu|j|n|s|c|m|t)[\'’]', ''), arrayMap(t -> lowerUTF8(t), extractAll(ifNull(titre, ''), '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*'))))));
+ALTER TABLE logs.catalogue ADD COLUMN titre_mots Array(String) MATERIALIZED if(isNull(titre), [], arrayFilter(t -> NOT has(['le', 'la', 'les', 'un', 'une', 'des', 'de', 'du', 'et'], t), arrayMap(t -> replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll(normalizeUTF8NFD(t), '\\p{M}', ''), 'Æ', 'AE'), 'æ', 'ae'), 'Œ', 'OE'), 'œ', 'oe'), 'ß', 'ss'), 'Ø', 'O'), 'ø', 'o'), 'Đ', 'D'), 'đ', 'd'), 'Ł', 'L'), 'ł', 'l'), 'Þ', 'TH'), 'þ', 'th'), 'Ð', 'D'), 'ð', 'd'), 'ı', 'i'), arrayMap(t -> replaceRegexpOne(t, '^(?:l|d|qu|j|n|s|c|m|t)[\'’]', ''), arrayMap(t -> lowerUTF8(t), extractAll(ifNull(titre, ''), '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*'))))));
 ALTER TABLE logs.catalogue ADD INDEX idx_titre_mots titre_mots TYPE text(tokenizer = 'array') GRANULARITY 1;
 ALTER TABLE logs.catalogue MATERIALIZE COLUMN titre_mots;
 ALTER TABLE logs.catalogue MATERIALIZE INDEX idx_titre_mots;
@@ -29,11 +29,11 @@ Recherche de la même phrase :
 
 ```sql
 -- match (tous les mots)
-hasAll(titre_mots, ['televiseurs', 'ete'])
+hasAll(titre_mots, arrayDistinct(arrayFilter(t -> NOT has(['le', 'la', 'les', 'un', 'une', 'des', 'de', 'du', 'et'], t), arrayMap(t -> replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll(normalizeUTF8NFD(t), '\\p{M}', ''), 'Æ', 'AE'), 'æ', 'ae'), 'Œ', 'OE'), 'œ', 'oe'), 'ß', 'ss'), 'Ø', 'O'), 'ø', 'o'), 'Đ', 'D'), 'đ', 'd'), 'Ł', 'L'), 'ł', 'l'), 'Þ', 'TH'), 'þ', 'th'), 'Ð', 'D'), 'ð', 'd'), 'ı', 'i'), arrayMap(t -> replaceRegexpOne(t, '^(?:l|d|qu|j|n|s|c|m|t)[\'’]', ''), arrayMap(t -> lowerUTF8(t), extractAll('Les téléviseurs d’été', '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*')))))))
 -- match (un des mots)
-hasAny(titre_mots, ['televiseurs', 'ete'])
+hasAny(titre_mots, arrayDistinct(arrayFilter(t -> NOT has(['le', 'la', 'les', 'un', 'une', 'des', 'de', 'du', 'et'], t), arrayMap(t -> replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll(normalizeUTF8NFD(t), '\\p{M}', ''), 'Æ', 'AE'), 'æ', 'ae'), 'Œ', 'OE'), 'œ', 'oe'), 'ß', 'ss'), 'Ø', 'O'), 'ø', 'o'), 'Đ', 'D'), 'đ', 'd'), 'Ł', 'L'), 'ł', 'l'), 'Þ', 'TH'), 'þ', 'th'), 'Ð', 'D'), 'ð', 'd'), 'ı', 'i'), arrayMap(t -> replaceRegexpOne(t, '^(?:l|d|qu|j|n|s|c|m|t)[\'’]', ''), arrayMap(t -> lowerUTF8(t), extractAll('Les téléviseurs d’été', '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*')))))))
 -- match_phrase
-hasSubstr(titre_mots, ['televiseurs', 'ete'])
+hasSubstr(titre_mots, arrayFilter(t -> NOT has(['le', 'la', 'les', 'un', 'une', 'des', 'de', 'du', 'et'], t), arrayMap(t -> replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll(normalizeUTF8NFD(t), '\\p{M}', ''), 'Æ', 'AE'), 'æ', 'ae'), 'Œ', 'OE'), 'œ', 'oe'), 'ß', 'ss'), 'Ø', 'O'), 'ø', 'o'), 'Đ', 'D'), 'đ', 'd'), 'Ł', 'L'), 'ł', 'l'), 'Þ', 'TH'), 'þ', 'th'), 'Ð', 'D'), 'ð', 'd'), 'ı', 'i'), arrayMap(t -> replaceRegexpOne(t, '^(?:l|d|qu|j|n|s|c|m|t)[\'’]', ''), arrayMap(t -> lowerUTF8(t), extractAll('Les téléviseurs d’été', '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*'))))))
 ```
 
 ## logs.catalogue · titre.debut · analyseur « autocompletion » — à vérifier
@@ -63,11 +63,11 @@ Recherche de la même phrase :
 
 ```sql
 -- match (tous les mots)
-hasAll(titre_debut_mots, ['le', 'les', 'te', 'tel', 'tele', 'telev', 'televi', 'televis', 'televise', 'd’', 'd’e', 'd’et', 'd’ete'])
+hasAll(titre_debut_mots, arrayDistinct(arrayFlatten(arrayMap(t -> arrayMap(n -> substringUTF8(t, 1, n), arrayFilter(n -> n <= lengthUTF8(t), range(2, 9))), arrayMap(t -> replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll(normalizeUTF8NFD(t), '\\p{M}', ''), 'Æ', 'AE'), 'æ', 'ae'), 'Œ', 'OE'), 'œ', 'oe'), 'ß', 'ss'), 'Ø', 'O'), 'ø', 'o'), 'Đ', 'D'), 'đ', 'd'), 'Ł', 'L'), 'ł', 'l'), 'Þ', 'TH'), 'þ', 'th'), 'Ð', 'D'), 'ð', 'd'), 'ı', 'i'), arrayMap(t -> lowerUTF8(t), extractAll('Les téléviseurs d’été', '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*')))))))
 -- match (un des mots)
-hasAny(titre_debut_mots, ['le', 'les', 'te', 'tel', 'tele', 'telev', 'televi', 'televis', 'televise', 'd’', 'd’e', 'd’et', 'd’ete'])
+hasAny(titre_debut_mots, arrayDistinct(arrayFlatten(arrayMap(t -> arrayMap(n -> substringUTF8(t, 1, n), arrayFilter(n -> n <= lengthUTF8(t), range(2, 9))), arrayMap(t -> replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll(normalizeUTF8NFD(t), '\\p{M}', ''), 'Æ', 'AE'), 'æ', 'ae'), 'Œ', 'OE'), 'œ', 'oe'), 'ß', 'ss'), 'Ø', 'O'), 'ø', 'o'), 'Đ', 'D'), 'đ', 'd'), 'Ł', 'L'), 'ł', 'l'), 'Þ', 'TH'), 'þ', 'th'), 'Ð', 'D'), 'ð', 'd'), 'ı', 'i'), arrayMap(t -> lowerUTF8(t), extractAll('Les téléviseurs d’été', '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*')))))))
 -- match_phrase
-hasSubstr(titre_debut_mots, ['le', 'les', 'te', 'tel', 'tele', 'telev', 'televi', 'televis', 'televise', 'd’', 'd’e', 'd’et', 'd’ete'])
+hasSubstr(titre_debut_mots, arrayFlatten(arrayMap(t -> arrayMap(n -> substringUTF8(t, 1, n), arrayFilter(n -> n <= lengthUTF8(t), range(2, 9))), arrayMap(t -> replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll(normalizeUTF8NFD(t), '\\p{M}', ''), 'Æ', 'AE'), 'æ', 'ae'), 'Œ', 'OE'), 'œ', 'oe'), 'ß', 'ss'), 'Ø', 'O'), 'ø', 'o'), 'Đ', 'D'), 'đ', 'd'), 'Ł', 'L'), 'ł', 'l'), 'Þ', 'TH'), 'þ', 'th'), 'Ð', 'D'), 'ð', 'd'), 'ı', 'i'), arrayMap(t -> lowerUTF8(t), extractAll('Les téléviseurs d’été', '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*'))))))
 ```
 
 ## logs.catalogue · reference · analyseur « reference » — à vérifier
@@ -93,11 +93,11 @@ Recherche de la même phrase :
 
 ```sql
 -- match (tous les mots)
-hasAll(reference_mots, ['LESTÉLÉVISEURSD’ÉTÉ'])
+hasAll(reference_mots, arrayDistinct(arrayMap(t -> upperUTF8(t), [replaceRegexpAll('Les téléviseurs d’été', '[-_ ]+', '')])))
 -- match (un des mots)
-hasAny(reference_mots, ['LESTÉLÉVISEURSD’ÉTÉ'])
+hasAny(reference_mots, arrayDistinct(arrayMap(t -> upperUTF8(t), [replaceRegexpAll('Les téléviseurs d’été', '[-_ ]+', '')])))
 -- match_phrase
-hasSubstr(reference_mots, ['LESTÉLÉVISEURSD’ÉTÉ'])
+hasSubstr(reference_mots, arrayMap(t -> upperUTF8(t), [replaceRegexpAll('Les téléviseurs d’été', '[-_ ]+', '')]))
 ```
 
 ## logs.catalogue · tags · analyseur « equivalents » — à vérifier
@@ -123,11 +123,11 @@ Recherche de la même phrase :
 
 ```sql
 -- match (tous les mots)
-hasAll(tags_mots, ['les', 'téléviseurs', 'd’été'])
+hasAll(tags_mots, arrayDistinct(arrayMap(t -> transform(t, ['télé', 'téléviseur', 'pc'], ['tv', 'tv', 'ordinateur'], t), arrayMap(t -> lowerUTF8(t), extractAll('Les téléviseurs d’été', '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*')))))
 -- match (un des mots)
-hasAny(tags_mots, ['les', 'téléviseurs', 'd’été'])
+hasAny(tags_mots, arrayDistinct(arrayMap(t -> transform(t, ['télé', 'téléviseur', 'pc'], ['tv', 'tv', 'ordinateur'], t), arrayMap(t -> lowerUTF8(t), extractAll('Les téléviseurs d’été', '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*')))))
 -- match_phrase
-hasSubstr(tags_mots, ['les', 'téléviseurs', 'd’été'])
+hasSubstr(tags_mots, arrayMap(t -> transform(t, ['télé', 'téléviseur', 'pc'], ['tv', 'tv', 'ordinateur'], t), arrayMap(t -> lowerUTF8(t), extractAll('Les téléviseurs d’été', '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*'))))
 ```
 
 ## logs.catalogue · description · analyseur « descriptions » — à vérifier
@@ -135,7 +135,7 @@ hasSubstr(tags_mots, ['les', 'téléviseurs', 'd’été'])
 - ≈ char_filter sans_html — html_strip de Lucene gère aussi scripts, commentaires et entités numériques
 - ≈ tokenizer standard — découpage UAX#29 approché par une expression : « a1.b » reste un mot ici, deux en Elasticsearch ; les idéogrammes ne sont pas séparés
 - ✓ filtre lowercase
-- ≈ filtre stemmer — stem(mot, 'en') suit Snowball (Porter2 pour l’anglais) ; le stemmer « english » d’Elasticsearch peut en différer sur certains mots : comparez sur vos données. Demande allow_experimental_nlp_functions = 1
+- ≈ filtre stemmer — stem(mot, 'en') suit Snowball (Porter2) alors que le stemmer « porter » d’Elasticsearch est le Porter d’origine : certains mots n’ont pas la même racine, comparez sur vos données. Demande allow_experimental_nlp_functions = 1
 
 Aperçu de « Les téléviseurs d’été » : impossible — filtre « stemmer » : pas d’aperçu (Lucene non reproduit ici)
 
@@ -144,4 +144,15 @@ ALTER TABLE logs.catalogue ADD COLUMN description_mots Array(String) MATERIALIZE
 ALTER TABLE logs.catalogue ADD INDEX idx_description_mots description_mots TYPE text(tokenizer = 'array') GRANULARITY 1;
 ALTER TABLE logs.catalogue MATERIALIZE COLUMN description_mots;
 ALTER TABLE logs.catalogue MATERIALIZE INDEX idx_description_mots;
+```
+
+Recherche de la même phrase :
+
+```sql
+-- match (tous les mots)
+hasAll(description_mots, arrayDistinct(arrayMap(t -> stem(t, 'en'), arrayMap(t -> lowerUTF8(t), extractAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll('Les téléviseurs d’été', '<[^>]*>', ''), '&lt;', '<'), '&gt;', '>'), '&quot;', '"'), '&amp;', '&'), '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*')))))
+-- match (un des mots)
+hasAny(description_mots, arrayDistinct(arrayMap(t -> stem(t, 'en'), arrayMap(t -> lowerUTF8(t), extractAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll('Les téléviseurs d’été', '<[^>]*>', ''), '&lt;', '<'), '&gt;', '>'), '&quot;', '"'), '&amp;', '&'), '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*')))))
+-- match_phrase
+hasSubstr(description_mots, arrayMap(t -> stem(t, 'en'), arrayMap(t -> lowerUTF8(t), extractAll(replaceAll(replaceAll(replaceAll(replaceAll(replaceRegexpAll('Les téléviseurs d’été', '<[^>]*>', ''), '&lt;', '<'), '&gt;', '>'), '&quot;', '"'), '&amp;', '&'), '[\\p{L}\\p{N}_]+(?:(?:[.\'’][\\p{L}]|[.,][\\p{N}])[\\p{L}\\p{N}_]*)*'))))
 ```
