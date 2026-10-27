@@ -1303,7 +1303,7 @@ Object.assign(IngestGen.prototype, {
         return this.plTmp(`if length(${parts.c}) > 1 { strlen(${sv.c}) - strlen(${xv.c}) - strlen(string(${parts.c}[-1]) ?? "") } else { -1 }`, 'any');
       }
       case 'charAt': return { c: `(slice(${this.plS(r)}, ${a[0].c}, ${a[0].c} + 1) ?? null)`, t: 'any' };
-      case 'intValue': case 'longValue': return { c: `(to_int(${r.c}) ?? null)`, t: 'any' };
+      case 'intValue': case 'longValue': return this.plCast('int', r);
       case 'getOrDefault': return this.plTmp(`if (get(${r.c}, [${a[0].c}]) ?? null) != null { get(${r.c}, [${a[0].c}]) ?? null } else { ${a[1].c} }`);
     }
     throw new Error(`méthode « ${name} » non prise en charge`);

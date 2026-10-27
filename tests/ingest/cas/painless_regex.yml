@@ -87,3 +87,9 @@ processors:
       source: |
         List parts = ctx.tags.subList(0, 2);
         ctx.joint = String.join('-', parts);
+  - script:
+      lang: painless
+      source: |
+        def pid = Long.decode(ctx.h);
+        ctx.process = new HashMap();
+        ctx.process.pid = pid.longValue();
