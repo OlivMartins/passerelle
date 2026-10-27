@@ -491,20 +491,34 @@ const INGEST_VARS = {
   on_failure_processor_tag: 'ingest_on_failure_processor_tag', on_failure_pipeline: 'ingest_on_failure_pipeline', pipeline: 'ingest_pipeline',
   _grok_match_index: 'ingest_grok_match_index'
 };
+// Marque d’un échec d’accès dont le message reste à établir (voir pathFailure) : un caractère nul ne vient d’aucun message
+const PATH_FAIL = '"\\u{0}chemin"';
 // Élément de chemin qu’Elasticsearch lit comme un index quand le parent est une liste (Integer.parseInt)
 const isIndexSeg = s => /^[+-]?\d+$/.test(s);
-// Classe Java d’une valeur, pour reproduire les messages d’erreur d’Elasticsearch
-const jtypeOf = x => `if is_string(${x}) { "java.lang.String" } else if is_boolean(${x}) { "java.lang.Boolean" } else if is_float(${x}) { "java.lang.Double" } else if is_integer(${x}) { if int!(${x}) > 2147483647 || int!(${x}) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } } else if is_array(${x}) { "java.util.ArrayList" } else if is_object(${x}) { "java.util.HashMap" } else { "null" }`;
-
-// Classe Java d’une valeur qui n’est ni une table ni une liste (diagnostic d’un parent de chemin)
-const jscalarType = x => `if is_string(${x}) { "java.lang.String" } else if is_boolean(${x}) { "java.lang.Boolean" } else if is_float(${x}) { "java.lang.Double" } else if is_integer(${x}) { if int!(${x}) > 2147483647 || int!(${x}) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } } else if is_timestamp(${x}) { "java.time.ZonedDateTime" } else { "null" }`;
 // Texte d’une valeur, comme Object.toString de Java pour les cas courants, sans opération faillible (E651)
 const jstrOf = x => `if is_string(${x}) { string!(${x}) } else if is_timestamp(${x}) { format_timestamp!(timestamp!(${x}), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(${x}) }`;
+/*
+ * Coût de compilation de VRL : le compilateur recalcule le typage d’un bloc à chaque niveau d’imbrication qui le
+ * contient, et chaque calcul copie la connaissance accumulée sur l’événement. Une chaîne « else if » de n branches
+ * coûte donc n fois plus qu’une suite de n « if » au même niveau : les diagnostics sont écrits à plat, et ceux des
+ * chemins sont établis une fois, à la fin du processeur, au lieu de l’être au plus profond de chaque accès.
+ */
 class IngestGen {
   constructor(t, pipeline) {
     this.t = t; this.pipeline = pipeline;
     this.lines = []; this.ind = 0;
     this.value = null; this.key = null;   // _ingest._value et _ingest._key dans un foreach
+    this.diags = [];                       // processeurs en cours : diagnostic de chemin différé (w_d)
+  }
+  // Classe Java de x dans la variable v, en instructions à plat (scalar : x n’est ni une table ni une liste)
+  jtype(v, x, scalar) {
+    this.emit(`${v} = "null"`);
+    this.emit(`if is_string(${x}) { ${v} = "java.lang.String" }`);
+    this.emit(`if is_boolean(${x}) { ${v} = "java.lang.Boolean" }`);
+    this.emit(`if is_float(${x}) { ${v} = "java.lang.Double" }`);
+    this.emit(`if is_integer(${x}) { ${v} = if int!(${x}) > 2147483647 || int!(${x}) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } }`);
+    this.emit(`if is_timestamp(${x}) { ${v} = "java.time.ZonedDateTime" }`);
+    if (!scalar) { this.emit(`if is_array(${x}) { ${v} = "java.util.ArrayList" }`); this.emit(`if is_object(${x}) { ${v} = "java.util.HashMap" }`); }
   }
   emit(l) { this.lines.push('  '.repeat(this.ind) + l); }
   open(l) { this.emit(l + ' {'); this.ind++; }
@@ -568,7 +582,7 @@ class IngestGen {
     const P = r.kind === 'dyn' ? 'w_path' : vq(r.path);
     if (r.kind === 'dyn') { this.emit(`w_path = ${r.expr}`); this.emit('w_sp = split(w_path, ".")'); }
     else this.emit(`w_sp = [${r.segs.map(vq).join(', ')}]`);
-    this.emit(`w_cur = ${r.kind === 'sub' ? r.base : '.'}`);
+    this.emit(`w_cur = ${r.kind === 'sub' ? `get!(${r.base}, [])` : 'get!(., [])'}`);   // type inconnu, voir pathFailure
     this.emit(`${W.err} = null`);
     this.emit(`${W.rp} = []`);
     if (mode === 'set') this.emit('w_libre = false');
@@ -597,7 +611,7 @@ class IngestGen {
     this.emit('w_cur = get!(w_cur, [int!(w_ix)])');
     this.close();
     this.close('} else {'); this.ind++;
-    this.diagnose(mode, W.err, 'seg', leaf, P);
+    this.diagnose(W.err, 'w_cur', 'seg', mode === 'read' ? false : leaf, mode, P, false);
     this.close();
     this.close();
     this.close();
@@ -605,41 +619,97 @@ class IngestGen {
     return W;
   }
   /*
-   * Message d’Elasticsearch pour un parent de chemin (w_cur) qui n’est pas une table : liste (index attendu), valeur
-   * nulle ou scalaire (classe Java). leaf : condition VRL « ce parent est celui de la feuille » (set et remove).
+   * Message d’Elasticsearch pour un parent de chemin (cur) qui n’est pas une table : liste (index attendu), valeur
+   * nulle ou scalaire (classe Java). seg : élément refusé ; leaf : ce parent est celui de la feuille (set et remove,
+   * condition VRL ou booléen connu) ; mode : "set", "remove" ou "read" (texte connu, ou expression VRL si dynamic).
    */
-  diagnose(mode, target, seg, leaf, P) {
-    this.emit(`w_of = ${jscalarType('w_cur')}`);
-    this.emit('w_of = if w_of == "null" { "null" } else { "object of type [" + w_of + "]" }');
+  diagnose(target, cur, seg, leaf, mode, P, dynamic) {
+    this.jtype('w_of', cur, true);
+    this.emit('if w_of != "null" { w_of = "object of type [" + w_of + "]" }');
     const S = `" + ${seg} + "`;
-    const branches = [['is_array(w_cur)', `"[${S}] is not an integer, cannot be used as an index"`]];
-    if (mode === 'set') branches.push([`${leaf} && w_of == "null"`, `"cannot set [${S}] with null parent"`], [leaf, `"cannot set [${S}] with parent " + w_of`]);
-    if (mode === 'remove') branches.push([leaf, `"cannot remove [${S}] from " + w_of`]);
-    this.emit(`${target} = ${branches.map(([c, v], i) => `${i ? 'else if' : 'if'} ${c} { ${v} } `).join('')}else { "cannot resolve [${S}] from " + w_of }`);
+    const isMode = m => (dynamic ? `${mode} == "${m}"` : (mode === m ? 'true' : 'false'));
+    const when = (m, extra) => {
+      if (!dynamic && mode !== m) return null;
+      const c = [leaf === true ? null : leaf, dynamic ? isMode(m) : null, extra].filter(Boolean);
+      if (leaf === false) return null;
+      return c.length ? c.join(' && ') : 'true';
+    };
+    this.emit(`${target} = "cannot resolve [${S}] from " + w_of`);
+    const set1 = when('set'); const set0 = when('set', 'w_of == "null"'); const rm = when('remove');
+    if (set1) this.emit(set1 === 'true' ? `${target} = "cannot set [${S}] with parent " + w_of` : `if ${set1} { ${target} = "cannot set [${S}] with parent " + w_of }`);
+    if (set0) this.emit(`if ${set0} { ${target} = "cannot set [${S}] with null parent" }`);
+    if (rm) this.emit(rm === 'true' ? `${target} = "cannot remove [${S}] from " + w_of` : `if ${rm} { ${target} = "cannot remove [${S}] from " + w_of }`);
+    this.emit(`if is_array(${cur}) { ${target} = "[${S}] is not an integer, cannot be used as an index" }`);
     this.emit(`${target} = ${target} + " as part of path [" + ${P} + "]"`);
   }
   /*
-   * Même diagnostic pour un chemin fait de clés seulement (le cas courant), déroulé sans boucle ni copie du document :
-   * le premier parent présent qui n’est pas une table donne le message ; un parent liste refuse toujours la clé.
+   * Échec d’accès à un chemin fait de clés seulement (le cas courant). Le message d’Elasticsearch dépend du premier
+   * parent qui n’est pas une table et de sa classe Java : l’établir ici coûterait une vingtaine d’instructions au plus
+   * profond de chaque accès, que VRL type et retype à chaque niveau d’imbrication. L’accès ne note donc que le chemin
+   * (w_d) et marque l’échec (PATH_FAIL) ; le message est établi là où il devient lisible : avant les on_failure d’un
+   * processeur ou d’un pipeline, et en fin de programme (materialize). D’ici là le document ne change pas, puisqu’un
+   * échec arrête le pipeline. Sous ignore_failure, le message n’est jamais lu.
    */
   pathFailure(mode, r) {
-    const segs = r.segs, n = segs.length, base = r.kind === 'sub' ? r.base : '';
-    const pre = j => this.vpath(segs.slice(0, j), base);
-    this.emit('w_k = 0');
+    const ctx = this.diags[this.diags.length - 1];
+    if (ctx && ctx.quiet) { this.emit(`fail = ${vq(`cannot access [${r.path}]`)}`); return; }
+    if (r.kind === 'sub') { this.pathFailureNow(mode, r); return; }
+    this.t.sites = (this.t.sites || 0) + 1;
+    this.emit(`fail = ${PATH_FAIL}`);
+    this.emit(`w_d = { "m": ${vq(mode)}, "p": ${vq(r.path)}, "s": ${this.arr(r.segs)} }`);
+  }
+  // Variante immédiate, pour un chemin sous _ingest._value (dans un foreach, la valeur n’est pas dans le document)
+  pathFailureNow(mode, r) {
+    const segs = r.segs, n = segs.length, base = r.base;
+    this.emit(`fail = ${vq(mode === 'set' ? `cannot set [${r.path}]` : `field [${segs[n - 1]}] not present as part of path [${r.path}]`)}`);
+    this.emit('w_s = false');
     this.emit('w_cur = null');
-    const chain = [];
+    this.emit('w_k = 0');
     for (let j = 1; j < n; j++) {
-      if (mode !== 'set') chain.push([`!exists(${pre(j)})`, `fail = ${vq(`field [${segs[j - 1]}] not present as part of path [${r.path}]`)}`]);
-      chain.push([mode === 'set' ? `exists(${pre(j)}) && !is_object(${pre(j)})` : `!is_object(${pre(j)})`, `w_k = ${j}; w_cur = ${pre(j)}`]);
+      const P = this.vpath(segs.slice(0, j), base);
+      const d = `w_s = true; w_k = ${j}; w_cur = get(${base}, ${this.arr(segs.slice(0, j))}) ?? null`;
+      if (mode === 'set') this.emit(`if !w_s && exists(${P}) && !is_object(${P}) { ${d} }`);
+      else {
+        this.emit(`if !w_s && !exists(${P}) { w_s = true; fail = ${vq(`field [${segs[j - 1]}] not present as part of path [${r.path}]`)} }`);
+        this.emit(`if !w_s && !is_object(${P}) { ${d} }`);
+      }
     }
-    chain.forEach(([c, a], i) => this.emit(`${i ? '} else if' : 'if'} ${c} { ${a}`));
-    if (mode === 'set') this.emit('}');
-    else this.emit(`} else { fail = ${vq(`field [${segs[n - 1]}] not present as part of path [${r.path}]`)} }`);
     this.open('if w_k > 0');
-    this.emit(`w_seg = ${n === 2 ? vq(segs[1]) : `string!(get!([${segs.slice(1).map(vq).join(', ')}], [w_k - 1]))`}`);
-    this.diagnose(mode, 'fail', 'w_seg', `w_k == ${n - 1}`, vq(r.path));
+    this.emit(`w_seg = string!(get!([${segs.slice(1).map(vq).join(', ')}], [w_k - 1]))`);
+    this.diagnose('fail', 'w_cur', 'w_seg', `w_k == ${n - 1}`, mode, vq(r.path), false);
     this.close();
-    if (mode === 'set') this.emit(`if fail == null { fail = ${vq(`cannot set [${r.path}]`)} }`);
+  }
+  /*
+   * Message d’un échec d’accès noté par pathFailure, rendu dans chacune des variables qui portent encore la marque.
+   * Le chemin est parcouru comme le fait IngestDocument (resolve, puis la feuille selon set, remove ou lecture).
+   */
+  materialize(vars) {
+    if (!this.t.sites) return;
+    this.open(`if w_d != null && (${vars.map(v => `${v} == ${PATH_FAIL}`).join(' || ')})`);
+    this.emit('w_m = string!(w_d.m)');
+    this.emit('w_p = string!(w_d.p)');
+    this.emit('w_sp = array!(w_d.s)');
+    this.emit('w_cur = get!(., [])');
+    this.emit('w_msg = null');
+    this.emit('w_libre = false');
+    this.open('for_each(w_sp) -> |i, seg|');
+    this.open('if w_msg == null && !w_libre');
+    this.emit('w_seg = string!(seg)');
+    this.emit('w_leaf = i == length(w_sp) - 1');
+    this.open('if is_object(w_cur)');
+    this.emit('w_has = includes(keys(object!(w_cur)), w_seg)');
+    this.emit('if !w_has && w_m == "set" { w_libre = true }');
+    this.emit('if !w_has && w_m != "set" { w_msg = "field [" + w_seg + "] not present as part of path [" + w_p + "]" }');
+    this.emit('if w_has { w_cur = get!(w_cur, [w_seg]) }');
+    this.close('} else {'); this.ind++;
+    this.diagnose('w_msg', 'w_cur', 'w_seg', 'w_leaf', 'w_m', 'w_p', true);
+    this.close();
+    this.close();
+    this.close();
+    this.emit('if w_msg == null { w_msg = if w_m == "set" { "cannot set [" + w_p + "]" } else { "field [" + w_p + "] not present as part of path [" + w_p + "]" } }');
+    vars.forEach(v => this.emit(`if ${v} == ${PATH_FAIL} { ${v} = w_msg }`));
+    this.emit('w_d = null');
+    this.close();
   }
   // Valeur lue (type inconnu pour VRL, ce qui évite les erreurs E651 quand une étape précédente l’a écrite)
   get(r) {
@@ -683,7 +753,7 @@ class IngestGen {
     this.emit(`fail = ${vq(`field [${leaf}] not present as part of path [${r.path}]`)}`);
   }
   failCast(v, path, target) {
-    this.emit(`jt = ${jtypeOf(v)}`);
+    this.jtype('jt', v);
     this.emit(`fail = "field [" + ${vq(path)} + "] of type [" + jt + "] cannot be cast to [${target}]"`);
   }
   // Écriture : les parents manquants sont créés ; un parent qui n’est pas un objet fait échouer, comme dans Elasticsearch
@@ -1142,15 +1212,17 @@ Object.assign(IngestGen.prototype, {
     this.comment(`${label}${o.description ? ` — ${String(o.description).split('\n')[0]}` : ''}`);
     this.open(`if ${okVar}`);
     this.emit('fail = null');
+    const ctx = { quiet: o.ignore_failure === true || o.ignore_failure === 'true' };
+    this.diags.push(ctx);
     // Condition : une erreur du script ou un résultat nul font échouer le processeur, comme dans Elasticsearch
     let condOpen = false;
     if (o.if !== undefined && o.if !== null) {
       const src = isObj(o.if) ? o.if.source : o.if;
-      if (isObj(o.if) && o.if.lang && o.if.lang !== 'painless') { this.ko(label, `condition en langage ${o.if.lang}`); this.close(); return; }
+      if (isObj(o.if) && o.if.lang && o.if.lang !== 'painless') { this.ko(label, `condition en langage ${o.if.lang}`); this.diags.pop(); this.close(); return; }
       if (isObj(o.if) && isObj(o.if.params)) this.emit(`p_params = ${this.valueSource(o.if.params)}`);
       let c; const at = this.lines.length;
       try { c = this.plCondition(String(src)); }
-      catch (e) { this.ko(label, `condition Painless « ${String(src).slice(0, 120)} » : ${e.message}`); this.close(); return; }
+      catch (e) { this.ko(label, `condition Painless « ${String(src).slice(0, 120)} » : ${e.message}`); this.diags.pop(); this.close(); return; }
       this.condNotes(c.env);
       if (c.env.usesParams && !(isObj(o.if) && isObj(o.if.params))) this.lines.splice(at, 0, '  '.repeat(this.ind) + 'p_params = {}');
       if (c.nullable) {
@@ -1163,6 +1235,7 @@ Object.assign(IngestGen.prototype, {
     const before = this.t.stats.ko;
     this.dispatch(type, o, label, okVar, failVar);
     if (condOpen) this.close();
+    this.diags.pop();
     const translated = this.t.stats.ko === before;
     // Échec : ignoré, rattrapé par on_failure, ou remonté au pipeline
     if (translated) {
@@ -1174,6 +1247,8 @@ Object.assign(IngestGen.prototype, {
         this.emit(`ingest_on_failure_processor_tag = ${tag === null ? 'null' : vq(tag)}`);
         this.emit(`ingest_on_failure_pipeline = ${vq(this.pipeline)}`);
         if (Array.isArray(o.on_failure) && o.on_failure.length) {
+          this.materialize(['fail']);
+          this.emit('ingest_on_failure_message = fail');
           const ok2 = this.tmp('ok'); const f2 = this.tmp('echec');
           this.emit(`${ok2} = true`); this.emit(`${f2} = null`);
           this.seq(o.on_failure, `${where}.on_failure`, ok2, f2);
@@ -1355,7 +1430,7 @@ Object.assign(IngestGen.prototype, {
     this.open('if fail == null');
     this.open('if is_string(x)'); this.emit(`one = ${fn('string!(x)')}`); this.emit('if fail == null { out = push(out, one) }');
     this.close('} else {'); this.ind++;
-    this.emit(`jt = ${jtypeOf('x')}`);
+    this.jtype('jt', 'x');
     this.emit(`xs = ${jstrOf('x')}`);
     this.emit(`fail = "value [" + xs + "] of type [" + jt + "] in list field [" + ${vq(r.path)} + "] cannot be cast to [java.lang.String]"`);
     this.close(); this.close(); this.close();
@@ -1778,6 +1853,7 @@ Object.assign(IngestGen.prototype, {
   pipelineFailure(def, name, ok, ech, out) {
     if (Array.isArray(def.on_failure) && def.on_failure.length) {
       this.open(`if !${ok} && ${ech} != null`);
+      this.materialize([ech, 'ingest_on_failure_message']);
       const ok2 = this.tmp('ok'); const f2 = this.tmp('echec');
       this.emit(`${ok2} = true`); this.emit(`${f2} = null`);
       this.seq(def.on_failure, `${name}.on_failure`, ok2, f2);
@@ -1823,7 +1899,7 @@ Object.assign(IngestGen.prototype, {
     this.close(); this.close();
     this.emit('if fail == null {'); this.ind++; this.set(r, outs); this.close();
     this.close('} else {'); this.ind++;
-    this.emit(`jt = ${jtypeOf(fv)}`);
+    this.jtype('jt', fv);
     this.emit(`fail = "field [" + ${vq(r.path)} + "] of type [" + jt + "] cannot be cast to a list or map"`);
     this.close(); this.close();
     this.t.stats.ok++;
@@ -2132,6 +2208,7 @@ function ingestProgram(name, def, t) {
   g.emit('ok = true'); g.emit('echec = null'); g.emit('fail = null');
   ['message', 'processor_type', 'processor_tag', 'pipeline'].forEach(k => g.emit(`ingest_on_failure_${k} = null`));
   g.emit(`ingest_pipeline = ${vq(name)}`);
+  g.emit('w_d = null');
   const body = new IngestGen(t, name);
   body.ind = g.ind;
   t.stack = [name];
@@ -2144,6 +2221,7 @@ function ingestProgram(name, def, t) {
   g.emit('');
   g.comment('Échec non rattrapé : Elasticsearch refuse le document ; il est rendu tel qu’il est arrivé, avec la cause');
   g.open('if echec != null');
+  g.materialize(['echec', 'ingest_on_failure_message']);
   g.emit('. = doc0');
   g.emit('%ingest_failure = { "message": echec, "processor_type": ingest_on_failure_processor_type, "processor_tag": ingest_on_failure_processor_tag, "pipeline": ingest_on_failure_pipeline }');
   g.close();
