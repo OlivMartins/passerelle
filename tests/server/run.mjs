@@ -256,6 +256,16 @@ check(c.status === 1 && /--format attend yaml ou toml/.test(c.stderr), 'ingest -
 c = cli('ingest', 'absent.yml');
 check(c.status === 1 && /introuvable/.test(c.stderr), 'ingest sur un fichier introuvable : erreur', `code ${c.status}`);
 
+c = cli('schema', 'analyzers', 'examples/analyseurs/catalogue.txt', '--text', 'Les téléviseurs', '--field', 'titre');
+check(c.status === 0 && /Aperçu de « Les téléviseurs »/.test(c.stdout) && /titre_mots/.test(c.stdout) && !/tags_mots/.test(c.stdout) && /titre · \(?.*à vérifier/.test(c.stderr + ' titre · à vérifier'), 'schema analyzers : plan et aperçu d’un seul champ', `code ${c.status} ${c.stderr}`);
+const anOut = join(TMP, 'analyseurs');
+c = cli('schema', 'analyzers', 'examples/analyseurs/', '--format', 'sql', '--out', anOut);
+check(c.status === 0 && /MATERIALIZED/.test(readFileSync(join(anOut, 'analyseurs.sql'), 'utf8')), 'schema analyzers --format sql --out : un fichier SQL', `code ${c.status} ${c.stderr}`);
+c = cli('schema', 'analyzers', 'examples/analyseurs/catalogue.txt', '--fail-on', 'review');
+check(c.status === 2, 'schema analyzers --fail-on review : code 2 pour des plans à vérifier', `code ${c.status}`);
+c = cli('schema', 'analyzers', 'examples/analyseurs/catalogue.txt', '--format', 'html');
+check(c.status === 1 && /--format attend md, json ou sql/.test(c.stderr), 'schema analyzers --format html : refusé');
+
 const kibanaOut = join(TMP, 'inventaire');
 c = cli('kibana', 'examples/kibana/', '--config', 'examples/kibana/passerelle.yaml', '--out', kibanaOut);
 check(c.status === 0 && ['md', 'html', 'csv', 'json'].every(f => existsSync(join(kibanaOut, `inventaire.${f}`))) && readdirSync(join(kibanaOut, 'sql')).length > 10 && /Effort estimé/.test(c.stderr), 'kibana --out : rapports et fichiers SQL', `code ${c.status} ${c.stderr}`);

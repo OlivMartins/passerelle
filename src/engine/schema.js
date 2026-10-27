@@ -398,7 +398,8 @@ function buildTable(cfg, src, opts) {
   const indexes = [];
   for (const c of cols) {
     const id = ddlIdent(c.name); const base = c.name.replace(/[^A-Za-z0-9_]/g, '_');
-    if (c.kind === 'text' || c.textSub) indexes.push(`INDEX idx_${base}_text lowerUTF8(${id}) TYPE text(tokenizer = splitByNonAlpha)`);
+    // Colonne Array(String) : lowerUTF8 n’en accepte pas, le préprocesseur de l’index s’applique à chaque valeur
+    if (c.kind === 'text' || c.textSub) indexes.push(c.array ? `INDEX idx_${base}_text ${id} TYPE text(tokenizer = splitByNonAlpha, preprocessor = lowerUTF8(${id}))` : `INDEX idx_${base}_text lowerUTF8(${id}) TYPE text(tokenizer = splitByNonAlpha)`);
     else if (c.kind === 'wildcard') indexes.push(`INDEX idx_${base}_ngram ${id} TYPE text(tokenizer = ngrams(3))`);
     else if (c.kind === 'keyword' && isIdentifier(c.field) && !c.array) indexes.push(`INDEX idx_${base}_bf ${id} TYPE bloom_filter(0.01) GRANULARITY 1`);
     else if (c.vector) indexes.push(`INDEX idx_${base}_vec ${id} TYPE vector_similarity('hnsw', 'cosineDistance', ${c.vector})`);

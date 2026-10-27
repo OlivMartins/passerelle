@@ -382,6 +382,7 @@ Utilisation :
   passerelle ingest      <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review] [--verbose]
   passerelle schema ddl  <fichier|dossier>... [--config FICHIER] [--preset otel|otel-json] [--compact] [--json] [--table NOM] [--format sql|yaml] [--out DOSSIER]
   passerelle schema pull [--config FICHIER] [--table NOM]...
+  passerelle schema analyzers <fichier|dossier>... [--config FICHIER] [--text TEXTE] [--field CHAMP] [--format md|json|sql] [--out DOSSIER] [--fail-on todo|review]
   passerelle kibana      <export.ndjson>... [--config FICHIER] [--timezone FUSEAU] [--format md|html|csv|json] [--out DOSSIER] [--fail-on todo|review]
   passerelle grafana     <tableau.json>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo|review]
   passerelle check-config [--config FICHIER] [--quiet]
@@ -403,7 +404,7 @@ const OPTIONS = {
   config: { type: 'string' }, listen: { type: 'string' }, index: { type: 'string' }, out: { type: 'string' },
   format: { type: 'string' }, 'fail-on': { type: 'string' }, quiet: { type: 'boolean' }, verbose: { type: 'boolean' },
   preset: { type: 'string' }, compact: { type: 'boolean' }, json: { type: 'boolean' }, table: { type: 'string', multiple: true },
-  timezone: { type: 'string' },
+  timezone: { type: 'string' }, text: { type: 'string' }, field: { type: 'string' },
   help: { type: 'boolean', short: 'h' }
 };
 function parseArgs(argv) {
@@ -595,6 +596,30 @@ function schemaDDL(o) {
   if (o.verbose || verdict !== 'ready') r.notes.filter(n => o.verbose || n.level === 'warn' || n.level === 'err').forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`));
   if (o['fail-on'] && VERDICT_RANK[verdict] >= VERDICT_RANK[o['fail-on']]) process.exit(2);
 }
+/*
+ * passerelle schema analyzers : pour chaque champ text dont l'analyseur est déclaré dans les réglages de l'index,
+ * le plan ClickHouse (colonne de mots, index, requêtes) et, avec --text, ce qu'Elasticsearch indexerait pour ce texte.
+ */
+function schemaAnalyzers(o) {
+  if (!o._.length) fail('aucun fichier à lire. Exemple : passerelle schema analyzers modeles/catalogue.txt --text "Les téléviseurs d\'été"');
+  formatFor(o, ['md', 'json', 'sql'], 'schema analyzers');
+  const cfg = loadCfgOrFail(o);
+  const files = collect(o._, /\.(json|txt|es)$/i);
+  if (!files.length) fail('aucun fichier correspondant trouvé');
+  const r = schemaFromDocuments(files.map(f => fs.readFileSync(f, 'utf8').trim()), cfg, {});
+  if (r.error || r.empty) fail(r.error || 'aucun mapping lisible');
+  const rep = anReport(r.tables, o.text, o.field);
+  const fmt = o.format || 'md';
+  const body = fmt === 'json' ? JSON.stringify(rep.plans, null, 2) + '\n' : fmt === 'sql' ? rep.plans.filter(p => p.plan.ddl).map(p => `-- ${p.plan.table} · ${p.plan.field} · analyseur ${p.plan.name} (${VERDICTS[rep.verdict === p.plan.verdict ? p.plan.verdict : p.plan.verdict]})\n${p.plan.ddl.join('\n')}\n`).join('\n') : rep.markdown;
+  if (o.out) {
+    outDir(o.out);
+    const file = path.join(o.out, fmt === 'sql' ? 'analyseurs.sql' : fmt === 'json' ? 'analyseurs.json' : 'analyseurs.md');
+    fs.writeFileSync(file, body);
+    process.stderr.write(`${rep.plans.length} analyseur(s) → ${file}\n`);
+  } else process.stdout.write(body);
+  for (const p of rep.plans) process.stderr.write(`${p.plan.verdict === 'todo' ? '✗' : p.plan.verdict === 'review' ? '≈' : '✓'} ${p.plan.table} · ${p.plan.field} (${p.plan.name}) : ${VERDICTS[p.plan.verdict]}\n`);
+  if (o['fail-on'] && VERDICT_RANK[rep.verdict] >= VERDICT_RANK[o['fail-on']]) process.exit(2);
+}
 // Plusieurs fichiers JSON (réponses d’API) : chacun est lu pour lui-même, puis tous sont traduits ensemble
 function schemaFromDocuments(blocks, cfg, opts) {
   const wrapped = blocks.map(b => (/^(GET|PUT|POST)\s/i.test(b) ? b : `POST _passerelle\n${b}`)).join('\n\n');
@@ -695,7 +720,8 @@ function main(argv) {
       if (o.preset !== undefined && !['otel', 'otel-json'].includes(o.preset)) fail(`--preset attend otel ou otel-json, pas « ${o.preset} »`);
       if (sub === 'ddl') return schemaDDL(o);
       if (sub === 'pull') return schemaPull(o).catch(e => fail(e.message));
-      return fail(`sous-commande inconnue : schema ${sub || ''}`.trim() + ' (ddl ou pull)');
+      if (sub === 'analyzers') return schemaAnalyzers(o);
+      return fail(`sous-commande inconnue : schema ${sub || ''}`.trim() + ' (ddl, pull ou analyzers)');
     }
     case 'ls2vector': return batch('ls', o);
     case 'ingest': return ingestConvert(o);

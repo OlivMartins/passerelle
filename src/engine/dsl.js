@@ -779,8 +779,8 @@ function customDateFormat(fmt) {
  * En mode « tokens » (par défaut), un mot simple n’est cherché que par hasToken : « user » trouve aussi
  * « user_id », ce qu’Elasticsearch ne fait pas. Le mode « strict » ajoute la vérification à chaque mot.
  */
-function esTokens(text) {
-  const chars = [...String(text).toLowerCase()];
+function esTokens(text, keepCase) {
+  const chars = [...(keepCase ? String(text) : String(text).toLowerCase())];
   const letter = c => /\p{L}/u.test(c); const digit = c => /\p{N}/u.test(c);
   const out = []; let cur = '';
   for (let i = 0; i < chars.length; i++) {

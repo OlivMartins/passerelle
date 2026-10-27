@@ -160,6 +160,28 @@ snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut
   check(!lit.error && vrlOf(lit).includes('"x\\{{y"'), 'ingest : « {{ » littéral dans une valeur est échappé, VRL l’interpolerait en silence', vrlOf(lit).split('\n').find(l => /x.*\{\{y/.test(l)));
   const bad = one('processors:\n  - grok: { field: m, patterns: ["(?=a)%{WORD:w}"] }\n  - gsub: { field: m, pattern: "(?<=a)b", replacement: "c" }');
   check(bad.pipelines[0].verdict === 'todo' && bad.notes.some(n => n.level === 'err' && /rétrospection/.test(n.detail)), 'ingest : une rétrospection (?<=…) est à reprendre avec sa raison, pas un VRL qui ne compile pas', JSON.stringify(bad.notes.filter(n => n.level === 'err').map(n => n.detail)));
+  // F99 : analyseurs personnalisés
+  {
+    const { ATTENDUS } = await import('../tests/clickhouse/analyseurs.cas.mjs');
+    for (const [spec, texte, attendu] of ATTENDUS) {
+      const r = E.anAnalyze(spec, texte);
+      check(r.tokens && JSON.stringify(r.tokens.map(x => x.t)) === JSON.stringify(attendu), `analyseur : l’aperçu reproduit la documentation d’Elasticsearch (${JSON.stringify(spec).slice(0, 70)})`, r.error || JSON.stringify(r.tokens && r.tokens.map(x => x.t)));
+    }
+    const st = E.anAnalyze({ tokenizer: 'standard', filter: ['stemmer'] }, 'running');
+    check(st.tokens === null && /pas d’aperçu/.test(st.error), 'analyseur : un stemmer n’a pas d’aperçu, aucun mot n’est inventé');
+    const bad = E.anPlan({ tokenizer: 'pattern', filter: [] }, "'x'");
+    check(bad.expr && bad.verdict === 'ready', 'analyseur : le tokenizer pattern par défaut a un plan exact');
+    const la = E.anPlan({ tokenizer: { type: 'pattern', pattern: '(?<=a)b' } }, "'x'");
+    check(la.expr === null && la.verdict === 'todo' && /anticipation/.test(la.notes[0].detail), 'analyseur : une rétrospection est à reprendre avec sa raison');
+    const lang = E.anPlan('english', "'x'");
+    check(lang.expr === null && lang.verdict === 'todo', 'analyseur : un analyseur de langue prédéfini est à reprendre');
+    const ex = rd('examples/analyseurs/catalogue.txt').trim();
+    const sc = E.schemaFromElastic(ex, E.DEFAULT_CONFIG, {});
+    const rep = E.anReport(sc.tables, 'Les téléviseurs d’été');
+    check(rep.plans.length === 5 && rep.plans.some(p => p.plan.field === 'titre.debut' && p.plan.column === 'titre') && rep.plans.find(p => p.plan.field === 'tags').plan.expr.startsWith('arrayFlatten(arrayMap(v ->'), 'analyseur : sous-champ calculé depuis sa colonne, valeurs multiples analysées une à une');
+    check(/idx_tags_text tags TYPE text\(tokenizer = splitByNonAlpha, preprocessor = lowerUTF8\(tags\)\)/.test(sc.sql), 'schéma : l’index text d’une colonne Array(String) passe par preprocessor, pas par lowerUTF8');
+    snapshot('examples/analyseurs/catalogue.md', rep.markdown);
+  }
   {
     const c2 = JSON.parse(JSON.stringify(E.DEFAULT_CONFIG)); c2.vector.elasticsearch_output = 'clickhouse';
     c2.clickhouse.index_mapping = { 'app-*': 'logs.app' };
