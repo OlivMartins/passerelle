@@ -12,6 +12,9 @@ processors:
         def c = a - 1;
         def d = a * 2;
         ctx.calc = [b, c, d];
+        if (a >= 0 || b < 5) {
+          ctx.pos = true;
+        }
   - script:
       lang: painless
       source: |

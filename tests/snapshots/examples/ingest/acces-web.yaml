@@ -519,7 +519,9 @@ transforms:
       # processors[9] set
       if ok {
         fail = null
-        cond_15 = ((get!(., ["http", "response", "status_code"]) != null) && ((get!(., ["http", "response", "status_code"]) < 400) ?? false))
+        p_17 = get!(., ["http", "response", "status_code"])
+        p_18 = if is_integer(p_17) && is_integer(400) { int!(p_17) < int!(400) } else if (is_integer(p_17) || is_float(p_17)) && (is_integer(400) || is_float(400)) { to_float!(p_17) < to_float!(400) } else { false }
+        cond_15 = ((get!(., ["http", "response", "status_code"]) != null) && p_18)
         if fail == null && cond_15 == true {
           if (!exists(.event) || is_object(.event)) {
             .event.outcome = "success"
@@ -541,8 +543,10 @@ transforms:
       # processors[10] set
       if ok {
         fail = null
-        cond_17 = ((get!(., ["http", "response", "status_code"]) != null) && ((get!(., ["http", "response", "status_code"]) >= 400) ?? false))
-        if fail == null && cond_17 == true {
+        p_21 = get!(., ["http", "response", "status_code"])
+        p_22 = if is_integer(p_21) && is_integer(400) { int!(p_21) >= int!(400) } else if (is_integer(p_21) || is_float(p_21)) && (is_integer(400) || is_float(400)) { to_float!(p_21) >= to_float!(400) } else { false }
+        cond_19 = ((get!(., ["http", "response", "status_code"]) != null) && p_22)
+        if fail == null && cond_19 == true {
           if (!exists(.event) || is_object(.event)) {
             .event.outcome = "failure"
           } else {
@@ -661,16 +665,16 @@ transforms:
           if ingest_on_failure_message == "\u{0}chemin" { ingest_on_failure_message = w_msg }
           w_d = null
         }
-        ok_19 = true
-        echec_20 = null
+        ok_23 = true
+        echec_24 = null
         
         # acces-web.on_failure[0] set
-        if ok_19 {
+        if ok_23 {
           fail = null
-          t_21 = ingest_on_failure_message
-          t_21 = if t_21 == null { "" } else { if is_string(t_21) { string!(t_21) } else if is_timestamp(t_21) { format_timestamp!(timestamp!(t_21), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(t_21) } }
+          t_25 = ingest_on_failure_message
+          t_25 = if t_25 == null { "" } else { if is_string(t_25) { string!(t_25) } else if is_timestamp(t_25) { format_timestamp!(timestamp!(t_25), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(t_25) } }
           if (!exists(.error) || is_object(.error)) {
-            .error.message = t_21
+            .error.message = t_25
           } else {
             fail = "\u{0}chemin"
             w_d = { "m": "set", "p": "error.message", "s": ["error", "message"] }
@@ -680,11 +684,11 @@ transforms:
             ingest_on_failure_processor_type = "set"
             ingest_on_failure_processor_tag = null
             ingest_on_failure_pipeline = "acces-web"
-            ok_19 = false
-            echec_20 = fail
+            ok_23 = false
+            echec_24 = fail
           }
         }
-        echec = echec_20
+        echec = echec_24
       }
       echec = echec
 

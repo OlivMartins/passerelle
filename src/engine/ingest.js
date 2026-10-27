@@ -934,10 +934,12 @@ Object.assign(IngestGen.prototype, {
   // Texte d’une valeur : « to_string(x) ?? "" » est refusé (E651) quand Vector sait déjà x chaîne ou nombre ; cette forme passe pour tous les types
   plStr(e) { return e.t === 'str' ? e.c : e.t === 'null' ? '""' : ['int', 'num', 'bool'].includes(e.t) ? `to_string(${e.c})` : this.plTmp(`if is_string(${e.c}) { string!(${e.c}) } else if is_null(${e.c}) { "" } else { encode_json(${e.c}) }`, 'str').c; },
   plBool(e) { return e.t === 'bool' ? e.c : `(${e.c} == true)`; },
-  // Opération sur deux valeurs de type inconnu : entiers entre eux restent entiers, sinon flottants, sinon null. Écrite
+  // Opération sur deux valeurs de type inconnu : entiers entre eux restent entiers, sinon flottants, sinon `other`. Écrite
   // avec des assertions (!) plutôt qu’une fusion d’erreur (?? null), que VRL refuse (E651) quand il connaît déjà les types
-  plNum(op, A, B) {
-    return `if is_integer(${A}) && is_integer(${B}) { int!(${A}) ${op} int!(${B}) } else if (is_integer(${A}) || is_float(${A})) && (is_integer(${B}) || is_float(${B})) { to_float!(${A}) ${op} to_float!(${B}) } else { null }`;
+  plNum(op, a, b, other = 'null') {
+    const simple = x => (/^[\w]+$/.test(x.c) ? x.c : this.plTmp(x.c).c);
+    const A = simple(a); const B = simple(b);
+    return `if is_integer(${A}) && is_integer(${B}) { int!(${A}) ${op} int!(${B}) } else if (is_integer(${A}) || is_float(${A})) && (is_integer(${B}) || is_float(${B})) { to_float!(${A}) ${op} to_float!(${B}) } else { ${other} }`;
   },
   plTmp(code, t) { const v = this.tmp('p'); this.emit(`${v} = ${code}`); return { c: v, t: t || 'any' }; },
   // Chemin de ctx : ctx.a.b, ctx['a.b'], ctx.a?.b ; null si l’expression n’en est pas un
@@ -1055,14 +1057,14 @@ Object.assign(IngestGen.prototype, {
     const known = num(a) && num(b);
     if (['<', '>', '<=', '>='].includes(op)) {
       env.compare = true;
-      return { c: known ? `(${a.c} ${op} ${b.c})` : `((${a.c} ${op} ${b.c}) ?? false)`, t: 'bool' };
+      return known ? { c: `(${a.c} ${op} ${b.c})`, t: 'bool' } : this.plTmp(this.plNum(op, a, b, 'false'), 'bool');
     }
     if (op === '+') {
       if (a.t === 'str' || b.t === 'str') return { c: `(${this.plStr(a)} + ${this.plStr(b)})`, t: 'str' };
       if (known) return { c: `(${a.c} + ${b.c})`, t: a.t === 'int' && b.t === 'int' ? 'int' : 'num' };
-      return this.plTmp(`if is_string(${a.c}) || is_string(${b.c}) { ${this.plStr(a)} + ${this.plStr(b)} } else ${this.plNum('+', a.c, b.c)}`);
+      return this.plTmp(`if is_string(${a.c}) || is_string(${b.c}) { ${this.plStr(a)} + ${this.plStr(b)} } else ${this.plNum('+', a, b)}`);
     }
-    if (['-', '*'].includes(op) && !known) return this.plTmp(this.plNum(op, a.c, b.c));
+    if (['-', '*'].includes(op) && !known) return this.plTmp(this.plNum(op, a, b));
     if (['-', '*', '/', '%'].includes(op)) {
       if (op === '/') env.division = true;
       return known && op !== '/' && op !== '%' ? { c: `(${a.c} ${op} ${b.c})`, t: a.t === 'int' && b.t === 'int' ? 'int' : 'num' } : { c: `((${a.c} ${op} ${b.c}) ?? null)`, t: 'any' };
