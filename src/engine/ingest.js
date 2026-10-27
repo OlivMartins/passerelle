@@ -1084,6 +1084,23 @@ Object.assign(IngestGen.prototype, {
       case 'keySet': return { c: r.t === 'map' ? `keys(${r.c})` : `keys(object(${r.c}) ?? {})`, t: 'list' };
       case 'values': return { c: r.t === 'map' ? `values(${r.c})` : `values(object(${r.c}) ?? {})`, t: 'list' };
       case 'containsKey': return { c: `(is_object(${r.c}) && includes(keys(object!(${r.c})), ${a[0].c}))`, t: 'bool' };
+      case 'entrySet': {
+        const v = this.tmp('p'); this.emit(`${v} = []`);
+        this.open(`for_each(object(${r.c}) ?? {}) -> |_k, _v|`);
+        this.emit(`${v} = push(${v}, { "key": _k, "value": _v })`);
+        this.close();
+        return { c: v, t: 'list' };
+      }
+      case 'getKey': return { c: `(get(${r.c}, ["key"]) ?? null)`, t: 'any' };
+      case 'getValue': return { c: `(get(${r.c}, ["value"]) ?? null)`, t: 'any' };
+      case 'splitOnToken': return { c: `split(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${this.plStr(a[0])})`, t: 'list' };
+      case 'lastIndexOf': {
+        const sv = this.plTmp(r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`, 'str'); const xv = this.plTmp(this.plStr(a[0]), 'str');
+        const parts = this.plTmp(`split(${sv.c}, ${xv.c})`, 'list');
+        return this.plTmp(`if length(${parts.c}) > 1 { strlen(${sv.c}) - strlen(${xv.c}) - strlen(string(${parts.c}[-1]) ?? "") } else { -1 }`, 'any');
+      }
+      case 'charAt': return { c: `(slice(${r.t === 'str' ? r.c : `(string(${r.c}) ?? "")`}, ${a[0].c}, ${a[0].c} + 1) ?? null)`, t: 'any' };
+      case 'intValue': case 'longValue': return { c: `(to_int(${r.c}) ?? null)`, t: 'any' };
       case 'getOrDefault': return this.plTmp(`if (get(${r.c}, [${a[0].c}]) ?? null) != null { get(${r.c}, [${a[0].c}]) ?? null } else { ${a[1].c} }`);
     }
     throw new Error(`méthode « ${name} » non prise en charge`);
@@ -1213,8 +1230,8 @@ Object.assign(IngestGen.prototype, {
     const segs = path ? path.segs : [];
     const target = local || (isRoot ? '.' : this.vpath(segs));
     switch (e.name) {
-      case 'add': if (isRoot) break; this.emit(`${target} = push(array(${local || this.get(this.plRef(segs))}) ?? [], ${a[0].c})`); return;
-      case 'addAll': if (isRoot) break; this.emit(`${target} = append(array(${local || this.get(this.plRef(segs))}) ?? [], array(${a[0].c}) ?? [])`); return;
+      case 'add': { if (isRoot) break; const cur = this.plTmp(local || this.get(this.plRef(segs))); const arr = this.tmp('p'); this.emit(`${arr} = if is_array(${cur.c}) { array!(${cur.c}) } else { [] }`); this.emit(`${target} = push(${arr}, ${a[0].c})`); return; }
+      case 'addAll': { if (isRoot) break; const cur = this.plTmp(local || this.get(this.plRef(segs))); const arr = this.tmp('p'); const add = this.tmp('p'); this.emit(`${arr} = if is_array(${cur.c}) { array!(${cur.c}) } else { [] }`); this.emit(`${add} = if is_array(${a[0].c}) { array!(${a[0].c}) } else { [] }`); this.emit(`${target} = append(${arr}, ${add})`); return; }
       case 'clear': if (isRoot) break; this.emit(`${target} = if is_array(${target}) { [] } else { {} }`); return;
       case 'put': {
         if (local) { this.emit(`${local} = set!(${local}, [${this.plStr(a[0])}], ${a[1].c})`); return; }
