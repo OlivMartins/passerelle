@@ -1349,7 +1349,7 @@ Object.assign(IngestGen.prototype, {
         if (sv && sv.k === 're') { (env.reLocals = env.reLocals || new Map()).set(s.name, sv); env.locals.set(s.name, 're'); return; }
         if (sv && sv.k === 'sbnew') (env.sbs = env.sbs || new Set()).add(s.name);
         if (sv && sv.k === 'list' && sv.set) (env.sets = env.sets || new Set()).add(s.name);
-        const v = s.v ? this.plExpr(s.v, env) : { c: 'null', t: 'null' }; env.locals.set(s.name, v.t === 'null' ? 'any' : v.t); this.emit(`p_${s.name} = ${v.c}`); return; }
+        const v = s.v ? this.plExpr(s.v, env) : { c: 'null', t: 'null' }; env.locals.set(s.name, v.t === 'null' ? 'any' : v.t); /* null d’un type opaque : VRL ne doit pas déduire « null » pour une variable que la boucle réaffecte */ this.emit(`p_${s.name} = ${v.t === 'null' ? 'parse_json!("null")' : v.c}`); return; }
       case 'set': return this.plAssign(s.target, this.plExpr(s.v, env), env);
       case 'if': {
         const c = this.plExpr(s.c, env);
@@ -2589,7 +2589,8 @@ Object.assign(IngestGen.prototype, {
       if (trim) this.emit('if cell != null { cell = strip_whitespace(string!(cell)) }');
       // Une cellule vide n’est pas écrite, sauf empty_value
       this.open(o.empty_value !== undefined ? 'if cell != null' : 'if cell != null && cell != ""');
-      this.set(this.ref(c), o.empty_value !== undefined ? `if cell == "" { ${this.valueSource(o.empty_value)} } else { cell }` : 'cell');
+      if (o.empty_value !== undefined) this.emit(`cell_out = if cell == "" { ${this.valueSource(o.empty_value)} } else { cell }`);
+      this.set(this.ref(c), o.empty_value !== undefined ? 'cell_out' : 'cell');
       this.close();
     });
     this.close(); this.close(); this.close();
