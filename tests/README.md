@@ -130,7 +130,7 @@ La raison d’un écart est suivie de « non signalé par la traduction » quand
 
 Ajoutez une entrée dans `tests/pipelines/cases.mjs`, lancez `npm run test:pipelines -- --only=<id> --verbose`, puis `npm run test:update` pour créer son instantané. Un instantané ne garde que les transforms propres au cas : le transport du banc est le même partout.
 
-## Bancs d’ingestion Elasticsearch (travail en cours)
+## Bancs d’ingestion Elasticsearch
 
 La traduction des ingest pipelines vers VRL se vérifie contre le comportement d’Elasticsearch, sans cluster : les attendus viennent du code d’`IngestDocument` ou des fichiers `*-expected.json` des intégrations Elastic, produits par Elasticsearch lui-même.
 
@@ -145,3 +145,23 @@ node tests/ingest/corpus.mjs                                        # tous les d
 ```
 
 `PASSERELLE_INGEST_WORK` choisit le dossier de travail (par défaut, un dossier temporaire).
+
+Pour lancer à la suite tous les data streams qui ont des tests de pipeline : `node tests/ingest/tout.mjs [--only=regex] [--jobs=2]` (résumé dans `tout.tsv`, une ligne par data stream).
+
+### Compilation du VRL : `npm run test:ingest`
+
+Vector refuse la configuration entière si un seul VRL ne compile pas, quel que soit le verdict de Passerelle. `tests/ingest/valider.mjs` traduit puis passe `vector validate` sur :
+
+- les exemples de `examples/ingest/` et les cas de `tests/ingest/cas/` (une construction par fichier, ajoutés chaque fois qu’une compilation a échoué : `dot_expander`, conversions Painless) ;
+- avec `ELASTIC_INTEGRATIONS`, les data streams de `tests/ingest/integrations.txt` (ou ceux que sélectionne `--only=regex`, sur « paquet/flux »).
+
+`--clickhouse` rejoue le tout avec la sortie ClickHouse. Le banc a besoin de `VECTOR_BIN` et, pour les bases geoip, de `MAXMIND_TEST_DATA`. Il ne dit rien de l’exactitude des documents produits : c’est le rôle de `integration.mjs`.
+
+La CI joue ce banc dans le job `ingest`, avec Vector 0.59.0 et des clones épinglés des intégrations Elastic et de MaxMind-DB.
+
+## Bancs ClickHouse : `npm run test:attributes` et `npm run test:clickhouse`
+
+Sans Elasticsearch, avec le binaire `clickhouse local` (`CLICKHOUSE_LOCAL`, extrait par `tests/differential/clickhouse.sh`).
+
+- `test:attributes` : les attributs OpenTelemetry (`Map`, `JSON`) donnent le résultat de la table plate.
+- `test:clickhouse` : ce que Passerelle génère pour ses exemples (schéma, inventaire Kibana) s’exécute avec les valeurs attendues ; `tests/clickhouse/analyseurs.mjs` rejoue la chaîne des analyseurs (table créée depuis un mapping, lignes insérées, plan appliqué, recherches vérifiées), et `tests/clickhouse/grafana.mjs` les requêtes des tableaux Grafana.

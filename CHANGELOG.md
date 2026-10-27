@@ -4,6 +4,21 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Non publié]
 
+### Ajouté
+
+Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit désormais ce qui entoure Elasticsearch. Chaque sortie garde les verdicts prête, à vérifier, à reprendre ou non reconnue.
+
+- **Inventaire Kibana** (`passerelle kibana`, `POST /v1/inventory/kibana`) : lit un export d’objets sauvegardés (NDJSON) et dresse le catalogue de ce qui se traduit (index patterns, recherches, visualisations, Lens, cartes, tableaux de bord, alertes, règles de sécurité, connecteurs, canvas, graphes), objet par objet, en `md`, `html`, `csv` ou `json`. Les requêtes DSL, KQL et Lucene qu’ils portent sont traduites en SQL.
+- **Tableaux de bord Grafana** (`passerelle grafana`, `POST /v1/translate/grafana`) : les panneaux à source Elasticsearch deviennent des requêtes SQL ClickHouse, avec un rapport par panneau et le tableau de bord réécrit.
+- **Schéma** (`passerelle schema ddl`, `schema pull`) : `CREATE TABLE` ClickHouse déduit d’un mapping Elasticsearch, avec les préréglages OpenTelemetry `otel` (Map) et `otel-json` (colonnes JSON typées) ; `schema pull` lit les tables déjà présentes pour que les traductions s’y adaptent.
+- **Pipelines d’ingestion Elasticsearch** (`passerelle ingest`, `POST /v1/translate/ingest`) : les pipelines d’ingestion deviennent des étapes VRL. Processeurs pris en charge : `append`, `bytes`, `community_id`, `convert`, `csv`, `date`, `dissect`, `dot_expander`, `drop`, `fail`, `fingerprint`, `foreach`, `geoip`, `grok`, `gsub`, `html_strip`, `join`, `json`, `kv`, `lowercase`, `pipeline`, `registered_domain`, `remove`, `rename`, `reroute`, `script` (Painless), `set`, `split`, `terminate`, `trim`, `uppercase`, `uri_parts`, `urldecode`, `user_agent`. Un pipeline appelé par un autre est résolu parmi les fichiers donnés.
+- **Sortie ClickHouse** : avec `vector.elasticsearch_output: clickhouse`, la sortie `elasticsearch` d’un pipeline Logstash devient un puits ClickHouse (table, colonnes inconnues ignorées signalées).
+- **Plusieurs pipelines** : `pipelines.yml` est lu (`passerelle ls2vector pipelines.yml`, `POST /v1/translate/logstash/pipelines`), les pipelines qui s’appellent entre eux sont reliés.
+- **Analyseurs personnalisés** (`passerelle schema analyzers`) : un analyseur Elasticsearch (char_filters, tokenizers, filtres) devient une colonne `MATERIALIZED` et un index plein texte ClickHouse, avec l’aperçu des termes produits et la requête de recherche correspondante. Voir [docs/ANALYSEURS.md](docs/ANALYSEURS.md).
+- Filtres Logstash : `prune`, `de_dot`, `syslog_pri`, `clone`, `throttle`, `environment`, `bytes`.
+- **Interface** : deux nouvelles sections, « Ingestion » et « Autres sources » (Kibana, Grafana, schéma, analyseurs), avec dépôt de fichiers par type ; l’API et la ligne de commande y sont listées.
+- **CI** : le job `ingest` compile avec `vector validate` (0.59.0) le VRL de la traduction des exemples, des cas de `tests/ingest/cas/` et d’une sélection de data streams des intégrations Elastic, pour les sorties console et ClickHouse (`npm run test:ingest`). Le banc ClickHouse exécute aussi la chaîne complète des analyseurs.
+
 ### Sécurité
 
 - Release : les fichiers joints portent une attestation de provenance (`gh attestation verify <fichier> -R OlivMartins/passerelle`) ; un fichier déjà joint n’est plus remplacé en silence (`--clobber` retiré) ; le jeton en écriture n’est plus laissé dans le dépôt cloné pendant la construction.
@@ -11,6 +26,13 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Corrigé
 
+- Pipelines d’ingestion :
+  - `dot_expander` concaténait des tableaux avec `+`, que VRL refuse (E110) ; il utilise `append()`.
+  - Les conversions en chaîne des scripts Painless ne produisent plus d’erreur E651 (« fusion d’erreur inutile ») sur un type déjà connu.
+- Analyseurs :
+  - `elision` : `articles_case` n’était pas appliqué dans le bon sens (faux : sensible à la casse, vrai : insensible), et le filtre prédéfini cherchait toujours sans tenir compte de la casse ; un filtre défini sans `articles` ni `articles_path` est refusé, comme par Elasticsearch.
+  - `stemmer` : `name` est lu comme synonyme de `language` ; sans l’un ni l’autre, le défaut d’Elasticsearch (Porter) est appliqué, et `light_*`, `minimal_*`, sans équivalent dans ClickHouse, sont signalés « à reprendre ».
+  - `synonym` : la requête générée cherche le terme canonique, comme l’index, au lieu des mots développés qui ne trouvaient rien.
 - `ids` : la requête lit la colonne de `field_mapping._id`, comme `term` sur `_id`, au lieu d’une colonne `_id` écrite en dur.
 - `_source.excludes` : les exclusions sont gardées quand `includes` est présent ; un champ exclut aussi ses sous-champs (`http` retire `http.method`) et un motif (`http.*`) s’applique. Elles s’écrivent `EXCEPT ('expression régulière')` : une liste de noms n’excluait rien en silence pour un motif ou un nom absent.
 - `fuzzy` : `prefix_length` est appliqué (les premiers caractères doivent être identiques) au lieu d’être signalé « à vérifier » ; `fuzziness: AUTO:bas,haut` respecte ses bornes ; la longueur du mot se compte en caractères.
