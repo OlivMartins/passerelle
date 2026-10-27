@@ -1,5 +1,13 @@
 /* Passerelle — moteur partie 5 : ingest pipelines Elasticsearch → VRL */
 
+// VRL ne lit pas la notation 1e18 : le flottant est écrit en décimal
+function vrlExp(lit) {
+  const n = Number(lit);
+  if (!Number.isFinite(n)) return lit;
+  let t = String(n);
+  if (/e/i.test(t)) t = Math.abs(n) >= 1 ? BigInt(n).toString() : n.toFixed(30).replace(/0+$/, '');
+  return t.includes('.') ? t : `${t}.0`;
+}
 /*
  * YAML des paquets d’intégration Elastic (elasticsearch/ingest_pipeline/default.yml) : tables et listes en blocs,
  * listes « - clé: valeur », scalaires simples ou entre guillemets, blocs | et >, collections [a, b] et {a: b},
@@ -951,7 +959,7 @@ Object.assign(IngestGen.prototype, {
     const self = this;
     const X = n => self.plExpr(n, env);
     switch (e.k) {
-      case 'num': return { c: e.int ? String(Number(e.v)) : (/[.eE]/.test(e.v) ? (/^\d/.test(e.v) ? e.v : '0' + e.v) : e.v + '.0'), t: e.int ? 'int' : 'num' };
+      case 'num': return { c: e.int ? String(Number(e.v)) : (/[eE]/.test(e.v) ? vrlExp(e.v) : /\./.test(e.v) ? (/^\d/.test(e.v) ? e.v : '0' + e.v) : e.v + '.0'), t: e.int ? 'int' : 'num' };
       case 'str': return { c: vq(e.v), t: 'str' };
       case 'bool': return { c: String(e.v), t: 'bool' };
       case 'null': return { c: 'null', t: 'null' };

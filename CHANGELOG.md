@@ -34,6 +34,7 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
   - `keySet`, `values` et les boucles sur `params` ne portent plus de fusion d’erreur inutile (E651).
   - Une addition, soustraction ou multiplication Painless sur des valeurs de type inconnu n’utilise plus `?? null` (E651 quand VRL connaît déjà les types) : entiers entre eux, sinon flottants, sinon `null`.
   - Une variable Painless réaffectée avec une valeur d’un autre type perd son type (`String s = …; s = s.substring(1)` laissait croire à une chaîne, d'où E103 sur `split`).
+  - Un littéral flottant à exposant (`1e18`, `1.5e-3`) s’écrit en décimal : VRL ne lit pas cette notation et refusait la configuration (« undefined variable »).
   - `kv` : `trim_key` et `trim_value` qui contiennent une apostrophe donnent une expression régulière valide.
   - Les conversions en chaîne des scripts Painless ne produisent plus d’erreur E651 (« fusion d’erreur inutile ») sur un type déjà connu.
 - Analyseurs :

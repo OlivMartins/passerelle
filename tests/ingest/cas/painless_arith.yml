@@ -20,6 +20,13 @@ processors:
           s = s.substring(1);
         }
         ctx.parts = s.split('>');
+  - script:
+      lang: painless
+      source: |
+        long t = ctx.t;
+        if (t > 1e18 || t < 1.5e-3 || t == 2E3) {
+          ctx.hors_plage = true;
+        }
   - kv:
       field: message
       field_split: ' '
