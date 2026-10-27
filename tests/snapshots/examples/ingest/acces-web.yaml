@@ -4,6 +4,7 @@
 # À vérifier : geoip → table d’enrichissement
 # À vérifier : Painless : accès sans ?.
 # À vérifier : Script de nettoyage
+# À vérifier : Source Elastic Agent sans TLS
 # À vérifier : Vector 0.57 et suivants : interpolation à activer
 
 # Configuration Vector générée par Passerelle depuis 2 pipelines d’ingestion Elasticsearch

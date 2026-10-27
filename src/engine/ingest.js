@@ -2551,10 +2551,21 @@ function translateIngest(inputs, cfg, opts) {
   const unused = [...defs.keys()].filter(n => !tops.includes(n) && !pipelines.some(p => p.calls.includes(n)));
   if (unused.length) notes.add('info', 'Pipelines appelés seulement', `${unused.join(', ')} : appelé${unused.length > 1 ? 's' : ''} par un pipeline qui n’est pas traduit.`);
   // Configuration Vector : Elastic Agent (sortie Logstash) ou Beats, puis les pipelines, puis le bilan des échecs
-  const sources = { agent_in: { type: 'logstash', address: '0.0.0.0:5044' } };
+  const isrc = cfg.vector.ingest_source || {}; const listen = isrc.address || '0.0.0.0:5044'; const itls = isrc.tls || {};
+  const sources = { agent_in: { type: 'logstash', address: listen } };
+  if (itls.crt_file && itls.key_file) {
+    sources.agent_in.tls = { enabled: true, crt_file: itls.crt_file, key_file: itls.key_file };
+    if (itls.ca_file) sources.agent_in.tls.ca_file = itls.ca_file;
+    if (itls.verify_client) {
+      sources.agent_in.tls.verify_certificate = true;
+      if (!itls.ca_file) notes.add('info', 'Certificats clients de la source', 'Aucune ca_file : Vector vérifiera les certificats clients avec les autorités du système.');
+    }
+  } else {
+    notes.add('warn', 'Source Elastic Agent sans TLS', `Vector écoute sur ${listen} en clair : tout hôte qui atteint ce port peut y envoyer des documents. Renseignez vector.ingest_source.tls (crt_file et key_file, et verify_client avec ca_file pour exiger un certificat des agents), restreignez vector.ingest_source.address, et activez ssl dans la sortie Logstash d’Elastic Agent.`);
+  }
   if (cfg.vector.log_namespace !== false) sources.agent_in.log_namespace = true;
   const transforms = {};
-  const graph = { nodes: [{ id: 'agent_in', kind: 'source', type: 'logstash', label: 'Elastic Agent, Beats', detail: '0.0.0.0:5044' }], edges: [] };
+  const graph = { nodes: [{ id: 'agent_in', kind: 'source', type: 'logstash', label: 'Elastic Agent, Beats', detail: `${listen}${sources.agent_in.tls ? ' (TLS)' : ''}` }], edges: [] };
   let feeds = ['agent_in'];
   if (pipelines.length > 1) {
     // Aiguillage : data_stream.type-data_stream.dataset (Elastic Agent) ou @metadata.pipeline (Beats vers Logstash)

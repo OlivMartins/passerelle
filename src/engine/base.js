@@ -38,7 +38,9 @@ const DEFAULT_CONFIG = {
     output_topic: ''
   },
   // elasticsearch_output : clickhouse fait écrire une sortie elasticsearch dans la table ClickHouse visée par index_mapping
-  vector: { format: 'yaml', log_namespace: true, logstash_compat: true, acknowledgements: true, shadow_mode: false, ecs_compatibility: 'v8', elasticsearch_output: 'elasticsearch' }
+  vector: { format: 'yaml', log_namespace: true, logstash_compat: true, acknowledgements: true, shadow_mode: false, ecs_compatibility: 'v8', elasticsearch_output: 'elasticsearch',
+    // Source qui reçoit Elastic Agent et Beats pour les pipelines d’ingestion ; TLS vide : écoute en clair, signalée
+    ingest_source: { address: '0.0.0.0:5044', tls: { crt_file: '', key_file: '', ca_file: '', verify_client: false } } }
 };
 // Tables de correspondance : leurs clés sont libres, et une valeur donnée remplace la valeur par défaut en entier
 const FREE_MAPS = ['index_mapping', 'field_mapping', 'columns', 'names', 'tables', 'attributes', 'attribute_types', 'analyzers'];

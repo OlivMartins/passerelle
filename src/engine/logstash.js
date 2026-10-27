@@ -1192,10 +1192,52 @@ function buildSource(v, st, cfg, idx, used, opts) {
     if (src.__json && !v.ns) src.decoding = { codec: 'json' };
     // Le VRL de préparation suppose le namespace de logs, quelle que soit la source
     if (v.ns) src.log_namespace = true;
+    if (['beats', 'tcp', 'http'].includes(st.name)) listenTLS(v, s, src, st.name);
     v.stats.ok++;
     v.note('info', `Entrée ${st.name}`, `Traduite en source ${src.type}. Le sujet de la migration étant Kafka, vérifiez les options réseau.`);
   }
   return { name, src, s };
+}
+/*
+ * TLS d’une source qui écoute (beats, tcp, http) : options ssl_* de l’entrée Logstash → tls de la source Vector.
+ * Sans TLS, tout hôte qui atteint le port peut injecter des événements : c’est signalé « à vérifier ».
+ */
+function listenTLS(v, s, src, name) {
+  const on = truthy(s.ssl_enabled) || truthy(s.ssl);
+  const addr = src.address;
+  if (!on) {
+    v.stats.approx++;
+    v.note('warn', `Entrée ${name} sans TLS`, `Vector écoutera sur ${addr} en clair, comme le pipeline d’origine : tout hôte qui atteint ce port peut y envoyer des événements. Activez ssl_enabled (ssl_certificate, ssl_key) côté Logstash, ou limitez l’adresse d’écoute et le pare-feu.`);
+    return;
+  }
+  const tls = { enabled: true };
+  const keystore = s.ssl_keystore_path || s.keystore;
+  const pair = s.ssl_certificate && s.ssl_key;
+  if (pair) { tls.crt_file = String(s.ssl_certificate); tls.key_file = String(s.ssl_key); }
+  else {
+    // Vector ne lit que du PEM : sans certificat et clé PEM, des chemins à remplir sont posés plutôt qu’une source qui n’accepterait aucun client
+    tls.crt_file = '/etc/vector/certs/tls.crt'; tls.key_file = '/etc/vector/certs/tls.key';
+    v.stats.approx++;
+    v.note('warn', `TLS de l’entrée ${name} : certificat à fournir`, keystore
+      ? `${keystore} (JKS ou PKCS12) se convertit en PEM pour Vector (keytool -importkeystore puis openssl pkcs12 -nodes) ; renseignez ensuite tls.crt_file et tls.key_file, posés ici sur ${tls.crt_file} et ${tls.key_file}.`
+      : `ssl_certificate et ssl_key (PEM) sont nécessaires : tls.crt_file et tls.key_file sont posés sur ${tls.crt_file} et ${tls.key_file}.`);
+  }
+  if (s.ssl_key_passphrase !== undefined) tls.key_pass = secretRef(v, s.ssl_key_passphrase, 'LOGSTASH_SSL_KEY_PASS', 'Phrase secrète de la clé TLS');
+  const cas = lsList(s.ssl_certificate_authorities);
+  if (cas.length) tls.ca_file = String(cas[0]);
+  if (cas.length > 1) { v.stats.approx++; v.note('warn', 'Plusieurs autorités de certification', `Vector lit un seul fichier : concaténez ${cas.join(', ')} en un seul PEM.`); }
+  // Authentification des clients : ssl_client_authentication (none, optional, required) ou l’ancien ssl_verify_mode (none, peer, force_peer)
+  const mode = String(s.ssl_client_authentication || s.ssl_verify_mode || 'none').toLowerCase();
+  if (mode === 'required' || mode === 'force_peer') {
+    tls.verify_certificate = true;
+    if (!tls.ca_file) v.note('info', `Certificats clients de l’entrée ${name}`, 'Aucune ssl_certificate_authorities : Vector vérifiera les certificats clients avec les autorités du système.');
+  } else if (mode === 'optional' || mode === 'peer') {
+    tls.verify_certificate = true;
+    v.stats.approx++;
+    v.note('warn', `Certificat client de l’entrée ${name}`, 'Logstash acceptait aussi les clients sans certificat (optional) ; Vector n’a pas ce mode : le certificat client est exigé.');
+  }
+  if (s.ssl_cipher_suites || s.ssl_supported_protocols) v.note('info', `Suites et protocoles TLS de l’entrée ${name}`, 'ssl_cipher_suites et ssl_supported_protocols ne sont pas repris : Vector applique ses valeurs par défaut (TLS 1.2 et suivants).');
+  src.tls = tls;
 }
 function uniq(used, base) { let n = base, i = 2; while (used.has(n)) n = `${base}_${i++}`; used.add(n); return n; }
 function buildSink(v, st, cfg, used, singleKafka, opts) {

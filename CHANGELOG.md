@@ -6,6 +6,8 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Ajouté
 
+- **TLS des sources qui écoutent** : une entrée Logstash `beats`, `tcp` ou `http` reprend `ssl_enabled`, `ssl_certificate`, `ssl_key`, `ssl_certificate_authorities`, `ssl_client_authentication` (ou `ssl_verify_mode`) et `ssl_key_passphrase` (lue dans une variable d’environnement) dans le `tls` de la source Vector ; un magasin Java (JKS, PKCS12) est signalé, avec des chemins PEM à remplir. Sans TLS, la source est signalée « à vérifier » : tout hôte qui atteint le port peut y envoyer des événements. La source Elastic Agent des pipelines d’ingestion se règle par `vector.ingest_source` (`address`, `tls.crt_file`, `tls.key_file`, `tls.ca_file`, `tls.verify_client`), et elle est signalée de la même façon quand TLS est absent. Un banc (`tests/ingest/tls.mjs`) vérifie avec Vector que la configuration est acceptée, que le handshake répond avec le certificat donné et qu’une connexion en clair est refusée.
+
 Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit désormais ce qui entoure Elasticsearch. Chaque sortie garde les verdicts prête, à vérifier, à reprendre ou non reconnue.
 
 - **Inventaire Kibana** (`passerelle kibana`, `POST /v1/inventory/kibana`) : lit un export d’objets sauvegardés (NDJSON) et dresse le catalogue de ce qui se traduit (index patterns, recherches, visualisations, Lens, cartes, tableaux de bord, alertes, règles de sécurité, connecteurs, canvas, graphes), objet par objet, en `md`, `html`, `csv` ou `json`. Les requêtes DSL, KQL et Lucene qu’ils portent sont traduites en SQL.

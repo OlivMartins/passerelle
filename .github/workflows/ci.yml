@@ -124,6 +124,8 @@ jobs:
         run: node tests/ingest/valider.mjs
       - name: Compiler le VRL (sortie ClickHouse)
         run: node tests/ingest/valider.mjs --clickhouse
+      - name: TLS des sources qui écoutent (handshake réel)
+        run: node tests/ingest/tls.mjs
 
   # L'interface ouverte dans un vrai navigateur : chaque section traduit son exemple, sans erreur de page
   interface:

@@ -239,6 +239,26 @@ snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut
     const rec = E.translateIngest([{ name: 'r', text: JSON.stringify({ processors: [{ script: { source: 'int f(int n) { return f(n); }\nctx.a = f(1);' } }] }) }], E.DEFAULT_CONFIG);
     check(rec.pipelines[0].verdict === 'todo' && rec.notes.some(n => /récursive/.test(n.detail)), 'ingest : une fonction récursive est à reprendre avec sa raison');
   }
+  {
+    // TLS des sources qui écoutent
+    const inp = o => E.translateLogstash(`input { beats { port => 5044 ${o} } }\noutput { stdout { } }`, E.DEFAULT_CONFIG, {});
+    const clair = inp('');
+    check(clair.config.sources[Object.keys(clair.config.sources)[0]].tls === undefined && E.verdictOf(clair) === 'review' && clair.notes.some(n => n.level === 'warn' && /sans TLS/.test(n.title)), 'TLS : une entrée beats en clair est signalée « à vérifier »');
+    const tlsOk = inp('ssl_enabled => true ssl_certificate => "/c/a.crt" ssl_key => "/c/a.key" ssl_certificate_authorities => ["/c/ca.pem"] ssl_client_authentication => "required"');
+    const t1 = tlsOk.config.sources[Object.keys(tlsOk.config.sources)[0]].tls;
+    check(t1 && t1.enabled && t1.crt_file === '/c/a.crt' && t1.key_file === '/c/a.key' && t1.ca_file === '/c/ca.pem' && t1.verify_certificate === true && !tlsOk.notes.some(n => n.level === 'warn' && /TLS/.test(n.title)), 'TLS : certificat, clé, autorité et certificat client exigé repris sans remarque');
+    const opt = inp('ssl_enabled => true ssl_certificate => "/c/a.crt" ssl_key => "/c/a.key" ssl_client_authentication => "optional" ssl_key_passphrase => "secret"');
+    const t2 = opt.config.sources[Object.keys(opt.config.sources)[0]].tls;
+    check(t2.verify_certificate === true && t2.key_pass === '${LOGSTASH_SSL_KEY_PASS}' && !/secret/.test(opt.yaml) && opt.notes.some(n => /Certificat client/.test(n.title)), 'TLS : client optionnel signalé, phrase secrète lue dans une variable d’environnement');
+    const ks = inp('ssl_enabled => true ssl_keystore_path => "/c/k.p12"');
+    check(ks.config.sources[Object.keys(ks.config.sources)[0]].tls.crt_file === '/etc/vector/certs/tls.crt' && ks.notes.some(n => /certificat à fournir/.test(n.title)), 'TLS : un magasin Java est signalé, chemins PEM à remplir');
+    const ig0 = E.translateIngest([{ name: 'p', text: 'processors:\n  - set: { field: a, value: 1 }' }], E.DEFAULT_CONFIG);
+    check(ig0.config.sources.agent_in.tls === undefined && ig0.notes.some(n => n.level === 'warn' && /sans TLS/.test(n.title)), 'TLS : la source Elastic Agent en clair est signalée');
+    const c4 = JSON.parse(JSON.stringify(E.DEFAULT_CONFIG)); c4.vector.ingest_source = { address: '10.0.0.5:5044', tls: { crt_file: '/c/a.crt', key_file: '/c/a.key', ca_file: '/c/ca.pem', verify_client: true } };
+    const ig1 = E.translateIngest([{ name: 'p', text: 'processors:\n  - set: { field: a, value: 1 }' }], c4);
+    const t3 = ig1.config.sources.agent_in;
+    check(t3.address === '10.0.0.5:5044' && t3.tls.enabled && t3.tls.verify_certificate === true && t3.tls.ca_file === '/c/ca.pem' && !ig1.notes.some(n => /sans TLS/.test(n.title)), 'TLS : source Elastic Agent avec certificat, adresse et certificat client configurés');
+  }
   const sub = E.translateIngest([{ name: 'haut', text: 'processors:\n  - pipeline: { name: bas }\n  - set: { field: z, value: 1 }' }, { name: 'bas', text: 'processors:\n  - set: { field: y, value: 1 }' }], E.DEFAULT_CONFIG);
   check(sub.pipelines.length === 1 && sub.pipelines[0].name === 'haut' && sub.pipelines[0].calls.includes('bas') && /\.y = 1/.test(vrlOf(sub)), 'ingest : un pipeline appelé est traduit en place, seul le pipeline principal a son transform');
   const manquant = one('processors:\n  - pipeline: { name: absent }');

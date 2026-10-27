@@ -58,6 +58,23 @@ passerelle check-config --config /etc/passerelle/passerelle.yaml
 sudo systemctl reload passerelle      # rechargement à chaud (SIGHUP), sans coupure
 ```
 
+### TLS de la source qui reçoit les agents
+
+Les pipelines d’ingestion traduits écoutent Elastic Agent et Beats sur `0.0.0.0:5044`. Sans TLS, tout hôte qui atteint ce port peut envoyer des documents : la traduction le signale « à vérifier ». Pour chiffrer et authentifier la liaison :
+
+```yaml
+vector:
+  ingest_source:
+    address: 10.0.0.5:5044          # restreindre l’adresse d’écoute
+    tls:
+      crt_file: /etc/vector/certs/tls.crt
+      key_file: /etc/vector/certs/tls.key
+      ca_file: /etc/vector/certs/ca.pem   # autorité des certificats clients
+      verify_client: true                 # exige un certificat de chaque agent
+```
+
+Côté Elastic Agent, la sortie Logstash active `ssl.certificate_authorities` (et `ssl.certificate`, `ssl.key` avec `verify_client`). Une entrée `beats`, `tcp` ou `http` d’un pipeline Logstash reprend ses options `ssl_*` de la même façon ; un magasin Java (JKS, PKCS12) doit être converti en PEM.
+
 ### Compte ClickHouse de validation
 
 `/v1/validate/sql` soumet le SQL à `EXPLAIN indexes = 1`. Or ClickHouse évalue alors les sous-requêtes scalaires et imprime leur valeur dans le plan : une requête de validation peut donc lire des données. Deux barrières s’en chargent.
