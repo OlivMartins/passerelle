@@ -286,7 +286,7 @@ function serve(opts) {
       if (req.method === 'GET' && url.pathname === '/v1/config') return json(res, 200, publicConfig(cfg));
       if (req.method !== 'POST') return json(res, 405, { error: 'méthode non autorisée' });
       // Un export Kibana complet ou un gros tableau de bord dépassent vite 2 Mio : leurs routes acceptent davantage
-      const body = await readBody(req, url.pathname === '/v1/inventory/kibana' || url.pathname === '/v1/translate/grafana' ? INVENTORY_LIMIT : LIMIT);
+      const body = await readBody(req, url.pathname === '/v1/inventory/kibana' || url.pathname === '/v1/translate/grafana' || url.pathname === '/v1/translate/ingest' || url.pathname === '/v1/translate/logstash/pipelines' ? INVENTORY_LIMIT : LIMIT);
       switch (url.pathname) {
         case '/v1/translate/dsl': {
           const r = translateDSL(body, cfg, { index: url.searchParams.get('index') || '' });
@@ -317,6 +317,17 @@ function serve(opts) {
           if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized', notes: r.notes, pipelines: r.pipelines });
           r.pipelines.forEach((p, k) => Object.assign(p, { from: list[k].from, matched: list[k].matched }));
           return json(res, 200, { verdict: verdictOf(r), format: fmt, config: r[fmt], notes: r.notes, coverage: coverage(r.stats), topology: r.graph, env: r.env, summary: r.sentence, pipelines: r.pipelines });
+        }
+        case '/v1/translate/ingest': {
+          // Corps : un pipeline (YAML, JSON, ou requête PUT _ingest/pipeline de la console Kibana), ou JSON { "files": { "nom": "contenu" } }
+          const fmt = url.searchParams.get('format') === 'toml' ? 'toml' : 'yaml';
+          let inputs;
+          try { const j = JSON.parse(body); inputs = isObj(j) && isObj(j.files) ? Object.entries(j.files).map(([name, text]) => ({ name: name.replace(/^.*\//, '').replace(/\.(ya?ml|json)$/i, ''), text: String(text) })) : null; } catch (e) { inputs = null; }
+          if (!inputs) inputs = [{ name: url.searchParams.get('name') || 'pipeline', text: body }];
+          if (!inputs.length) return json(res, 400, { error: 'aucun pipeline', verdict: 'unrecognized' });
+          const r = translateIngest(inputs, cfg);
+          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized', notes: r.notes });
+          return json(res, 200, { verdict: verdictOf(r), format: fmt, config: r[fmt], notes: r.notes, coverage: coverage(r.stats), topology: r.graph, summary: r.sentence, pipelines: r.pipelines.map(({ vrl, ...p }) => p) });
         }
         case '/v1/inventory/kibana': {
           const fmt = url.searchParams.get('format') || 'json';
@@ -368,6 +379,7 @@ Utilisation :
   passerelle serve       [--config FICHIER] [--listen HÔTE:PORT]
   passerelle dsl2sql     <fichier|dossier>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo|review] [--verbose]
   passerelle ls2vector   <fichier|dossier|pipelines.yml>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review] [--verbose]
+  passerelle ingest      <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review] [--verbose]
   passerelle schema ddl  <fichier|dossier>... [--config FICHIER] [--preset otel|otel-json] [--compact] [--json] [--table NOM] [--format sql|yaml] [--out DOSSIER]
   passerelle schema pull [--config FICHIER] [--table NOM]...
   passerelle kibana      <export.ndjson>... [--config FICHIER] [--timezone FUSEAU] [--format md|html|csv|json] [--out DOSSIER] [--fail-on todo|review]
@@ -404,7 +416,7 @@ function parseArgs(argv) {
   }
   const o = Object.assign({ _: r.positionals }, r.values);
   if (o['fail-on'] !== undefined && o['fail-on'] !== 'todo' && o['fail-on'] !== 'review') fail(`--fail-on attend todo ou review, pas « ${o['fail-on']} »`);
-  if (o.format !== undefined && !['yaml', 'toml', 'sql', 'md', 'html', 'csv', 'json'].includes(o.format)) fail(`--format attend yaml ou toml (pipelines), sql ou yaml (schéma), md, html, csv ou json (inventaire), pas « ${o.format} »`);
+  if (o.format !== undefined && !['yaml', 'toml', 'sql', 'md', 'html', 'csv', 'json'].includes(o.format)) fail(`--format attend yaml ou toml (pipelines, ingest), sql ou yaml (schéma), md, html, csv ou json (inventaire), pas « ${o.format} »`);
   return o;
 }
 function collect(inputs, exts) {
@@ -526,6 +538,39 @@ function batch(kind, o) {
     process.exit(2);
   }
 }
+/* ---------- Pipelines d’ingestion Elasticsearch (passerelle ingest) ---------- */
+function ingestConvert(o) {
+  if (!o._.length) fail('aucun pipeline à traduire. Exemple : passerelle ingest pipelines/ --out ingest/');
+  formatFor(o, ['yaml', 'toml'], 'ingest');
+  const cfg = loadCfgOrFail(o);
+  const fmt = o.format || cfg.vector.format;
+  const files = collect(o._, /\.(ya?ml|json)$/i);
+  if (!files.length) fail('aucun fichier .yml, .yaml ou .json trouvé');
+  // Les pipelines d’un même dossier s’appellent entre eux (processeur pipeline) : ils sont lus ensemble
+  const inputs = files.map(f => ({ name: path.basename(f).replace(/\.(ya?ml|json)$/i, ''), text: fs.readFileSync(f, 'utf8') }));
+  const r = translateIngest(inputs, cfg);
+  const MARK = { ready: '✓', review: '~', todo: '!', unrecognized: '✗' };
+  if (r.error) { r.notes.forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`)); fail(`aucun pipeline traduit : ${r.error}`); }
+  const verdict = verdictOf(r); const cov = coverage(r.stats);
+  if (o.out) {
+    outDir(o.out);
+    const target = path.join(o.out, `ingest.${fmt}`);
+    fs.writeFileSync(target, r[fmt]);
+    // Un fichier .vrl par transform, pour les rejouer avec « vector vrl »
+    const vrlDir = path.join(o.out, 'vrl');
+    outDir(vrlDir);
+    for (const p of r.pipelines) p.chain.forEach((id, k) => fs.writeFileSync(path.join(vrlDir, `${id}.vrl`), p.vrls[k]));
+    process.stderr.write(`${MARK[verdict]} ${files.length} fichier(s) → ${target} et ${vrlDir}/ (${VERDICTS[verdict]} : ${r.pipelines.length} pipeline(s), ${cov.percent} % traduit, ${r.stats.approx} à vérifier, ${r.stats.ko} à reprendre)\n`);
+  } else {
+    process.stdout.write(r[fmt]);
+    process.stderr.write(`${MARK[verdict]} ${files.length} fichier(s) (${VERDICTS[verdict]} : ${r.pipelines.length} pipeline(s), ${cov.percent} % traduit, ${r.stats.approx} à vérifier, ${r.stats.ko} à reprendre)\n`);
+  }
+  for (const p of r.pipelines) process.stderr.write(`    ${MARK[p.verdict]} ${p.name} — ${p.processors} processeur(s)${p.chain.length > 1 ? `, ${p.chain.length} transforms` : ''}${p.calls.length ? `, appelle ${p.calls.join(', ')}` : ''}\n`);
+  const shown = r.notes.filter(n => o.verbose || n.level === 'err' || n.level === 'warn');
+  shown.forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`));
+  if (o['fail-on'] && VERDICT_RANK[verdict] >= VERDICT_RANK[o['fail-on']]) process.exit(2);
+}
+
 /* ---------- Schéma (passerelle schema ddl | pull) ---------- */
 function loadCfgOrFail(o) {
   try { return loadConfig(o.config || process.env.PASSERELLE_CONFIG || null); } catch (e) { return fail(e.message); }
@@ -653,6 +698,7 @@ function main(argv) {
       return fail(`sous-commande inconnue : schema ${sub || ''}`.trim() + ' (ddl ou pull)');
     }
     case 'ls2vector': return batch('ls', o);
+    case 'ingest': return ingestConvert(o);
     case 'kibana': return kibanaReport(o);
     case 'grafana': return grafanaConvert(o);
     case 'check-config': {

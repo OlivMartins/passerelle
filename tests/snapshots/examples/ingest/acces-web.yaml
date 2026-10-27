@@ -1,0 +1,751 @@
+# Couverture : 14 directs, 6 à vérifier, 0 à reprendre
+# À vérifier : uri_parts
+# À vérifier : user_agent → parse_user_agent
+# À vérifier : geoip → table d’enrichissement
+# À vérifier : Painless : accès sans ?.
+# À vérifier : Script de nettoyage
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
+
+# Configuration Vector générée par Passerelle depuis 2 pipelines d’ingestion Elasticsearch
+# Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+# Vector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)
+
+data_dir: /var/lib/vector
+api:
+  enabled: true
+  address: '127.0.0.1:8686'
+enrichment_tables:
+  geoip_geolite2_city:
+    type: geoip
+    path: /etc/vector/GeoLite2-City.mmdb
+sources:
+  agent_in:
+    type: logstash
+    address: '0.0.0.0:5044'
+    log_namespace: true
+transforms:
+  ingest_acces_web:
+    type: remap
+    inputs: [agent_in]
+    drop_on_abort: true
+    source: |
+      # Pipeline d’ingestion acces-web — Journaux d’accès web (format combiné) vers ECS
+      doc0 = .
+      ok = true
+      echec = null
+      fail = null
+      ingest_on_failure_message = null
+      ingest_on_failure_processor_type = null
+      ingest_on_failure_processor_tag = null
+      ingest_on_failure_pipeline = null
+      ingest_pipeline = "acces-web"
+      w_d = null
+      ingest_timestamp = now()
+
+      # processors[0] set
+      if ok {
+        fail = null
+        t_1 = ingest_timestamp
+        t_1 = if t_1 == null { "" } else { if is_string(t_1) { string!(t_1) } else if is_timestamp(t_1) { format_timestamp!(timestamp!(t_1), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(t_1) } }
+        t_1 = slice!(encode_json(t_1), 1, -1)
+        if (!exists(.event) || is_object(.event)) {
+          .event.ingested = t_1
+        } else {
+          fail = "\u{0}chemin"
+          w_d = { "m": "set", "p": "event.ingested", "s": ["event", "ingested"] }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "set"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+
+      # processors[1] set
+      if ok {
+        fail = null
+        if (!exists(.ecs) || is_object(.ecs)) {
+          .ecs.version = "8.11.0"
+        } else {
+          fail = "\u{0}chemin"
+          w_d = { "m": "set", "p": "ecs.version", "s": ["ecs", "version"] }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "set"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+
+      # processors[2] rename
+      if ok {
+        fail = null
+        cond_2 = (get!(., ["event", "original"]) == null)
+        if fail == null && cond_2 == true {
+          if !(exists(.message)) {
+            null
+          } else if exists(.event.original) {
+            fail = "field [event.original] already exists"
+          } else {
+            v = get!(., ["message"])
+            del(.message)
+            if (!exists(.event) || is_object(.event)) {
+              .event.original = v
+            } else {
+              fail = "\u{0}chemin"
+              w_d = { "m": "set", "p": "event.original", "s": ["event", "original"] }
+            }
+            if fail != null {
+              .message = v
+            }
+          }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "rename"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+
+      # processors[3] grok
+      if ok {
+        fail = null
+        v = get!(., ["event", "original"])
+        if !(exists(.event.original)) {
+          fail = "\u{0}chemin"
+          w_d = { "m": "read", "p": "event.original", "s": ["event", "original"] }
+        }
+        if fail == null {
+          if v == null {
+            fail = "field [event.original] is null, cannot process it."
+          } else if !is_string(v) {
+            jt = "null"
+            if is_string(v) { jt = "java.lang.String" }
+            if is_boolean(v) { jt = "java.lang.Boolean" }
+            if is_float(v) { jt = "java.lang.Double" }
+            if is_integer(v) { jt = if int!(v) > 2147483647 || int!(v) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } }
+            if is_timestamp(v) { jt = "java.time.ZonedDateTime" }
+            if is_array(v) { jt = "java.util.ArrayList" }
+            if is_object(v) { jt = "java.util.HashMap" }
+            fail = "field [" + "event.original" + "] of type [" + jt + "] cannot be cast to [java.lang.String]"
+          } else {
+            m = null
+            gi = null
+            if true {
+              m, err = parse_grok(string!(v), s'%{IPORHOST:source.address} - (-|%{DATA:user.name}) \[%{HTTPDATE:acces.horodatage}\] "%{WORD:http.request.method} %{DATA:url.original} HTTP/%{NUMBER:http.version}" %{NUMBER:http.response.status_code} (?:-|%{NUMBER:http.response.body.bytes}) "(?:-|%{DATA:http.request.referrer})" "(?:-|%{DATA:user_agent.original})"')
+              if err == null { gi = "0" } else { m = null }
+            }
+            if m == null {
+              fail = "Provided Grok expressions do not match field value: [" + string!(v) + "]"
+            } else {
+              for_each(object!(m)) -> |k, val| {
+                if val != null && fail == null {
+                  cv = val
+                  if k == "http.response.status_code" { n = to_int(string!(val)) ?? null; if n == null { fail = "For input string: \"" + string!(val) + "\"" } else { cv = n } }
+                  if k == "http.response.body.bytes" { n = to_int(string!(val)) ?? null; if n == null { fail = "For input string: \"" + string!(val) + "\"" } else { cv = n } }
+                  if fail == null { . = set!(., split(k, "."), cv) }
+                }
+              }
+            }
+          }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "grok"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          if w_d != null && (fail == "\u{0}chemin") {
+            w_m = string!(w_d.m)
+            w_p = string!(w_d.p)
+            w_sp = array!(w_d.s)
+            w_cur = get!(., [])
+            w_msg = null
+            w_libre = false
+            for_each(w_sp) -> |i, seg| {
+              if w_msg == null && !w_libre {
+                w_seg = string!(seg)
+                w_leaf = i == length(w_sp) - 1
+                if is_object(w_cur) {
+                  w_has = includes(keys(object!(w_cur)), w_seg)
+                  if !w_has && w_m == "set" { w_libre = true }
+                  if !w_has && w_m != "set" { w_msg = "field [" + w_seg + "] not present as part of path [" + w_p + "]" }
+                  if w_has { w_cur = get!(w_cur, [w_seg]) }
+                } else {
+                  w_of = "null"
+                  if is_string(w_cur) { w_of = "java.lang.String" }
+                  if is_boolean(w_cur) { w_of = "java.lang.Boolean" }
+                  if is_float(w_cur) { w_of = "java.lang.Double" }
+                  if is_integer(w_cur) { w_of = if int!(w_cur) > 2147483647 || int!(w_cur) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } }
+                  if is_timestamp(w_cur) { w_of = "java.time.ZonedDateTime" }
+                  if w_of != "null" { w_of = "object of type [" + w_of + "]" }
+                  w_msg = "cannot resolve [" + w_seg + "] from " + w_of
+                  if w_leaf && w_m == "set" { w_msg = "cannot set [" + w_seg + "] with parent " + w_of }
+                  if w_leaf && w_m == "set" && w_of == "null" { w_msg = "cannot set [" + w_seg + "] with null parent" }
+                  if w_leaf && w_m == "remove" { w_msg = "cannot remove [" + w_seg + "] from " + w_of }
+                  if is_array(w_cur) { w_msg = "[" + w_seg + "] is not an integer, cannot be used as an index" }
+                  w_msg = w_msg + " as part of path [" + w_p + "]"
+                }
+              }
+            }
+            if w_msg == null { w_msg = if w_m == "set" { "cannot set [" + w_p + "]" } else { "field [" + w_p + "] not present as part of path [" + w_p + "]" } }
+            if fail == "\u{0}chemin" { fail = w_msg }
+            w_d = null
+          }
+          ingest_on_failure_message = fail
+          ok_4 = true
+          echec_5 = null
+          
+          # processors[3].on_failure[0] append
+          if ok_4 {
+            fail = null
+            t_6 = ingest_on_failure_message
+            t_6 = if t_6 == null { "" } else { if is_string(t_6) { string!(t_6) } else if is_timestamp(t_6) { format_timestamp!(timestamp!(t_6), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(t_6) } }
+            add = "ligne illisible : " + t_6
+            if fail == null {
+              adds = if is_array(add) { array!(add) } else { [add] }
+              old = get!(., ["error", "message"])
+              had = exists(.error.message)
+              list = if had { if is_array(old) { array!(old) } else { [old] } } else { [] }
+              n = length(list)
+              for_each(adds) -> |_i, x| {
+                if true && true { list = push(list, x) }
+              }
+              if length(list) != n {
+                if (!exists(.error) || is_object(.error)) {
+                  .error.message = list
+                } else {
+                  fail = "\u{0}chemin"
+                  w_d = { "m": "set", "p": "error.message", "s": ["error", "message"] }
+                }
+              }
+            }
+            if fail != null {
+              ingest_on_failure_message = fail
+              ingest_on_failure_processor_type = "append"
+              ingest_on_failure_processor_tag = null
+              ingest_on_failure_pipeline = "acces-web"
+              ok_4 = false
+              echec_5 = fail
+            }
+          }
+          if !ok_4 { ok = false; echec = echec_5 }
+        }
+      }
+
+      # processors[4] date
+      if ok {
+        fail = null
+        cond_7 = (get!(., ["acces", "horodatage"]) != null)
+        if fail == null && cond_7 == true {
+          v = get!(., ["acces", "horodatage"])
+          if !(exists(.acces.horodatage)) {
+            fail = "\u{0}chemin"
+            w_d = { "m": "read", "p": "acces.horodatage", "s": ["acces", "horodatage"] }
+          }
+          if fail == null {
+            s = if v == null { null } else { if is_string(v) { string!(v) } else if is_timestamp(v) { format_timestamp!(timestamp!(v), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(v) } }
+            ts = null
+            if s != null {
+              if ts == null {
+                ts = parse_timestamp(string!(s), "%d/%b/%Y:%H:%M:%S %z", timezone: "UTC") ?? null
+              }
+            }
+            if ts == null {
+              sd = if s == null { "null" } else { string!(s) }
+              fail = "unable to parse date [" + sd + "]"
+            } else {
+              out = format_timestamp!(ts, format: "%Y-%m-%dT%H:%M:%S%.3f%:z", timezone: "UTC")
+              out = replace(out, r'\+00:00$$', "Z")
+              ."@timestamp" = out
+            }
+          }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "date"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+
+      # processors[5] remove
+      if ok {
+        fail = null
+        del(.acces.horodatage)
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "remove"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+
+      # processors[6] uri_parts
+      if ok {
+        fail = null
+        v = get!(., ["url", "original"])
+        if !(exists(.url.original)) {
+          fail = "cannot access [url.original]"
+        }
+        if fail == null && v != null {
+          if !is_string(v) {
+            jt = "null"
+            if is_string(v) { jt = "java.lang.String" }
+            if is_boolean(v) { jt = "java.lang.Boolean" }
+            if is_float(v) { jt = "java.lang.Double" }
+            if is_integer(v) { jt = if int!(v) > 2147483647 || int!(v) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } }
+            if is_timestamp(v) { jt = "java.time.ZonedDateTime" }
+            if is_array(v) { jt = "java.util.ArrayList" }
+            if is_object(v) { jt = "java.util.HashMap" }
+            fail = "field [" + "url.original" + "] of type [" + jt + "] cannot be cast to [java.lang.String]"
+          } else {
+            m = parse_regex(string!(v), r'^(?:(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*):)?(?://(?P<authority>[^/?#]*))?(?P<path>[^?#]*)(?:\?(?P<query>[^#]*))?(?:#(?P<fragment>.*))?$$') ?? null
+            if m == null || match(string!(v), r'\s') {
+              fail = "unable to parse URI [" + string!(v) + "]"
+            } else {
+              u = {}
+              a = parse_regex(string(m.authority) ?? "", r'^(?:(?P<ui>[^@]*)@)?(?P<host>\[[^\]]*\]|[^:]*)(?::(?P<port>\d*))?$$') ?? {}
+              if a.host != null && a.host != "" { u.domain = a.host }
+              if m.fragment != null { u.fragment = decode_percent(string!(m.fragment)) }
+              p = decode_percent(string(m.path) ?? "")
+              if m.authority != null || p != "" { u.path = p }
+              last = replace(p, r'^.*/', "")
+              if contains(p, "/") && contains(last, ".") { u.extension = replace(last, r'^.*\.', "") }
+              if a.port != null && a.port != "" { u.port = to_int(a.port) ?? null }
+              if m.query != null { u.query = decode_percent(string!(m.query)) }
+              if m.scheme != null { u.scheme = m.scheme }
+              if a.ui != null {
+                ui = decode_percent(string!(a.ui))
+                u.user_info = ui
+                if contains(ui, ":") { parts = split(ui, ":", limit: 2); u.username = parts[0]; u.password = parts[1] }
+              }
+              u.original = v
+              .url = u
+            }
+          }
+        }
+        if fail != null {
+          fail = null
+        }
+      }
+
+      # processors[7] pipeline
+      ok_9 = false
+      echec_10 = null
+      if ok {
+        fail = null
+        cond_11 = (get!(., ["user_agent", "original"]) != null)
+        if fail == null && cond_11 == true {
+          # début du pipeline navigateur
+          ok_9 = true
+          echec_10 = null
+          ingest_pipeline = "navigateur"
+        }
+      }
+
+      # navigateur.processors[0] user_agent
+      if ok_9 {
+        fail = null
+        v = get!(., ["user_agent", "original"])
+        if fail == null && v != null {
+          if !is_string(v) {
+            jt = "null"
+            if is_string(v) { jt = "java.lang.String" }
+            if is_boolean(v) { jt = "java.lang.Boolean" }
+            if is_float(v) { jt = "java.lang.Double" }
+            if is_integer(v) { jt = if int!(v) > 2147483647 || int!(v) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } }
+            if is_timestamp(v) { jt = "java.time.ZonedDateTime" }
+            if is_array(v) { jt = "java.util.ArrayList" }
+            if is_object(v) { jt = "java.util.HashMap" }
+            fail = "field [" + "user_agent.original" + "] of type [" + jt + "] cannot be cast to [java.lang.String]"
+          } else {
+            ua = parse_user_agent(string!(v), mode: "enriched")
+            out = { "original": v, "os": {}, "device": {} }
+            ver = [ua.browser.major, ua.browser.minor, ua.browser.patch]
+            out.name = if ua.browser.family == null { "Other" } else { ua.browser.family }
+            vs = filter(ver) -> |_i, x| { x != null }
+            if length(vs) > 0 { out.version = join!(vs, ".") }
+            if ua.os.family != null { out.os.name = ua.os.family }
+            ov = filter([ua.os.major, ua.os.minor, ua.os.patch]) -> |_i, x| { x != null }
+            if length(ov) > 0 { out.os.version = join!(ov, "."); out.os.full = string!(ua.os.family) + " " + join!(ov, ".") }
+            out.device.name = if ua.device.family == null { "Other" } else { ua.device.family }
+            if length(out.os) == 0 { del(out.os) }
+            .user_agent = out
+          }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "user_agent"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "navigateur"
+          ok_9 = false
+          echec_10 = fail
+        }
+      }
+
+      # navigateur.processors[1] lowercase
+      if ok_9 {
+        fail = null
+        cond_13 = (get!(., ["user_agent", "name"]) != null)
+        if fail == null && cond_13 == true {
+          v = get!(., ["user_agent", "name"])
+          if fail == null {
+            out = null
+            if v == null {
+              null
+            } else if is_string(v) {
+              out = downcase(string!(v))
+            } else if is_array(v) {
+              out = []
+              for_each(array!(v)) -> |_i, x| {
+                if fail == null {
+                  if is_string(x) {
+                    one = downcase(string!(x))
+                    if fail == null { out = push(out, one) }
+                  } else {
+                    jt = "null"
+                    if is_string(x) { jt = "java.lang.String" }
+                    if is_boolean(x) { jt = "java.lang.Boolean" }
+                    if is_float(x) { jt = "java.lang.Double" }
+                    if is_integer(x) { jt = if int!(x) > 2147483647 || int!(x) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } }
+                    if is_timestamp(x) { jt = "java.time.ZonedDateTime" }
+                    if is_array(x) { jt = "java.util.ArrayList" }
+                    if is_object(x) { jt = "java.util.HashMap" }
+                    xs = if is_string(x) { string!(x) } else if is_timestamp(x) { format_timestamp!(timestamp!(x), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(x) }
+                    fail = "value [" + xs + "] of type [" + jt + "] in list field [" + "user_agent.name" + "] cannot be cast to [java.lang.String]"
+                  }
+                }
+              }
+            } else {
+              jt = "null"
+              if is_string(v) { jt = "java.lang.String" }
+              if is_boolean(v) { jt = "java.lang.Boolean" }
+              if is_float(v) { jt = "java.lang.Double" }
+              if is_integer(v) { jt = if int!(v) > 2147483647 || int!(v) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } }
+              if is_timestamp(v) { jt = "java.time.ZonedDateTime" }
+              if is_array(v) { jt = "java.util.ArrayList" }
+              if is_object(v) { jt = "java.util.HashMap" }
+              fail = "field [" + "user_agent.name" + "] of type [" + jt + "] cannot be cast to [java.lang.String]"
+            }
+            if fail == null && v != null {
+              if (!exists(.user_agent) || is_object(.user_agent)) {
+                .user_agent.name = out
+              } else {
+                fail = "\u{0}chemin"
+                w_d = { "m": "set", "p": "user_agent.name", "s": ["user_agent", "name"] }
+              }
+            }
+          }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "lowercase"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "navigateur"
+          ok_9 = false
+          echec_10 = fail
+        }
+      }
+      # fin du pipeline navigateur
+      if ok {
+        ingest_pipeline = "acces-web"
+        fail = echec_10
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "pipeline"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+
+      # processors[8] geoip
+      if ok {
+        fail = null
+        v = get!(., ["source", "address"])
+        if fail == null && v != null {
+          ip = if is_array(v) { array!(v)[0] } else { v }
+          if !is_string(ip) || !(is_ipv4(string!(ip)) || is_ipv6(string!(ip))) {
+            ips = if is_string(ip) { string!(ip) } else if is_timestamp(ip) { format_timestamp!(timestamp!(ip), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(ip) }
+            fail = "'" + ips + "' is not an IP string literal."
+          } else {
+            g = get_enrichment_table_record("geoip_geolite2_city", { "ip": ip }) ?? null
+            if g != null {
+              out = {}
+              if g.continent_code != null { out.continent_code = g.continent_code }
+              if g.country_name != null { out.country_name = g.country_name }
+              if g.country_code != null { out.country_iso_code = g.country_code }
+              if g.region_name != null { out.region_name = g.region_name }
+              if g.country_code != null && g.region_code != null { out.region_iso_code = string!(g.country_code) + "-" + string!(g.region_code) }
+              if g.city_name != null { out.city_name = g.city_name }
+              if g.latitude != null && g.longitude != null { out.location = { "lat": g.latitude, "lon": g.longitude } }
+              if g.timezone != null { out.timezone = g.timezone }
+              if g.postal_code != null { out.postal_code = g.postal_code }
+              if length(out) > 0 {
+                if (!exists(.source) || is_object(.source)) {
+                  .source.geo = out
+                } else {
+                  fail = "\u{0}chemin"
+                  w_d = { "m": "set", "p": "source.geo", "s": ["source", "geo"] }
+                }
+              }
+            }
+          }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "geoip"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+
+      # processors[9] set
+      if ok {
+        fail = null
+        cond_15 = ((get!(., ["http", "response", "status_code"]) != null) && ((get!(., ["http", "response", "status_code"]) < 400) ?? false))
+        if fail == null && cond_15 == true {
+          if (!exists(.event) || is_object(.event)) {
+            .event.outcome = "success"
+          } else {
+            fail = "\u{0}chemin"
+            w_d = { "m": "set", "p": "event.outcome", "s": ["event", "outcome"] }
+          }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "set"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+
+      # processors[10] set
+      if ok {
+        fail = null
+        cond_17 = ((get!(., ["http", "response", "status_code"]) != null) && ((get!(., ["http", "response", "status_code"]) >= 400) ?? false))
+        if fail == null && cond_17 == true {
+          if (!exists(.event) || is_object(.event)) {
+            .event.outcome = "failure"
+          } else {
+            fail = "\u{0}chemin"
+            w_d = { "m": "set", "p": "event.outcome", "s": ["event", "outcome"] }
+          }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "set"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+
+      # processors[11] convert
+      if ok {
+        fail = null
+        v = get!(., ["http", "response", "status_code"])
+        if fail == null {
+          res = null
+          if v == null {
+            null
+          } else {
+            if is_array(v) {
+              outs = []
+              for_each(array!(v)) -> |_i, x| {
+                if fail == null {
+                  y = null
+                  s = if is_string(x) { string!(x) } else if is_timestamp(x) { format_timestamp!(timestamp!(x), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(x) }
+                  n = if starts_with(s, "0x") || starts_with(s, "-0x") { parse_int(replace(s, "0x", ""), base: 16) ?? null } else if match(s, r'^[+-]?[0-9]+$$') { to_int(s) ?? null } else { null }
+                  if n == null { fail = "unable to convert [" + s + "] to integer" } else if int!(n) > 2147483647 || int!(n) < -2147483648 { fail = "unable to convert [" + s + "] to integer" } else { y = n }
+                  outs = push(outs, y)
+                }
+              }
+              res = outs
+            } else {
+              y = null
+              s = if is_string(v) { string!(v) } else if is_timestamp(v) { format_timestamp!(timestamp!(v), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(v) }
+              n = if starts_with(s, "0x") || starts_with(s, "-0x") { parse_int(replace(s, "0x", ""), base: 16) ?? null } else if match(s, r'^[+-]?[0-9]+$$') { to_int(s) ?? null } else { null }
+              if n == null { fail = "unable to convert [" + s + "] to integer" } else if int!(n) > 2147483647 || int!(n) < -2147483648 { fail = "unable to convert [" + s + "] to integer" } else { y = n }
+              res = y
+            }
+          }
+          if fail == null && v != null {
+            if (!exists(.http) || is_object(.http)) && (!exists(.http.response) || is_object(.http.response)) {
+              .http.response.status_code = res
+            } else {
+              fail = "\u{0}chemin"
+              w_d = { "m": "set", "p": "http.response.status_code", "s": ["http", "response", "status_code"] }
+            }
+          }
+        }
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "convert"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+
+      # processors[12] script — Retire les champs vides
+      if ok {
+        fail = null
+        # Script reconnu : valeurs vides retirées à toute profondeur
+        . = compact(object!(.), recursive: true, null: true, string: true, object: false, array: false, nullish: false)
+        if fail != null {
+          ingest_on_failure_message = fail
+          ingest_on_failure_processor_type = "script"
+          ingest_on_failure_processor_tag = null
+          ingest_on_failure_pipeline = "acces-web"
+          ok = false
+          echec = fail
+        }
+      }
+      if !ok && echec != null {
+        if w_d != null && (echec == "\u{0}chemin" || ingest_on_failure_message == "\u{0}chemin") {
+          w_m = string!(w_d.m)
+          w_p = string!(w_d.p)
+          w_sp = array!(w_d.s)
+          w_cur = get!(., [])
+          w_msg = null
+          w_libre = false
+          for_each(w_sp) -> |i, seg| {
+            if w_msg == null && !w_libre {
+              w_seg = string!(seg)
+              w_leaf = i == length(w_sp) - 1
+              if is_object(w_cur) {
+                w_has = includes(keys(object!(w_cur)), w_seg)
+                if !w_has && w_m == "set" { w_libre = true }
+                if !w_has && w_m != "set" { w_msg = "field [" + w_seg + "] not present as part of path [" + w_p + "]" }
+                if w_has { w_cur = get!(w_cur, [w_seg]) }
+              } else {
+                w_of = "null"
+                if is_string(w_cur) { w_of = "java.lang.String" }
+                if is_boolean(w_cur) { w_of = "java.lang.Boolean" }
+                if is_float(w_cur) { w_of = "java.lang.Double" }
+                if is_integer(w_cur) { w_of = if int!(w_cur) > 2147483647 || int!(w_cur) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } }
+                if is_timestamp(w_cur) { w_of = "java.time.ZonedDateTime" }
+                if w_of != "null" { w_of = "object of type [" + w_of + "]" }
+                w_msg = "cannot resolve [" + w_seg + "] from " + w_of
+                if w_leaf && w_m == "set" { w_msg = "cannot set [" + w_seg + "] with parent " + w_of }
+                if w_leaf && w_m == "set" && w_of == "null" { w_msg = "cannot set [" + w_seg + "] with null parent" }
+                if w_leaf && w_m == "remove" { w_msg = "cannot remove [" + w_seg + "] from " + w_of }
+                if is_array(w_cur) { w_msg = "[" + w_seg + "] is not an integer, cannot be used as an index" }
+                w_msg = w_msg + " as part of path [" + w_p + "]"
+              }
+            }
+          }
+          if w_msg == null { w_msg = if w_m == "set" { "cannot set [" + w_p + "]" } else { "field [" + w_p + "] not present as part of path [" + w_p + "]" } }
+          if echec == "\u{0}chemin" { echec = w_msg }
+          if ingest_on_failure_message == "\u{0}chemin" { ingest_on_failure_message = w_msg }
+          w_d = null
+        }
+        ok_19 = true
+        echec_20 = null
+        
+        # acces-web.on_failure[0] set
+        if ok_19 {
+          fail = null
+          t_21 = ingest_on_failure_message
+          t_21 = if t_21 == null { "" } else { if is_string(t_21) { string!(t_21) } else if is_timestamp(t_21) { format_timestamp!(timestamp!(t_21), format: "%Y-%m-%dT%H:%M:%S%.3fZ") } else { encode_json(t_21) } }
+          if (!exists(.error) || is_object(.error)) {
+            .error.message = t_21
+          } else {
+            fail = "\u{0}chemin"
+            w_d = { "m": "set", "p": "error.message", "s": ["error", "message"] }
+          }
+          if fail != null {
+            ingest_on_failure_message = fail
+            ingest_on_failure_processor_type = "set"
+            ingest_on_failure_processor_tag = null
+            ingest_on_failure_pipeline = "acces-web"
+            ok_19 = false
+            echec_20 = fail
+          }
+        }
+        echec = echec_20
+      }
+      echec = echec
+
+      # Échec non rattrapé : Elasticsearch refuse le document ; il est rendu tel qu’il est arrivé, avec la cause
+      if echec != null {
+        if w_d != null && (echec == "\u{0}chemin" || ingest_on_failure_message == "\u{0}chemin") {
+          w_m = string!(w_d.m)
+          w_p = string!(w_d.p)
+          w_sp = array!(w_d.s)
+          w_cur = get!(., [])
+          w_msg = null
+          w_libre = false
+          for_each(w_sp) -> |i, seg| {
+            if w_msg == null && !w_libre {
+              w_seg = string!(seg)
+              w_leaf = i == length(w_sp) - 1
+              if is_object(w_cur) {
+                w_has = includes(keys(object!(w_cur)), w_seg)
+                if !w_has && w_m == "set" { w_libre = true }
+                if !w_has && w_m != "set" { w_msg = "field [" + w_seg + "] not present as part of path [" + w_p + "]" }
+                if w_has { w_cur = get!(w_cur, [w_seg]) }
+              } else {
+                w_of = "null"
+                if is_string(w_cur) { w_of = "java.lang.String" }
+                if is_boolean(w_cur) { w_of = "java.lang.Boolean" }
+                if is_float(w_cur) { w_of = "java.lang.Double" }
+                if is_integer(w_cur) { w_of = if int!(w_cur) > 2147483647 || int!(w_cur) < -2147483648 { "java.lang.Long" } else { "java.lang.Integer" } }
+                if is_timestamp(w_cur) { w_of = "java.time.ZonedDateTime" }
+                if w_of != "null" { w_of = "object of type [" + w_of + "]" }
+                w_msg = "cannot resolve [" + w_seg + "] from " + w_of
+                if w_leaf && w_m == "set" { w_msg = "cannot set [" + w_seg + "] with parent " + w_of }
+                if w_leaf && w_m == "set" && w_of == "null" { w_msg = "cannot set [" + w_seg + "] with null parent" }
+                if w_leaf && w_m == "remove" { w_msg = "cannot remove [" + w_seg + "] from " + w_of }
+                if is_array(w_cur) { w_msg = "[" + w_seg + "] is not an integer, cannot be used as an index" }
+                w_msg = w_msg + " as part of path [" + w_p + "]"
+              }
+            }
+          }
+          if w_msg == null { w_msg = if w_m == "set" { "cannot set [" + w_p + "]" } else { "field [" + w_p + "] not present as part of path [" + w_p + "]" } }
+          if echec == "\u{0}chemin" { echec = w_msg }
+          if ingest_on_failure_message == "\u{0}chemin" { ingest_on_failure_message = w_msg }
+          w_d = null
+        }
+        . = doc0
+        %ingest_failure = { "message": echec, "processor_type": ingest_on_failure_processor_type, "processor_tag": ingest_on_failure_processor_tag, "pipeline": ingest_on_failure_pipeline }
+      }
+  bilan:
+    type: route
+    inputs: [ingest_acces_web]
+    reroute_unmatched: true
+    route:
+      echecs: exists(%ingest_failure)
+sinks:
+  sortie:
+    type: console
+    inputs: [bilan._unmatched]
+    encoding:
+      codec: json
+  echecs:
+    type: file
+    inputs: [bilan.echecs]
+    path: /var/lib/vector/ingest-echecs-%Y-%m-%d.ndjson
+    encoding:
+      codec: json

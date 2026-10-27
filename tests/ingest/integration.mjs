@@ -23,6 +23,7 @@ console.log(r.pipelines.map(p => `${p.name} : ${p.verdict}, ${p.stats.ok} ok, ${
 if (flags.includes('--notes')) console.log(r.notes.filter(n => n.level === 'err' || n.level === 'warn').map(n => `  [${n.level}] ${n.title} — ${n.detail}`).join('\n'));
 
 const tdir = join(root, '_dev', 'test', 'pipeline');
+if (!existsSync(tdir)) { console.log('Ce data stream n’a pas de tests de pipeline.'); process.exit(0); }
 const yml = f => (existsSync(f) ? E.yamlLoad(readFileSync(f, 'utf8')) || {} : {});
 const common = yml(join(tdir, 'test-common-config.yml'));
 let total = 0, same = 0; const diffs = {};

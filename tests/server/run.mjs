@@ -174,6 +174,15 @@ try {
   r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: JSON.stringify({ pipelines: yml, files: ['x'] }), headers: auth });
   check(r.status === 400, 'pipelines.yml : « files » mal formé refusé', `statut ${r.status}`);
 
+  /* ---------- Pipelines d’ingestion Elasticsearch ---------- */
+  const ingFiles = Object.fromEntries(['acces-web', 'navigateur'].map(n => [`${n}.yml`, rd(`examples/ingest/${n}.yml`)]));
+  r = await request(prod, 'POST', '/v1/translate/ingest', { body: JSON.stringify({ files: ingFiles }), headers: auth });
+  check(r.status === 200 && r.json.pipelines.length === 1 && r.json.pipelines[0].name === 'acces-web' && r.json.verdict !== 'todo' && /ingest_acces_web/.test(r.json.config), 'ingest : deux pipelines, l’un appelant l’autre, une configuration', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/ingest?format=toml&name=seul', { body: 'processors:\n  - set: { field: a, value: 1 }\n', headers: auth });
+  check(r.status === 200 && r.json.format === 'toml' && r.json.pipelines[0].name === 'seul' && /\[transforms\.ingest_seul\]/.test(r.json.config), 'ingest : pipeline seul en TOML, nom pris dans ?name=', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/ingest', { body: 'rien de lisible', headers: auth });
+  check(r.status === 422 && r.json.verdict === 'unrecognized', 'ingest : texte illisible refusé', `statut ${r.status}`);
+
   /* ---------- Inventaire Kibana ---------- */
   const ndjson = rd('examples/kibana/supervision_web.ndjson');
   r = await request(prod, 'POST', '/v1/inventory/kibana', { body: ndjson, headers: auth });
@@ -236,6 +245,16 @@ c = cli('ls2vector', join(TMP, 'absent.yml'));
 check(c.status === 1 && /absent\.yml/.test(c.stderr), 'ls2vector pipelines.yml introuvable : erreur', `code ${c.status}`);
 c = cli('--help');
 check(/--verbose/.test(c.stdout), 'l’aide mentionne --verbose');
+
+const ingOut = join(TMP, 'ingest');
+c = cli('ingest', 'examples/ingest/', '--out', ingOut);
+check(c.status === 0 && existsSync(join(ingOut, 'ingest.yaml')) && readdirSync(join(ingOut, 'vrl')).includes('ingest_acces_web.vrl') && /acces-web — \d+ processeur/.test(c.stderr), 'ingest --out : configuration et un .vrl par transform', `code ${c.status} ${c.stderr}`);
+c = cli('ingest', 'examples/ingest/acces-web.yml', '--format', 'toml');
+check(c.status === 0 && /\[transforms\./.test(c.stdout), 'ingest --format toml : sur la sortie standard');
+c = cli('ingest', 'examples/ingest/', '--format', 'sql');
+check(c.status === 1 && /--format attend yaml ou toml/.test(c.stderr), 'ingest --format sql : refusé');
+c = cli('ingest', 'absent.yml');
+check(c.status === 1 && /introuvable/.test(c.stderr), 'ingest sur un fichier introuvable : erreur', `code ${c.status}`);
 
 const kibanaOut = join(TMP, 'inventaire');
 c = cli('kibana', 'examples/kibana/', '--config', 'examples/kibana/passerelle.yaml', '--out', kibanaOut);

@@ -1,0 +1,10 @@
+---
+description: Analyse du navigateur, appelé par acces-web
+processors:
+  - user_agent:
+      field: user_agent.original
+      ignore_missing: true
+  - lowercase:
+      field: user_agent.name
+      ignore_missing: true
+      if: ctx.user_agent?.name != null

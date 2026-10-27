@@ -145,6 +145,35 @@ snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut
   check(!exR.error && exR.pipelines.length === 4 && exR.pipelines.every(x => !x.error) && !exR.notes.some(n => n.level === 'err'), 'exemple pipelines.yml : quatre pipelines reliés, rien à reprendre', exR.sentence);
   snapshot('examples/logstash/pipelines.yaml', withHeader(exR, '#') + exR.yaml);
 }
+// Pipelines d’ingestion Elasticsearch : lecture, appel de pipeline, chemins, découpage en transforms
+{
+  const one = (text, name) => E.translateIngest([{ name: name || 'p', text }], E.DEFAULT_CONFIG);
+  const vrlOf = r => r.pipelines.map(p => p.vrls.join('\n')).join('\n');
+  const gen = n => ({ name: 'long', text: 'processors:\n' + Array.from({ length: n }, (_, i) => `  - set:\n      field: champ_${i}.valeur\n      value: "{{ message }} ${i}"\n`).join('') });
+  const r1 = one('processors:\n  - set: { field: a.b, value: 1 }\n  - lowercase: { field: a.c }');
+  check(!r1.error && r1.pipelines.length === 1 && r1.pipelines[0].verdict === 'ready' && r1.pipelines[0].chain.length === 1, 'ingest : un pipeline court est un seul transform remap, prêt');
+  check(!!r1.config.transforms.aiguillage === false && !!r1.config.transforms.bilan && !!r1.config.sinks.echecs, 'ingest : bilan des échecs et sortie dédiée');
+  const rj = one(JSON.stringify({ description: 'x', processors: [{ set: { field: 'a', value: 1 } }] }));
+  const rc = one('PUT _ingest/pipeline/mon-pipeline\n{ "processors": [ { "set": { "field": "a", "value": 1 } } ] }', 'ignoré');
+  check(!rj.error && !rc.error && rc.pipelines[0].name === 'mon-pipeline', 'ingest : JSON et requête PUT de la console Kibana lus, nom pris dans la requête', rc.error);
+  const lit = one("processors:\n  - set: { field: a, value: 'x{{y' }");
+  check(!lit.error && vrlOf(lit).includes('"x\\{{y"'), 'ingest : « {{ » littéral dans une valeur est échappé, VRL l’interpolerait en silence', vrlOf(lit).split('\n').find(l => /x.*\{\{y/.test(l)));
+  const bad = one('processors:\n  - grok: { field: m, patterns: ["(?=a)%{WORD:w}"] }\n  - gsub: { field: m, pattern: "(?<=a)b", replacement: "c" }');
+  check(bad.pipelines[0].verdict === 'todo' && bad.notes.some(n => n.level === 'err' && /rétrospection/.test(n.detail)), 'ingest : une rétrospection (?<=…) est à reprendre avec sa raison, pas un VRL qui ne compile pas', JSON.stringify(bad.notes.filter(n => n.level === 'err').map(n => n.detail)));
+  const sub = E.translateIngest([{ name: 'haut', text: 'processors:\n  - pipeline: { name: bas }\n  - set: { field: z, value: 1 }' }, { name: 'bas', text: 'processors:\n  - set: { field: y, value: 1 }' }], E.DEFAULT_CONFIG);
+  check(sub.pipelines.length === 1 && sub.pipelines[0].name === 'haut' && sub.pipelines[0].calls.includes('bas') && /\.y = 1/.test(vrlOf(sub)), 'ingest : un pipeline appelé est traduit en place, seul le pipeline principal a son transform');
+  const manquant = one('processors:\n  - pipeline: { name: absent }');
+  check(manquant.pipelines[0].verdict === 'todo' && manquant.notes.some(n => /absent/.test(n.detail)), 'ingest : pipeline appelé absent des fichiers : à reprendre');
+  const long = E.translateIngest([gen(400)], E.DEFAULT_CONFIG);
+  const lp = long.pipelines[0];
+  check(lp.chain.length > 1 && lp.vrls.every(v => v.length < 60000), 'ingest : un pipeline long est coupé en plusieurs transforms de taille bornée', `${lp.chain.length} transforms`);
+  check(lp.chain.every((id, k) => long.config.transforms[id].inputs[0] === (k ? lp.chain[k - 1] : 'agent_in')) && long.config.transforms.bilan.inputs[0] === lp.chain[lp.chain.length - 1], 'ingest : les transforms se suivent, le dernier alimente le bilan');
+  check(lp.vrls[0].includes('%ingest_etat = {') && lp.vrls[1].includes('ok = bool!(%ingest_etat.ok)') && lp.vrls[lp.vrls.length - 1].includes('del(%ingest_etat)'), 'ingest : l’état passe d’un transform à l’autre par les métadonnées');
+  const fixtures = ['acces-web', 'navigateur'].map(n => ({ name: n, text: rd(`examples/ingest/${n}.yml`) }));
+  const ex = E.translateIngest(fixtures, E.DEFAULT_CONFIG);
+  check(!ex.error && ex.pipelines.length === 1 && ex.pipelines[0].verdict !== 'todo' && !ex.notes.some(n => n.level === 'err'), 'exemple ingest : un pipeline et son sous-pipeline, rien à reprendre', ex.sentence);
+  snapshot('examples/ingest/acces-web.yaml', withHeader(ex, '#') + ex.yaml);
+}
 // Un instantané sans cas ni exemple correspondant est un reste : supprimé par --update, signalé sinon
 for (const rel of readdirSync(join(ROOT, 'tests/snapshots'), { recursive: true }).map(p => p.split(sep).join('/'))) {
   if (!/\.(sql|yaml|md|json)$/.test(rel) || snapshots.seen.has(rel)) continue;

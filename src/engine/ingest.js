@@ -250,11 +250,27 @@ function ingestRead(text, name) {
  */
 const JAVA_POSIX = { Lower: 'a-z', Upper: 'A-Z', ASCII: '\\x00-\\x7F', Alpha: 'a-zA-Z', Digit: '0-9', Alnum: 'a-zA-Z0-9', Punct: '!-/:-@\\[-`{-~', Graph: '!-~', Print: ' -~', Blank: ' \\t', Cntrl: '\\x00-\\x1F\\x7F', XDigit: '0-9a-fA-F', Space: ' \\t\\n\\x0B\\f\\r' };
 const JAVA_CLASSES = { w: '0-9A-Za-z_', d: '0-9', s: ' \\t\\n\\x0B\\f\\r', h: ' \\t\\xA0\\x{1680}\\x{180e}\\x{2000}-\\x{200a}\\x{202f}\\x{205f}\\x{3000}' };
+// Construction que la traduction ne sait pas rendre : le processeur n’est pas traduit, avec cette raison
+class IngestUnsupported extends Error {}
+// Ce que le moteur d’expressions de VRL (crate regex de Rust, sans retour arrière) n’accepte pas
+function javaReUnsupported(re, i, c, n, depth) {
+  if (c === '(' && !depth && re[i + 1] === '?') {
+    if (re[i + 2] === '=' || re[i + 2] === '!') return 'anticipation (?=…) ou (?!…)';
+    if (re[i + 2] === '<' && (re[i + 3] === '=' || re[i + 3] === '!')) return 'rétrospection (?<=…) ou (?<!…)';
+    if (re[i + 2] === '>') return 'groupe atomique (?>…)';
+  }
+  if (c === '\\' && /[1-9]/.test(n || '')) return `référence arrière \\${n}`;
+  if (c === '\\' && n === 'k' && re[i + 2] === '<') return 'référence arrière nommée \\k<…>';
+  if (!depth && (c === '+') && i > 0 && /[*+?}]/.test(re[i - 1]) && re[i - 2] !== '\\') return 'quantificateur possessif';
+  return null;
+}
 function javaRe(re) {
   re = String(re);
   let out = ''; let depth = 0;
   for (let i = 0; i < re.length; i++) {
     const c = re[i];
+    const bad = javaReUnsupported(re, i, c, re[i + 1], depth);
+    if (bad) throw new IngestUnsupported(`l’expression régulière « ${re.length > 70 ? re.slice(0, 70) + '…' : re} » utilise une ${bad}, que le moteur d’expressions de VRL (Rust) n’accepte pas : à reprendre à la main`);
     if (c === '\\') {
       const n = re[i + 1]; i++;
       if (n === undefined) { out += '\\\\'; break; }
@@ -509,6 +525,7 @@ class IngestGen {
     this.lines = []; this.ind = 0;
     this.value = null; this.key = null;   // _ingest._value et _ingest._key dans un foreach
     this.diags = [];                       // processeurs en cours : diagnostic de chemin différé (w_d)
+    this.marks = [];                       // lignes où un transform peut finir et le suivant commencer
   }
   // Classe Java de x dans la variable v, en instructions à plat (scalar : x n’est ni une table ni une liste)
   jtype(v, x, scalar) {
@@ -1208,8 +1225,13 @@ Object.assign(IngestGen.prototype, {
     const tag = o.tag !== undefined ? String(o.tag) : null;
     const label = `${where} ${type}${tag ? ` (${tag})` : ''}`;
     this.t.processors++;
+    if (this.ind === 0) this.marks.push(this.lines.length);   // point de coupure possible entre deux transforms
     this.emit('');
     this.comment(`${label}${o.description ? ` — ${String(o.description).split('\n')[0]}` : ''}`);
+    // Appel de pipeline au niveau de la suite principale : ses processeurs sont écrits à plat, à la suite, pour
+    // pouvoir être répartis sur plusieurs transforms ; la garde est portée par ok_N (faux tant que l’appel n’a pas lieu)
+    const flat = type === 'pipeline' && this.ind === 0 ? this.flatPipelineInfo(o) : null;
+    if (flat) { this.emit(`${flat.ok} = false`); this.emit(`${flat.ech} = null`); }
     this.open(`if ${okVar}`);
     this.emit('fail = null');
     const ctx = { quiet: o.ignore_failure === true || o.ignore_failure === 'true' };
@@ -1233,9 +1255,16 @@ Object.assign(IngestGen.prototype, {
       condOpen = true;
     }
     const before = this.t.stats.ko;
-    this.dispatch(type, o, label, okVar, failVar);
+    if (flat) this.pipelineEnter(flat); else this.dispatch(type, o, label, okVar, failVar);
     if (condOpen) this.close();
     this.diags.pop();
+    if (flat) {
+      this.close();
+      this.pipelineFlat(flat);
+      this.open(`if ${okVar}`);
+      this.emit(`ingest_pipeline = ${vq(this.pipeline)}`);
+      this.emit(`fail = ${flat.ech}`);
+    }
     const translated = this.t.stats.ko === before;
     // Échec : ignoré, rattrapé par on_failure, ou remonté au pipeline
     if (translated) {
@@ -1259,6 +1288,32 @@ Object.assign(IngestGen.prototype, {
     }
     this.close();
   },
+  // Appel de pipeline traduisible à plat : le pipeline est connu et ne s’appelle pas lui-même
+  flatPipelineInfo(o) {
+    if (o.name === undefined) return null;
+    const pkgRef = ingestPipelineRef(o.name);
+    if (!pkgRef && hasMustache(o.name)) return null;
+    const name = pkgRef || String(o.name);
+    const def = this.t.defs.get(name);
+    if (!def || this.t.stack.includes(name)) return null;
+    const ok = this.tmp('ok'); const ech = this.tmp('echec');
+    (this.t.carry = this.t.carry || []).push({ v: ok, kind: 'bool' }, { v: ech, kind: 'str' });
+    return { name, def, ok, ech };
+  },
+  pipelineEnter(f) {
+    this.comment(`début du pipeline ${f.name}`);
+    this.emit(`${f.ok} = true`); this.emit(`${f.ech} = null`);
+    this.emit(`ingest_pipeline = ${vq(f.name)}`);
+  },
+  pipelineFlat(f) {
+    this.t.called.add(f.name); this.t.stack.push(f.name);
+    const prev = this.pipeline; this.pipeline = f.name;
+    this.seq(f.def.processors, `${f.name}.processors`, f.ok, f.ech);
+    this.pipelineFailure(f.def, f.name, f.ok, f.ech, 'fail');
+    this.comment(`fin du pipeline ${f.name}`);
+    this.pipeline = prev; this.t.stack.pop();
+    this.t.stats.ok++;
+  },
   condNotes(env) {
     if (env.unsafe) this.approx('Painless : accès sans ?.', 'Une condition ou un script lit ctx.a.b sans l’opérateur ?. : Painless échoue si ctx.a est absent (le document part en on_failure), la traduction tient la valeur pour nulle et continue.');
     if (env.compare) this.note('info', 'Painless : comparaisons', 'Une comparaison <, >, <= ou >= entre valeurs qui ne sont pas des nombres fait échouer Painless ; la traduction la tient pour fausse.');
@@ -1272,7 +1327,15 @@ Object.assign(IngestGen.prototype, {
       const extra = Object.keys(o).filter(k => !INGEST_COMMON.includes(k) && !known.includes(k));
       if (extra.length) this.approx(`${type} : option${extra.length > 1 ? 's' : ''} ${extra.join(', ')}`, `${label} : ${extra.join(', ')} ${extra.length > 1 ? 'ne sont pas reprises' : 'n’est pas reprise'} par la traduction.`);
     }
-    fn.call(this, o, label, okVar, failVar);
+    // Une construction non rendable lève IngestUnsupported : ce qui a été écrit pour ce processeur est retiré
+    const at = this.lines.length; const saved = { ind: this.ind, diags: this.diags.length, stack: this.t.stack.length, value: this.value, key: this.key, pipeline: this.pipeline, marks: this.marks.length };
+    try { fn.call(this, o, label, okVar, failVar); }
+    catch (e) {
+      if (!(e instanceof IngestUnsupported)) throw e;
+      this.lines.length = at; this.ind = saved.ind; this.diags.length = saved.diags; this.t.stack.length = saved.stack;
+      this.value = saved.value; this.key = saved.key; this.pipeline = saved.pipeline; this.marks.length = saved.marks;
+      this.ko(label, e.message);
+    }
   }
 });
 // Options lues par chaque processeur traduit (les autres sont signalées)
@@ -1763,15 +1826,16 @@ Object.assign(IngestGen.prototype, {
     this.open('if length(kv) != 2');
     this.emit(`fail = ${vq(`field [${r.path}] does not contain value_split [${o.value_split}]`)}`);
     this.close('} else {'); this.ind++;
-    this.emit(`key = ${trim(o.trim_key).replace('KEY', 'string!(kv[0])')}`);
+    this.emit(`key = ${trim(o.trim_key).replace('KEY', () => 'string!(kv[0])')}`);
     let val = 'string!(kv[1])';
     if (this.bool(o.strip_brackets, false)) val = `replace(${val}, r'^[\\(\\[<"\\']|[\\]\\)>"\\']$', "")`;
-    this.emit(`val = ${trim(o.trim_value).replace('KEY', val)}`);
+    this.emit(`val = ${trim(o.trim_value).replace('KEY', () => val)}`);   // () => : un « $' » du texte n’est pas un motif de remplacement
     const keep = [inc ? `includes([${inc.map(vq).join(', ')}], key)` : '', exc ? `!includes([${exc.map(vq).join(', ')}], key)` : ''].filter(Boolean).join(' && ') || 'true';
     this.open(`if ${keep}`);
     this.emit(`path = split(${vq(prefix)} + key, ".")`);
     this.emit('old = get!(., path)');
-    this.emit('. = if old == null { set!(., path, val) } else { set!(., path, push(if is_array(old) { array!(old) } else { [old] }, val)) }');
+    this.emit('oldl = if is_array(old) { array!(old) } else { [old] }');
+    this.emit('. = if old == null { set!(., path, val) } else { set!(., path, push(oldl, val)) }');
     this.close(); this.close(); this.close(); this.close();
     this.close(); this.close();
     this.t.stats.ok++;
@@ -1786,7 +1850,9 @@ Object.assign(IngestGen.prototype, {
       this.open('if cur != null');
       this.emit(`x = get!(., ${this.arr(base)} + [${keyExpr}])`);
       this.emit(`. = remove!(., ${this.arr(base)} + [${keyExpr}])`);
-      this.emit(override ? '. = set!(., segs, x)' : '. = set!(., segs, append(if is_array(cur) { array!(cur) } else { [cur] }, if is_array(x) { array!(x) } else { [x] }))');
+      this.emit('curl = if is_array(cur) { array!(cur) } else { [cur] }');
+      this.emit('xl = if is_array(x) { array!(x) } else { [x] }');
+      this.emit(override ? '. = set!(., segs, x)' : '. = set!(., segs, append(curl, xl))');
       this.close('} else {'); this.ind++;
       // Un élément du chemin qui existe sans être un objet empêche l’expansion
       this.emit('acc = []');
@@ -2201,6 +2267,30 @@ function ingestCalls(def) {
  * ignore_failure ne rattrape rend le document d’origine, marqué %ingest_failure (message, processeur, pipeline),
  * comme le failure store d’Elasticsearch.
  */
+/*
+ * Variables qui traversent les processeurs de premier niveau : quand un pipeline est coupé en plusieurs transforms
+ * remap, elles passent de l’un à l’autre par les métadonnées de l’événement (%ingest_etat). Les autres variables
+ * sont locales à un processeur. Le type de chacune est rétabli à la lecture (VRL type %… comme « any »).
+ */
+const INGEST_STATE = [
+  ['doc0', 'object!(%ingest_etat.doc0)'], ['ok', 'bool!(%ingest_etat.ok)'],
+  ['echec', 'if %ingest_etat.echec == null { null } else { string!(%ingest_etat.echec) }'],
+  ['fail', 'if %ingest_etat.fail == null { null } else { string!(%ingest_etat.fail) }'],
+  ['ingest_on_failure_message', 'if %ingest_etat.message == null { null } else { string!(%ingest_etat.message) }'],
+  ['ingest_on_failure_processor_type', 'if %ingest_etat.type == null { null } else { string!(%ingest_etat.type) }'],
+  ['ingest_on_failure_processor_tag', 'if %ingest_etat.tag == null { null } else { string!(%ingest_etat.tag) }'],
+  ['ingest_on_failure_pipeline', 'if %ingest_etat.pipeline == null { null } else { string!(%ingest_etat.pipeline) }'],
+  ['ingest_pipeline', 'string!(%ingest_etat.nom)'],
+  ['w_d', 'if %ingest_etat.diag == null { null } else { object!(%ingest_etat.diag) }'],
+  ['ingest_timestamp', 'timestamp!(%ingest_etat.horodatage)'],
+  ['ingest_grok_match_index', 'if %ingest_etat.grok == null { null } else { int!(%ingest_etat.grok) }']
+];
+const INGEST_STATE_KEY = { doc0: 'doc0', ok: 'ok', echec: 'echec', fail: 'fail', ingest_on_failure_message: 'message', ingest_on_failure_processor_type: 'type', ingest_on_failure_processor_tag: 'tag', ingest_on_failure_pipeline: 'pipeline', ingest_pipeline: 'nom', w_d: 'diag', ingest_timestamp: 'horodatage', ingest_grok_match_index: 'grok' };
+// Taille visée d’un transform : le compilateur de VRL retype chaque bloc à chaque niveau d’imbrication, et le coût
+// croît comme le carré du nombre de champs écrits ; des transforms d’une trentaine de Ko compilent en quelques secondes.
+const INGEST_CHUNK = 30000;
+
+// Rend les programmes VRL du pipeline : un seul si court, sinon une suite de transforms qui se passent l’état
 function ingestProgram(name, def, t) {
   const g = new IngestGen(t, name);
   g.comment(`Pipeline d’ingestion ${name}${def.description ? ` — ${String(def.description).split('\n')[0]}` : ''}`);
@@ -2217,15 +2307,50 @@ function ingestProgram(name, def, t) {
   if (t.uses.timestamp) g.emit('ingest_timestamp = now()');
   if (t.uses.grok) g.emit('ingest_grok_match_index = null');
   if (body.lines.some(l => /ingest_grok_match_index/.test(l))) g.emit('ingest_grok_match_index = null');
-  g.lines.push(...body.lines);
-  g.emit('');
+  const head = g.lines.slice();
+  g.lines = [];
   g.comment('Échec non rattrapé : Elasticsearch refuse le document ; il est rendu tel qu’il est arrivé, avec la cause');
   g.open('if echec != null');
   g.materialize(['echec', 'ingest_on_failure_message']);
   g.emit('. = doc0');
   g.emit('%ingest_failure = { "message": echec, "processor_type": ingest_on_failure_processor_type, "processor_tag": ingest_on_failure_processor_tag, "pipeline": ingest_on_failure_pipeline }');
   g.close();
-  return g.lines.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+  const tail = g.lines;
+  const tidy = ls => ls.join('\n').replace(/\n{3,}/g, '\n\n').trim() + '\n';
+  const total = head.join('\n').length + body.lines.join('\n').length + tail.join('\n').length;
+  if (total <= INGEST_CHUNK) return [tidy([...head, ...body.lines, '', ...tail])];
+
+  // Coupure aux points de coupure de la suite principale (processeurs de premier niveau, appels de pipeline à plat)
+  const marks = new Set(body.marks);
+  const groups = []; let cur = []; let size = 0;
+  body.lines.forEach((l, i) => {
+    if (marks.has(i) && size >= INGEST_CHUNK) { groups.push(cur); cur = []; size = 0; }
+    cur.push(l); size += l.length + 1;
+  });
+  groups.push(cur);
+  if (groups.length === 1) return [tidy([...head, ...body.lines, '', ...tail])];
+  const mentions = (ls, v) => { const re = new RegExp(`(^|[^A-Za-z0-9_])${v}([^A-Za-z0-9_]|$)`); return ls.some(l => re.test(l)); };
+  // Variables portées d’un transform à l’autre : celles du pipeline, et celles des appels de pipeline à plat
+  const statics = INGEST_STATE.filter(([v]) => mentions([...head, ...body.lines, ...tail], v));
+  const dynamic = (t.carry || []).map(c => [c.v, c.kind === 'bool' ? `bool!(%ingest_etat.${c.v})` : `if %ingest_etat.${c.v} == null { null } else { string!(%ingest_etat.${c.v}) }`]);
+  const keyOf = v => INGEST_STATE_KEY[v] || v;
+  const load = vars => vars.map(([v, e]) => `${v} = ${e}`);
+  const store = vars => `%ingest_etat = { ${vars.map(([v]) => `${vq(keyOf(v))}: ${v}`).join(', ')} }`;
+  // Une variable dynamique n’est portée qu’une fois déclarée : elle est écrite par le transform où elle apparaît
+  const seen = new Set();
+  const out = [];
+  groups.forEach((ls, k) => {
+    const last = k === groups.length - 1;
+    const before = statics.concat(dynamic.filter(([v]) => seen.has(v)));
+    dynamic.forEach(([v]) => { if (mentions(ls, v)) seen.add(v); });
+    const after = statics.concat(dynamic.filter(([v]) => seen.has(v)));
+    const parts = [];
+    if (k === 0) parts.push(...head); else parts.push(...load(last ? before.filter(([v]) => mentions([...ls, ...tail], v)) : before));
+    parts.push(...ls);
+    if (last) { parts.push('', ...tail, 'del(%ingest_etat)'); } else parts.push('', store(after));
+    out.push(tidy(parts));
+  });
+  return out;
 }
 /*
  * inputs : [{ text, name }]. Chaque pipeline lu devient un programme VRL ; ceux qu’aucun autre n’appelle reçoivent
@@ -2254,17 +2379,19 @@ function translateIngest(inputs, cfg, opts) {
   for (const name of tops) {
     const pn = makeNotes();
     const t = { notes: pn, stats: { ok: 0, approx: 0, ko: 0 }, defs, stack: [], called: new Set(), k: 0, uses: {}, enrich, processors: 0 };
-    let vrl;
-    try { vrl = ingestProgram(name, defs.get(name), t); }
-    catch (e) { if (e instanceof RangeError) { pn.add('err', 'Pipeline trop imbriqué', 'La traduction a dépassé la profondeur permise.'); vrl = ''; } else throw e; }
+    let vrls;
+    try { vrls = ingestProgram(name, defs.get(name), t); }
+    catch (e) { if (e instanceof RangeError) { pn.add('err', 'Pipeline trop imbriqué', 'La traduction a dépassé la profondeur permise.'); vrls = ['']; } else throw e; }
+    const vrl = vrls.join('\n# ---- transform suivant ----\n');
     if (t.uses.meta) pn.add('info', 'Métadonnées _index, _id…', 'Les métadonnées du document (ctx._index…) sont rangées dans celles de l’événement Vector (%_index…), sans être écrites dans la table.');
     if (t.uses.drop) pn.add('info', 'drop → abort', 'Un document supprimé par drop n’est pas écrit : le programme s’arrête (abort) et Vector écarte l’événement.');
     const r = { notes: pn.list, stats: t.stats };
     for (const k of Object.keys(stats)) stats[k] += t.stats[k];
     for (const n of pn.list) notes.add(n.level, tops.length > 1 ? `[${name}] ${n.title}` : n.title, n.detail);
     const tn = uniq(used, compName(`ingest_${name}`));
-    programs[tn] = vrl;
-    pipelines.push({ name, transform: tn, verdict: verdictOf(r), stats: t.stats, notes: pn.list.length, processors: t.processors, calls: [...t.called], vrl });
+    // Un pipeline long devient une suite de transforms : tn en tête, puis tn_2, tn_3… (le dernier alimente le bilan)
+    const chain = [tn]; for (let k = 2; k <= vrls.length; k++) chain.push(uniq(used, `${tn}_${k}`));
+    pipelines.push({ name, transform: tn, chain, verdict: verdictOf(r), stats: t.stats, notes: pn.list.length, processors: t.processors, calls: [...t.called], vrl, vrls });
   }
   const unused = [...defs.keys()].filter(n => !tops.includes(n) && !pipelines.some(p => p.calls.includes(n)));
   if (unused.length) notes.add('info', 'Pipelines appelés seulement', `${unused.join(', ')} : appelé${unused.length > 1 ? 's' : ''} par un pipeline qui n’est pas traduit.`);
@@ -2290,15 +2417,16 @@ function translateIngest(inputs, cfg, opts) {
   }
   for (const p of pipelines) {
     const inputs = feeds || [`aiguillage.${p.transform}`];
-    transforms[p.transform] = { type: 'remap', inputs, drop_on_abort: true, source: p.vrl };
-    graph.nodes.push({ id: p.transform, kind: 'transform', type: 'remap', label: p.name, detail: `${p.processors} processeur${p.processors > 1 ? 's' : ''}`, todo: p.verdict === 'todo' });
+    p.chain.forEach((id, k) => { transforms[id] = { type: 'remap', inputs: k ? [p.chain[k - 1]] : inputs, drop_on_abort: true, source: p.vrls[k] }; });
+    graph.nodes.push({ id: p.transform, kind: 'transform', type: 'remap', label: p.name, detail: `${p.processors} processeur${p.processors > 1 ? 's' : ''}${p.chain.length > 1 ? `, ${p.chain.length} transforms` : ''}`, todo: p.verdict === 'todo' });
     graph.edges.push([inputs[0].split('.')[0], p.transform]);
   }
   // Bilan : les documents en échec partent à part (failure store), les autres vers la sortie
-  const bilanIn = pipelines.map(p => p.transform).concat(pipelines.length > 1 ? ['aiguillage._unmatched'] : []);
+  const bilanIn = pipelines.map(p => p.chain[p.chain.length - 1]).concat(pipelines.length > 1 ? ['aiguillage._unmatched'] : []);
   transforms.bilan = { type: 'route', inputs: bilanIn, reroute_unmatched: true, route: { echecs: 'exists(%ingest_failure)' } };
   graph.nodes.push({ id: 'bilan', kind: 'transform', type: 'route', label: 'Bilan', detail: 'échecs à part' });
-  bilanIn.forEach(i => graph.edges.push([i.split('.')[0], 'bilan']));
+  pipelines.forEach(p => graph.edges.push([p.transform, 'bilan']));
+  if (pipelines.length > 1) graph.edges.push(['aiguillage', 'bilan']);
   const sinks = opts.sinks ? opts.sinks(cfg, ['bilan._unmatched'], notes) : { sortie: { type: 'console', inputs: ['bilan._unmatched'], encoding: { codec: 'json' } } };
   sinks.echecs = { type: 'file', inputs: ['bilan.echecs'], path: '/var/lib/vector/ingest-echecs-%Y-%m-%d.ndjson', encoding: { codec: 'json' } };
   for (const [n, k] of Object.entries(sinks)) { graph.nodes.push({ id: n, kind: 'sink', type: k.type, label: n === 'echecs' ? 'Documents en échec' : 'Sortie', detail: k.type }); graph.edges.push([k.inputs[0].split('.')[0], n]); }
