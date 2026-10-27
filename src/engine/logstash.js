@@ -696,7 +696,7 @@ class VrlGen {
     const tags = s.tag_on_failure !== undefined ? lsList(s.tag_on_failure) : ['_geoip_lookup_failure'];
     if (tags.length) { this.close('} else {'); this.ind++; this.failTags(tags); }
     this.close();
-    this.v.note('info', 'geoip → table d’enrichissement', 'Une table geoip (base MaxMind .mmdb) est déclarée dans enrichment_tables : montez le fichier dans le conteneur Vector. Les noms de champs suivent le format MaxMind (city_name, country_code…).');
+    this.v.note('warn', 'geoip : base MaxMind à fournir', `La table geoip lit ${this.v.enrich.geoip.path} au démarrage : montez ce fichier dans le conteneur Vector. Sans lui, Vector refuse la configuration (error[E401] invalid enum variant, sur get_enrichment_table_record). Les noms de champs suivent le format MaxMind (city_name, country_code…).`);
     this.ok();
   }
   f_translate(s, p) {
@@ -1680,7 +1680,9 @@ function vectorDocument(v, parts, cfg, origin) {
   }
   if (cfg.vector.shadow_mode) v.note('info', 'Mode shadow', 'Le groupe de consommateurs et les topics de sortie sont suffixés par -shadow : Vector tourne en parallèle de Logstash sans lui prendre de partitions.');
   if (v.ns) v.note('info', 'Namespace de logs', 'log_namespace isole les métadonnées Kafka (topic, offset, clé) de la charge utile : les messages écrits restent identiques à ceux de Logstash.');
-  const header = `Configuration Vector générée par Passerelle ${origin}\nVérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>${interpolation ? '\nVector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)' : ''}${v.env.size ? `\nVariables d’environnement attendues : ${[...v.env].join(', ')}` : ''}`;
+  // Les bases MaxMind lues au démarrage : sans elles, Vector refuse le VRL (error[E401])
+  const mmdb = Object.values(parts.enrich || {}).filter(t => t && t.type === 'geoip').map(t => t.path);
+  const header = `Configuration Vector générée par Passerelle ${origin}\nVérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>${interpolation ? '\nVector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)' : ''}${v.env.size ? `\nVariables d’environnement attendues : ${[...v.env].join(', ')}` : ''}${mmdb.length ? `\nBase${mmdb.length > 1 ? 's' : ''} geoip à fournir : ${mmdb.join(', ')} (sans ${mmdb.length > 1 ? 'elles' : 'elle'}, Vector refuse le VRL : error[E401])` : ''}`;
   const yaml = header.split('\n').map(l => '# ' + l).join('\n') + '\n\n' + toYAML(config) + '\n';
   const toml = header.split('\n').map(l => '# ' + l).join('\n') + '\n\n' + toTOML(config) + '\n';
   return { config, yaml, toml };

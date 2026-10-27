@@ -1,0 +1,7 @@
+-- Couverture : 0 directs, 1 à vérifier, 0 à reprendre
+
+-- Total (track_total_hits)
+SELECT
+    count() AS total
+FROM logs.events
+WHERE arrayExists(t -> least(editDistanceUTF8(t, 'timout'), damerauLevenshteinDistance(t, 'timout')) <= 0, tokens(lowerUTF8(message)));

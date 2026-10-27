@@ -9,6 +9,7 @@
 # Configuration Vector générée par Passerelle depuis 2 pipelines d’ingestion Elasticsearch
 # Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
 # Vector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)
+# Base geoip à fournir : /etc/vector/GeoLite2-City.mmdb (sans elle, Vector refuse le VRL : error[E401])
 
 data_dir: /var/lib/vector
 api:

@@ -1,0 +1,1 @@
+-- Erreur : Requête non analysable : geo_distance : distance illisible "3furlongs" (unités : in, inch, yd, yards, ft, feet, km, kilometers, NM, nmi, nauticalmiles, mm, millimeters, cm, centimeters, mi, miles, m, meters)

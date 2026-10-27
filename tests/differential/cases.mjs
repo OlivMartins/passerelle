@@ -323,6 +323,19 @@ export const CASES = [
   { id: 'audit_match_sans_mot', dsl: total({ match: { message: '!!!' } }) },
   // Deux lettres inversées comptent pour une seule modification (transpositions: true par défaut)
   { id: 'audit_flou_transposition', dsl: total({ fuzzy: { message: { value: 'tiemout', fuzziness: 1 } } }) },
+  // prefix_length : les premiers caractères doivent être identiques (« ti » oui, « tie » non pour timeout)
+  { id: 'audit_flou_prefixe', dsl: total({ fuzzy: { message: { value: 'tiemout', fuzziness: 1, prefix_length: 2 } } }) },
+  { id: 'audit_flou_prefixe_exclu', dsl: total({ fuzzy: { message: { value: 'tiemout', fuzziness: 1, prefix_length: 3 } } }) },
+  { id: 'audit_flou_prefixe_mot_cle', dsl: total({ bool: { should: [{ fuzzy: { service: { value: 'cxrt', fuzziness: 1, prefix_length: 1 } } }, { fuzzy: { service: { value: 'xpi', fuzziness: 1, prefix_length: 1 } } }] } }) },
+  { id: 'audit_flou_prefixe_entier', dsl: total({ fuzzy: { service: { value: 'apu', fuzziness: 1, prefix_length: 3 } } }) },
+  // AUTO:7,10 : un mot de six lettres doit être exact
+  { id: 'audit_flou_auto_bornes', dsl: total({ fuzzy: { message: { value: 'timout', fuzziness: 'AUTO:7,10' } } }) },
+  // « mot~1 » de query_string : la distance écrite compte (AUTO en donnerait 2 pour neuf lettres)
+  { id: 'audit_qs_flou_distance', dsl: total({ query_string: { query: 'conectoin~1', default_field: 'message' } }) },
+  { id: 'audit_qs_flou_option', dsl: total({ query_string: { query: 'conectoin~', default_field: 'message', fuzziness: 1 } }) },
+  { id: 'audit_qs_flou_prefixe', dsl: total({ query_string: { query: 'message:tiemout~1 OR message:conection~1', fuzzy_prefix_length: 3 } }) },
+  { id: 'audit_sqs_flou_prefixe', dsl: total({ simple_query_string: { query: 'tiemout~1 | conection~1', fields: ['message'], fuzzy_prefix_length: 3 } }) },
+  { id: 'audit_qs_flou_sans_transposition', dsl: total({ query_string: { query: 'tiemout~1', default_field: 'message', fuzzy_transpositions: false } }) },
   { id: 'audit_term_epoch', dsl: total({ term: { [TS]: EPOCH(5) } }) },
   { id: 'audit_terms_epoch', dsl: total({ terms: { [TS]: [EPOCH(5), EPOCH(6)] } }) },
   { id: 'audit_plage_format', dsl: total({ range: { [TS]: { gte: '09/03/2026', lt: '10/03/2026', format: 'dd/MM/yyyy' } } }) },
@@ -331,6 +344,24 @@ export const CASES = [
   { id: 'audit_plage_format_heure', dsl: total({ range: { [TS]: { gte: '09/03/2026 06:30', lt: '09/03/2026 18:00', format: 'dd/MM/yyyy HH:mm' } } }) },
   { id: 'audit_ids',dsl: { size: 5, sort: [{ [TS]: 'asc' }], query: { ids: { values: ['3', '10', '2999', 'abc'] } } } },
   { id: 'audit_ids_vide', dsl: total({ ids: { values: [] } }) },
+
+  /* ---------- geo_distance : unités, formes du point, formule ---------- */
+  { id: 'geo_rayon_km', dsl: total({ geo_distance: { distance: '3km', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_miles_tableau', dsl: total({ geo_distance: { distance: '1.2mi', location: [2.3522, 48.8566] } }) },
+  { id: 'geo_rayon_milles_marins_chaine', dsl: total({ geo_distance: { distance: '1.5nmi', location: '48.8566,2.3522' } }) },
+  { id: 'geo_rayon_NM', dsl: total({ geo_distance: { distance: '1.4NM', location: { lat: 48.86, lon: 2.35 } } }) },
+  { id: 'geo_rayon_nombre', dsl: total({ geo_distance: { distance: 2500, location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_pieds', dsl: total({ geo_distance: { distance: '6000ft', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_yards', dsl: total({ geo_distance: { distance: '2000yd', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_centimetres', dsl: total({ geo_distance: { distance: '250000cm', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_pouces', dsl: total({ geo_distance: { distance: '120000in', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_mots', dsl: total({ geo_distance: { distance: '2.5kilometers', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_exposant', dsl: total({ geo_distance: { distance: '2.5e3m', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_rayon_decimal', dsl: total({ geo_distance: { distance: '1800.5m', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  // Londres est à 343 556 m du centre par la formule d’Elasticsearch, à 343 604 m par greatCircleDistance et à 343 974 m par geoDistance
+  { id: 'geo_londres_formule', dsl: total({ geo_distance: { distance: '343.58km', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_londres_plane', dsl: total({ geo_distance: { distance: '343.58km', distance_type: 'plane', location: { lat: 48.8566, lon: 2.3522 } } }) },
+  { id: 'geo_unite_inconnue', dsl: total({ geo_distance: { distance: '3furlongs', location: { lat: 48.8566, lon: 2.3522 } } }) },
 
   /* ---------- Écarts relevés par l’audit du 2026-10-21 : agrégations ---------- */
   // Les cinq valeurs de retries ont exactement 450 documents : Elasticsearch départage par clé croissante

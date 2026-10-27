@@ -2256,7 +2256,7 @@ Object.assign(IngestGen.prototype, {
     if (props.includes('network')) this.approx('geoip : network', 'La table d’enrichissement de Vector ne donne pas le réseau (CIDR) de la plage MaxMind : la propriété network n’est pas écrite.');
     this.emit('if length(out) > 0 {'); this.ind++; this.set(tr, 'out'); this.close();
     this.close(); this.close(); this.close();
-    this.approx('geoip → table d’enrichissement', `Une table geoip (${db}) est déclarée dans enrichment_tables : montez la base MaxMind dans le conteneur Vector (le nom du continent est déduit de son code).`);
+    this.approx('geoip → table d’enrichissement', `Une table geoip (${db}) est déclarée dans enrichment_tables : montez la base MaxMind dans le conteneur Vector : sans elle, Vector refuse la configuration (error[E401]) ; le nom du continent est déduit de son code).`);
   },
   p_csv(o, label) {
     const r = this.field(o, label); if (!r) return;
