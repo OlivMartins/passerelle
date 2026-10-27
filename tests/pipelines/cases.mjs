@@ -17,6 +17,9 @@
  *              { v8: 'raison' }    dans un seul mode (v8 ou disabled)
  *   exact    tolérance du banc à désactiver pour ce cas : 'horodatage' (voir run.mjs)
  *   plugins  greffons Logstash absents de sa distribution, installés avant le banc : ['logstash-filter-bytes']
+ *   chain    plusieurs pipelines reliés par pipeline { send_to }, à la place de filter et output :
+ *              [{ id, filter, output: (o, to) => … }]   o(nom) : sortie du banc ; to(id, …) : vers ces pipelines
+ *            le premier reçoit l’entrée du banc, les suivants écoutent leur adresse
  *
  * Un cas ne porte qu’un comportement : quand une opération diverge sur un type d’entrée, ce type a son propre cas.
  */
@@ -364,6 +367,23 @@ export const CASES = [
   { id: 'sortie_double', filter: '', output: o => `${o('une')}\n${o('deux')}`, events: [{ n: 1 }, { n: 2 }] },
   { id: 'sortie_en_cascade', filter: '', output: o => `if "alerte" in [tags] { ${o('alertes')} } else if [region] == "EMEA" { ${o('emea')} } else { ${o('autres')} }`, events: [{ tags: ['alerte'], region: 'EMEA' }, { region: 'EMEA' }, { region: 'APAC' }, { n: 1 }] },
   { id: 'sortie_commune_et_conditionnelle', filter: '', output: o => `${o('tout')}\nif [niveau] == "erreur" { ${o('erreurs')} }`, events: [{ niveau: 'erreur', n: 1 }, { niveau: 'info', n: 2 }] },
+
+  // Plusieurs pipelines reliés par pipeline { send_to } (pipelines.yml) : une seule configuration Vector pour l’ensemble
+  { id: 'liaison_distributeur', events: [{ type: 'web', n: 1 }, { type: 'base', n: 2 }, { n: 3 }], chain: [
+    { id: 'entree', filter: 'mutate { add_field => { "vu_par" => "entree" } }', output: (o, to) => `if [type] == "web" { ${to('web')} } else { ${o('autres')} }` },
+    { id: 'web', filter: 'mutate { add_tag => ["web"] add_field => { "vu_par" => "web" } }', output: o => o('web') }
+  ] },
+  { id: 'liaison_copie_et_collecteur', events: [{ n: 1 }, { n: 2, tags: ['t'] }], chain: [
+    { id: 'entree', output: (o, to) => to('a', 'b') },
+    { id: 'a', filter: 'mutate { add_field => { "branche" => "a" } }', output: (o, to) => `${o('a')}\n${to('fin')}` },
+    { id: 'b', filter: 'mutate { add_field => { "branche" => "b" } }', output: (o, to) => to('fin') },
+    { id: 'fin', filter: 'mutate { add_tag => ["fin"] }', output: o => o('fin') }
+  ] },
+  // @timestamp du document, lu par le premier pipeline, arrive au dernier sous la même date
+  { id: 'liaison_horodatage', codec: 'json', lines: ['{"@timestamp":"2026-03-10T09:15:30+01:00","n":1}', '{"@timestamp":"2026-03-10T08:15:30.123Z","n":2}'], chain: [
+    { id: 'entree', output: (o, to) => to('suite') },
+    { id: 'suite', filter: 'mutate { add_field => { "k" => "v" } }', output: o => o('') }
+  ] },
 
   // Les pipelines d’exemple du dépôt, à leur transport près (voir example dans transport.mjs).
   // nginx.conf n’est pas joué : son filtre geoip demande la même base de données des deux côtés.

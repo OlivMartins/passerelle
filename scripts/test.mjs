@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { CASES } from '../tests/differential/cases.mjs';
 import { INDEX, configOverride } from '../tests/differential/dataset.mjs';
 import { CASES as PIPELINE_CASES } from '../tests/pipelines/cases.mjs';
-import { translatedPipeline } from '../tests/pipelines/transport.mjs';
+import { translatedPipeline, translatedChain } from '../tests/pipelines/transport.mjs';
 import { loadEngine, engineSource } from './engine.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -76,6 +76,12 @@ for (const c of CASES) {
 // n’est gardé que pour les cas qui n’ont rien d’autre.
 const isTransport = name => name === 'stdin_in_init' || name === 'logstash_finalize';
 for (const c of PIPELINE_CASES) {
+  // Pipelines reliés : la configuration de l’ensemble, liaisons comprises
+  if (c.chain) {
+    const t = E.translatePipelines(translatedChain(c, 'v8'), E.DEFAULT_CONFIG);
+    snapshot(`pipelines/${c.id}.yaml`, t.error ? `# Erreur : ${t.error}\n` : withHeader(t, '#') + t.yaml);
+    continue;
+  }
   const r = E.translateLogstash(translatedPipeline(c), E.DEFAULT_CONFIG);
   if (r.error) { snapshot(`pipelines/${c.id}.yaml`, `# Erreur : ${r.error}\n`); continue; }
   const own = Object.fromEntries(Object.entries(r.config.transforms).filter(([name]) => !isTransport(name)));
@@ -95,6 +101,50 @@ const grafanaOut = E.grafanaDashboard(rd('examples/grafana/supervision_es.json')
 snapshot('grafana/supervision_es.clickhouse.json', JSON.stringify(grafanaOut.dashboard, null, 2) + '\n');
 snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut, 'supervision_es.json'));
 
+// pipelines.yml : lecture, fichiers de path.config, liaisons pipeline { send_to }
+{
+  const yml = [
+    '# commentaire', '- pipeline.id: "a # pas un commentaire"', '  pipeline.workers: 2 # commentaire', "  config.string: 'input { stdin {} } output { pipeline { send_to => [b] } }'",
+    '- pipeline:', '    id: b', '    ecs_compatibility: disabled', '  config.string: |', '    input { pipeline { address => "b" } }', '', '    output { null {} }',
+    '- pipeline.id: c', '  path.config: >-', '    /etc/logstash/conf.d/c/*.conf', '  queue.type: persisted'
+  ].join('\n');
+  const e = E.parsePipelinesYML(yml);
+  check(e.length === 3 && e[0].settings['pipeline.id'] === 'a # pas un commentaire' && e[0].settings['pipeline.workers'] === 2, 'pipelines.yml : liste de pipelines, guillemets, commentaires, nombres');
+  check(e[1].settings['pipeline.id'] === 'b' && e[1].settings['pipeline.ecs_compatibility'] === 'disabled' && e[1].settings['config.string'] === 'input { pipeline { address => "b" } }\n\noutput { null {} }\n', 'pipelines.yml : tables imbriquées aplaties, bloc | avec ligne vide');
+  check(e[2].settings['path.config'] === '/etc/logstash/conf.d/c/*.conf', 'pipelines.yml : bloc >-');
+  let bad = ''; try { E.parsePipelinesYML('pipeline.id: x'); } catch (err) { bad = err.message; }
+  check(/ligne 1/.test(bad), 'pipelines.yml : une table seule est refusée avec sa ligne', bad);
+  const files = ['conf.d/c/2.conf', 'conf.d/c/1.conf', 'conf.d/c/1.conf~', 'conf.d/c/sous/3.conf', 'web.conf', 'd/x.conf'];
+  const f1 = E.pipelineConfigFiles('/etc/logstash/conf.d/c/*.conf', files);
+  check(JSON.stringify(f1.files) === '["conf.d/c/1.conf","conf.d/c/2.conf"]' && f1.matched === 'conf.d/c/*.conf', 'path.config absolu : retrouvé par sa fin, ordre alphabétique, sauvegardes ~ écartées', JSON.stringify(f1));
+  check(E.pipelineConfigFiles('/etc/logstash/web.conf', files).files[0] === 'web.conf', 'path.config absolu : retrouvé par son seul nom');
+  check(JSON.stringify(E.pipelineConfigFiles('conf.d/c', files).files) === '["conf.d/c/1.conf","conf.d/c/2.conf"]', 'path.config dossier : ses fichiers, sans les sous-dossiers');
+  check(E.pipelineConfigFiles('conf.d/**/*.conf', files).files.length === 3 && E.pipelineConfigFiles('{web,d/x}.conf', files).files.length === 2, 'path.config : motifs ** et {a,b}');
+  check(!E.pipelineConfigFiles('autre/*.conf', files).files.length, 'path.config relatif introuvable : rien, pas de recherche par la fin');
+  const set = (...p) => E.translatePipelines(p.map(([id, config]) => ({ id, config })), E.DEFAULT_CONFIG);
+  const ok = set(['a', 'input { stdin {} } output { if [x] { pipeline { send_to => ["b"] } } else { stdout {} } }'], ['b', 'input { pipeline { address => "b" } } filter { mutate { add_tag => ["b"] } } output { stdout {} }']);
+  const bIn = Object.entries(ok.config.transforms).find(([n]) => n.startsWith('b_'));
+  check(!ok.error && !!bIn && JSON.stringify(bIn[1].inputs) === '["a_routage.pipeline_b"]', 'send_to sous condition : l’entrée du destinataire est la branche du routage', bIn && JSON.stringify(bIn[1].inputs));
+  check(!Object.values(ok.config.sources).some(x => x.type === '__pipeline') && !Object.values(ok.config.sinks).some(x => x.type === '__pipeline'), 'liaisons : aucun composant fictif dans la configuration');
+  check(Object.keys(ok.config.sinks).every(n => /^(a|b)_/.test(n)), 'composants préfixés par l’identifiant du pipeline');
+  const lost = set(['a', 'input { stdin {} } output { pipeline { send_to => ["nulle_part"] } stdout {} }'], ['b', 'input { pipeline { address => "seul" } } output { stdout {} }']);
+  check(lost.notes.some(n => n.level === 'err' && /sans destinataire/.test(n.title)) && lost.notes.some(n => n.level === 'err' && /sans expéditeur/.test(n.title)) && !Object.keys(lost.config.sinks).some(n => n.startsWith('b_')), 'adresse sans destinataire ou sans expéditeur : à reprendre, étapes orphelines retirées');
+  check(lost.pipelines.every(x => x.verdict === 'todo'), 'liaison cassée : les deux pipelines sont à reprendre');
+  const loop = set(['a', 'input { stdin {} pipeline { address => "a" } } output { pipeline { send_to => ["b"] } }'], ['b', 'input { pipeline { address => "b" } } output { pipeline { send_to => ["a"] } stdout {} }']);
+  check(loop.notes.some(n => /Boucle entre pipelines/.test(n.title)), 'boucle entre pipelines : signalée, Vector la refuserait');
+  const dup = set(['a', 'input { stdin {} } output { stdout {} }'], ['a', 'input { stdin {} } output { stdout {} }'], ['c', 'input { pipeline { address => "x" } } output { stdout {} }'], ['d', 'input { pipeline { address => "x" } } output { stdout {} }']);
+  check(dup.notes.some(n => /déclaré deux fois/.test(n.title)) && dup.notes.some(n => /plusieurs pipelines/.test(n.title)), 'identifiant ou adresse en double : refusés comme par Logstash');
+  const alone = E.translateLogstash('input { pipeline { address => "x" } } output { pipeline { send_to => ["y"] } }', E.DEFAULT_CONFIG);
+  check(alone.notes.filter(n => n.level === 'err' && /pipelines\.yml/.test(n.detail)).length === 2, 'fichier seul : entrée et sortie pipeline renvoient vers pipelines.yml');
+  const kafka = E.translatePipelines([{ id: 'a', config: 'input { kafka { topics => ["t1"] } } output { kafka { topic_id => "o1" } }' }, { id: 'b', config: 'input { kafka { topics => ["t2"] } } output { kafka { topic_id => "o2" } }' }], E.mergeConfig(E.DEFAULT_CONFIG, { kafka: { output_topic: 'force', input_topics: ['forcé'] } }));
+  check(JSON.stringify(Object.values(kafka.config.sinks).map(x => x.topic)) === '["o1","o2"]' && JSON.stringify(Object.values(kafka.config.sources).map(x => x.topics[0])) === '["t1","t2"]', 'plusieurs entrées et sorties Kafka : output_topic et input_topics ne s’imposent pas à toutes');
+  const ex = rd('examples/logstash/pipelines/pipelines.yml');
+  const exFiles = ['conf.d/entree.conf', 'conf.d/systeme.conf', 'conf.d/web/10-entree.conf', 'conf.d/web/20-filtres.conf', 'conf.d/web/30-sorties.conf'];
+  const exList = E.pipelinesFromYML(ex, exFiles, f => rd(`examples/logstash/pipelines/${f}`));
+  const exR = E.translatePipelines(exList, E.DEFAULT_CONFIG);
+  check(!exR.error && exR.pipelines.length === 4 && exR.pipelines.every(x => !x.error) && !exR.notes.some(n => n.level === 'err'), 'exemple pipelines.yml : quatre pipelines reliés, rien à reprendre', exR.sentence);
+  snapshot('examples/logstash/pipelines.yaml', withHeader(exR, '#') + exR.yaml);
+}
 // Un instantané sans cas ni exemple correspondant est un reste : supprimé par --update, signalé sinon
 for (const rel of readdirSync(join(ROOT, 'tests/snapshots'), { recursive: true }).map(p => p.split(sep).join('/'))) {
   if (!/\.(sql|yaml|md|json)$/.test(rel) || snapshots.seen.has(rel)) continue;

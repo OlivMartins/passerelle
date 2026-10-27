@@ -1,0 +1,343 @@
+# Couverture : 18 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : [systeme] File persistante
+# À vérifier : [web] Comparaison à un nombre
+
+# Configuration Vector générée par Passerelle depuis 4 pipelines Logstash (pipelines.yml)
+# Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+
+data_dir: /var/lib/vector
+api:
+  enabled: true
+  address: '127.0.0.1:8686'
+sources:
+  entree_kafka_in:
+    type: kafka
+    bootstrap_servers: kafka:9092
+    group_id: logstash-entree
+    topics: [logs-bruts]
+    decoding:
+      codec: bytes
+    log_namespace: true
+transforms:
+  entree_kafka_in_init:
+    type: remap
+    inputs: [entree_kafka_in]
+    source: |
+      # Codec json : décodage de la ligne (invalide : gardée dans message, avec _jsonparsefailure)
+      raw = string(.) ?? ""
+      parsed, err = parse_json(raw)
+      if err == null {
+        . = object(parsed) ?? { "message": parsed }
+        .event.original = raw
+      } else {
+        . = { "message": raw, "tags": ["_jsonparsefailure"] }
+      }
+      # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
+      if !exists(."@timestamp") {
+        ."@timestamp" = now()
+      }
+      if !exists(."@version") {
+        ."@version" = "1"
+      }
+  entree_logstash_finalize:
+    type: remap
+    inputs: [entree_kafka_in_init]
+    source: |
+      # @timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp
+      if exists(."@timestamp") && !is_timestamp(."@timestamp") {
+        iso = replace(string(."@timestamp") ?? "", ",", ".")
+        ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
+        if ts == null {
+          ."_@timestamp" = ."@timestamp"
+          ."@timestamp" = now()
+          .tags = compact(flatten([.tags, "_timestampparsefailure"]))
+        } else {
+          ."@timestamp" = ts
+        }
+      }
+      # Format de date identique à Logstash (millisecondes, UTC)
+      if is_timestamp(."@timestamp") {
+        ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")
+      }
+  entree_routage:
+    type: route
+    inputs: [entree_logstash_finalize]
+    reroute_unmatched: false
+    route:
+      pipeline_web: .event.dataset == "nginx.access"
+      pipeline_systeme: '!(.event.dataset == "nginx.access") && (!includes([null, false, "", "false"], .log.syslog) || .type == "syslog")'
+      pipeline_archive: '!(.event.dataset == "nginx.access") && !(!includes([null, false, "", "false"], .log.syslog) || .type == "syslog")'
+  web_pipeline_in_init:
+    type: remap
+    inputs: [entree_routage.pipeline_web]
+    source: |
+      # Événement reçu d’un autre pipeline : @timestamp redevient une date, comme dans Logstash
+      if is_string(."@timestamp") {
+        ."@timestamp" = parse_timestamp(string!(."@timestamp"), "%+") ?? ."@timestamp"
+      }
+      # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
+      if !exists(."@timestamp") {
+        ."@timestamp" = now()
+      }
+      if !exists(."@version") {
+        ."@version" = "1"
+      }
+  web_grok:
+    type: remap
+    inputs: [web_pipeline_in_init]
+    source: |
+      # grok
+      parsed, err = parse_grok(.message, s'%{IPORHOST:ls__source__address} - %{DATA:ls__user__name} \[%{HTTPDATE:horodatage}\] "%{WORD:ls__http__request__method} %{DATA:ls__url__original} HTTP/%{NUMBER:ls__http__version}" %{NUMBER:ls__http__response__status_code} %{NUMBER:ls__http__response__body__bytes}')
+      if err == null {
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
+        .source.address = del(.ls__source__address)
+        .user.name = del(.ls__user__name)
+        .http.request.method = del(.ls__http__request__method)
+        .url.original = del(.ls__url__original)
+        .http.version = del(.ls__http__version)
+        .http.response.status_code = del(.ls__http__response__status_code)
+        .http.response.body.bytes = del(.ls__http__response__body__bytes)
+        .http.response.status_code = to_int(.http.response.status_code) ?? .http.response.status_code
+        .http.response.body.bytes = to_int(.http.response.body.bytes) ?? .http.response.body.bytes
+      } else {
+        .tags = compact(flatten([.tags, "_grokparsefailure"]))
+      }
+  web_date:
+    type: remap
+    inputs: [web_grok]
+    source: |
+      # date
+      if .horodatage != null {
+        ts = null
+        if ts == null {
+          ts = parse_timestamp(.horodatage, "%d/%b/%Y:%H:%M:%S %z") ?? null
+        }
+        if ts != null {
+          ."@timestamp" = ts
+          del(.horodatage)
+        } else {
+          .tags = compact(flatten([.tags, "_dateparsefailure"]))
+        }
+      }
+  web_condition_3:
+    type: remap
+    inputs: [web_date]
+    source: |
+      if ((is_integer(.http.response.status_code) || is_float(.http.response.status_code)) && (to_float(.http.response.status_code) ?? 0.0) >= 500) {
+        # mutate
+        .tags = compact(flatten([.tags, "erreur_serveur"]))
+      }
+  web_logstash_finalize:
+    type: remap
+    inputs: [web_condition_3]
+    source: |
+      # @timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp
+      if exists(."@timestamp") && !is_timestamp(."@timestamp") {
+        iso = replace(string(."@timestamp") ?? "", ",", ".")
+        ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
+        if ts == null {
+          ."_@timestamp" = ."@timestamp"
+          ."@timestamp" = now()
+          .tags = compact(flatten([.tags, "_timestampparsefailure"]))
+        } else {
+          ."@timestamp" = ts
+        }
+      }
+      # Format de date identique à Logstash (millisecondes, UTC)
+      if is_timestamp(."@timestamp") {
+        ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")
+      }
+  systeme_pipeline_in_init:
+    type: remap
+    inputs: [entree_routage.pipeline_systeme]
+    source: |
+      # Événement reçu d’un autre pipeline : @timestamp redevient une date, comme dans Logstash
+      if is_string(."@timestamp") {
+        ."@timestamp" = parse_timestamp(string!(."@timestamp"), "%+") ?? ."@timestamp"
+      }
+      # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
+      if !exists(."@timestamp") {
+        ."@timestamp" = now()
+      }
+      if !exists(."@version") {
+        ."@version" = "1"
+      }
+  systeme_grok:
+    type: remap
+    inputs: [systeme_pipeline_in_init]
+    source: |
+      # grok
+      parsed, err = parse_grok(.message, s'<%{NONNEGINT:ls__log__syslog__priority}>%{SYSLOGTIMESTAMP:horodatage} %{SYSLOGHOST:ls__host__hostname} %{DATA:ls__process__name}(?:\[%{POSINT:ls__process__pid}\])?: %{GREEDYDATA:message}')
+      if err == null {
+        dup = {}
+        for_each(parsed) -> |k, val| {
+          old = get!(., [k])
+          if old != null && !includes(["message"], k) { dup = set!(dup, [k], push(array(old) ?? [old], val)) }
+        }
+        . = merge(object!(.), merge(parsed, dup))
+        .log.syslog.priority = del(.ls__log__syslog__priority)
+        .host.hostname = del(.ls__host__hostname)
+        .process.name = del(.ls__process__name)
+        .process.pid = del(.ls__process__pid)
+        .process.pid = to_int(.process.pid) ?? .process.pid
+      } else {
+        .tags = compact(flatten([.tags, "_grokparsefailure"]))
+      }
+  systeme_syslog_pri:
+    type: remap
+    inputs: [systeme_grok]
+    source: |
+      # syslog_pri
+      pri = 13
+      raw = .log.syslog.priority
+      if raw != null && raw != false {
+        if is_array(raw) { raw = get!(raw, [0]) }
+        pri = 0
+        if is_integer(raw) {
+          pri = int!(raw)
+        } else if is_float(raw) {
+          pri = to_int!(raw)
+        } else if is_string(raw) {
+          m = parse_regex(string!(raw), r'^\s*(?P<n>[+-]?\d+(?:_\d+)*)') ?? null
+          if m != null { pri = to_int(replace(string!(m.n), "_", "")) ?? 0 }
+        }
+      }
+      facility = to_int(floor(pri / 8))
+      severity = pri - facility * 8
+      .log.syslog.severity.code = severity
+      .log.syslog.facility.code = facility
+      if facility > 23 {
+        .tags = compact(flatten([.tags, "_syslogpriparsefailure"]))
+      } else {
+        labels = ["kernel", "user-level", "mail", "daemon", "security/authorization", "syslogd", "line printer", "network news", "uucp", "clock", "security/authorization", "ftp", "ntp", "log audit", "log alert", "clock", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7"]
+        i = if facility < 0 { length(labels) + facility } else { facility }
+        name = get!(labels, [i])
+        if name != null { .log.syslog.facility.name = name }
+        sname = get!(["emergency", "alert", "critical", "error", "warning", "notice", "informational", "debug"], [severity])
+        if sname != null { .log.syslog.severity.name = sname }
+      }
+  systeme_date:
+    type: remap
+    inputs: [systeme_syslog_pri]
+    source: |
+      # date
+      if .horodatage != null {
+        ts = null
+        if ts == null {
+          text = to_string(.horodatage) ?? ""
+          year = to_int!(format_timestamp!(now(), format: "%Y", timezone: "local"))
+          ts = parse_timestamp(to_string(year) + " " + text, "%Y %b  %d %H:%M:%S") ?? null
+          if ts != null {
+            months = format_timestamp!(ts, format: "%m", timezone: "local") + format_timestamp!(now(), format: "%m", timezone: "local")
+            if months == "1201" { ts = parse_timestamp(to_string(year - 1) + " " + text, "%Y %b  %d %H:%M:%S") ?? null }
+            if months == "0112" { ts = parse_timestamp(to_string(year + 1) + " " + text, "%Y %b  %d %H:%M:%S") ?? null }
+          }
+        }
+        if ts == null {
+          text = to_string(.horodatage) ?? ""
+          year = to_int!(format_timestamp!(now(), format: "%Y", timezone: "local"))
+          ts = parse_timestamp(to_string(year) + " " + text, "%Y %b %d %H:%M:%S") ?? null
+          if ts != null {
+            months = format_timestamp!(ts, format: "%m", timezone: "local") + format_timestamp!(now(), format: "%m", timezone: "local")
+            if months == "1201" { ts = parse_timestamp(to_string(year - 1) + " " + text, "%Y %b %d %H:%M:%S") ?? null }
+            if months == "0112" { ts = parse_timestamp(to_string(year + 1) + " " + text, "%Y %b %d %H:%M:%S") ?? null }
+          }
+        }
+        if ts != null {
+          ."@timestamp" = ts
+          del(.horodatage)
+        } else {
+          .tags = compact(flatten([.tags, "_dateparsefailure"]))
+        }
+      }
+  systeme_logstash_finalize:
+    type: remap
+    inputs: [systeme_date]
+    source: |
+      # @timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp
+      if exists(."@timestamp") && !is_timestamp(."@timestamp") {
+        iso = replace(string(."@timestamp") ?? "", ",", ".")
+        ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
+        if ts == null {
+          ."_@timestamp" = ."@timestamp"
+          ."@timestamp" = now()
+          .tags = compact(flatten([.tags, "_timestampparsefailure"]))
+        } else {
+          ."@timestamp" = ts
+        }
+      }
+      # Format de date identique à Logstash (millisecondes, UTC)
+      if is_timestamp(."@timestamp") {
+        ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")
+      }
+  archive_pipeline_in_init:
+    type: remap
+    inputs:
+      - entree_routage.pipeline_archive
+      - web_logstash_finalize
+      - systeme_logstash_finalize
+    source: |
+      # Événement reçu d’un autre pipeline : @timestamp redevient une date, comme dans Logstash
+      if is_string(."@timestamp") {
+        ."@timestamp" = parse_timestamp(string!(."@timestamp"), "%+") ?? ."@timestamp"
+      }
+      # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
+      if !exists(."@timestamp") {
+        ."@timestamp" = now()
+      }
+      if !exists(."@version") {
+        ."@version" = "1"
+      }
+  archive_logstash_finalize:
+    type: remap
+    inputs: [archive_pipeline_in_init]
+    source: |
+      # @timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp
+      if exists(."@timestamp") && !is_timestamp(."@timestamp") {
+        iso = replace(string(."@timestamp") ?? "", ",", ".")
+        ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
+        if ts == null {
+          ."_@timestamp" = ."@timestamp"
+          ."@timestamp" = now()
+          .tags = compact(flatten([.tags, "_timestampparsefailure"]))
+        } else {
+          ."@timestamp" = ts
+        }
+      }
+      # Format de date identique à Logstash (millisecondes, UTC)
+      if is_timestamp(."@timestamp") {
+        ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")
+      }
+sinks:
+  web_kafka_out:
+    type: kafka
+    inputs: [web_logstash_finalize]
+    bootstrap_servers: kafka:9092
+    topic: logs-web
+    encoding:
+      codec: json
+    acknowledgements:
+      enabled: true
+  systeme_kafka_out:
+    type: kafka
+    inputs: [systeme_logstash_finalize]
+    bootstrap_servers: kafka:9092
+    topic: logs-systeme
+    encoding:
+      codec: json
+    acknowledgements:
+      enabled: true
+  archive_kafka_out:
+    type: kafka
+    inputs: [archive_logstash_finalize]
+    bootstrap_servers: kafka:9092
+    topic: logs-archive
+    encoding:
+      codec: json
+    acknowledgements:
+      enabled: true

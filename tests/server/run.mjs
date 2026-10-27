@@ -160,6 +160,20 @@ try {
   r = await request(prod, 'POST', '/v1/translate/logstash', { body: 'input { stdin {} } filter { ruby { code => "x" } } output { stdout {} }', headers: auth });
   check(r.status === 200 && r.json.verdict === 'todo', 'traduction Logstash : verdict renvoyé', r.json && r.json.verdict);
 
+  /* ---------- Ensemble de pipelines (pipelines.yml) ---------- */
+  const yml = rd('examples/logstash/pipelines/pipelines.yml');
+  const confs = Object.fromEntries(['conf.d/entree.conf', 'conf.d/systeme.conf', 'conf.d/web/10-entree.conf', 'conf.d/web/20-filtres.conf', 'conf.d/web/30-sorties.conf'].map(f => [f, rd(`examples/logstash/pipelines/${f}`)]));
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: JSON.stringify({ pipelines: yml, files: confs }), headers: auth });
+  check(r.status === 200 && r.json.pipelines.length === 4 && r.json.pipelines.every(p => p.verdict !== 'todo') && /entree_routage/.test(r.json.config), 'pipelines.yml : quatre pipelines reliés en une configuration', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines?format=toml', { body: '- pipeline.id: seul\n  config.string: "input { stdin {} } output { stdout {} }"\n', headers: auth });
+  check(r.status === 200 && r.json.format === 'toml' && /\[sources\.seul_stdin_in\]/.test(r.json.config), 'pipelines.yml seul (config.string) : TOML', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: JSON.stringify({ pipelines: yml }), headers: auth });
+  check(r.status === 200 && r.json.verdict === 'todo' && r.json.pipelines.filter(p => p.error).length === 3, 'pipelines.yml sans ses fichiers : pipelines à reprendre, nommés', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: 'pipeline.id: x', headers: auth });
+  check(r.status === 422 && /liste/.test(r.json.error), 'pipelines.yml qui n’est pas une liste : refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: JSON.stringify({ pipelines: yml, files: ['x'] }), headers: auth });
+  check(r.status === 400, 'pipelines.yml : « files » mal formé refusé', `statut ${r.status}`);
+
   /* ---------- Inventaire Kibana ---------- */
   const ndjson = rd('examples/kibana/supervision_web.ndjson');
   r = await request(prod, 'POST', '/v1/inventory/kibana', { body: ndjson, headers: auth });
@@ -211,6 +225,15 @@ c = cli('ls2vector', 'examples/logstash/batch.conf', '--fial-on', 'todo');
 check(c.status === 1 && /--fial-on/.test(c.stderr), 'option inconnue : erreur qui la nomme', `code ${c.status}`);
 c = cli('ls2vector', 'examples/logstash/batch.conf', '--format', 'tom');
 check(c.status === 1, '--format avec une valeur inconnue : erreur', `code ${c.status}`);
+const lsOut = join(TMP, 'sortie-vector');
+c = cli('ls2vector', 'examples/logstash/pipelines/pipelines.yml', '--out', lsOut);
+check(c.status === 0 && existsSync(join(lsOut, 'pipelines.yaml')) && /entree \(conf\.d\/entree\.conf, 1 fichier\)/.test(c.stderr) && /web \(conf\.d\/web\/\*\.conf, 3 fichiers\)/.test(c.stderr), 'ls2vector pipelines.yml --out : une configuration, chaque pipeline et ses fichiers listés', `code ${c.status} ${c.stderr}`);
+c = cli('ls2vector', 'examples/logstash/pipelines/', '--out', join(TMP, 'sortie-vector-2'));
+check(/pipelines\.yml : « passerelle ls2vector/.test(c.stderr), 'ls2vector sur un dossier qui porte pipelines.yml : la commande d’ensemble est indiquée', c.stderr.split('\n')[0]);
+c = cli('ls2vector', 'examples/logstash/batch.conf', '--out', 'examples/logstash/batch.conf');
+check(c.status === 1 && /--out : impossible de créer le dossier/.test(c.stderr) && !/at /.test(c.stderr), '--out sur un fichier : erreur lisible, sans pile', c.stderr.trim());
+c = cli('ls2vector', join(TMP, 'absent.yml'));
+check(c.status === 1 && /absent\.yml/.test(c.stderr), 'ls2vector pipelines.yml introuvable : erreur', `code ${c.status}`);
 c = cli('--help');
 check(/--verbose/.test(c.stdout), 'l’aide mentionne --verbose');
 

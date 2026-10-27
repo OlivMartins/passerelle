@@ -1129,16 +1129,26 @@ function isoParse(x, tz) {
   return `${forms.join(' ?? ')} ?? parse_timestamp(${x} + "T00:00:00", "%Y-%m-%dT%H:%M:%S"${tz || ''}) ?? null`;
 }
 function codecOf(c) { if (!c) return null; if (typeof c === 'string') return c; if (isObj(c)) return c.__plugin; return null; }
-function buildSource(v, st, cfg, idx, used) {
+function buildSource(v, st, cfg, idx, used, opts) {
   const s = lsSettings(st); const name = uniq(used, compName(s.id || (st.name === 'kafka' ? 'kafka_in' : st.name + '_in')));
   let src;
+  // Entrée pipeline { address } : les événements viennent d’un autre pipeline du même pipelines.yml
+  if (st.name === 'pipeline') {
+    const address = s.address === undefined ? '' : String(s.address);
+    if (!opts || !opts.pipelineIO) { v.stats.ko++; v.note('err', `Entrée pipeline non traduite (ligne ${st.line})`, `Les événements de l’adresse « ${address} » viennent d’un autre pipeline : traduisez l’ensemble depuis pipelines.yml (passerelle ls2vector pipelines.yml), qui relie les pipelines entre eux.`); return null; }
+    if (!address) { v.stats.ko++; v.note('err', `Entrée pipeline sans adresse (ligne ${st.line})`, 'address est obligatoire : Logstash refuse la configuration.'); return null; }
+    v.stats.ok++;
+    return { name, src: { type: '__pipeline', address, __label: `pipeline ${address}`, __detail: 'liaison entre pipelines', __pipeline: true }, s };
+  }
   if (st.name === 'kafka') {
     src = { type: 'kafka' };
     src.bootstrap_servers = cfg.kafka.bootstrap_servers || s.bootstrap_servers || 'localhost:9092';
-    let group = cfg.kafka.consumer_group || s.group_id || 'logstash';
+    // Ensemble de pipelines : les réglages kafka.consumer_group et input_topics ne visent qu’une source Kafka unique
+    const own = !opts || opts.singleKafkaInput !== false;
+    let group = (own && cfg.kafka.consumer_group) || s.group_id || 'logstash';
     if (cfg.vector.shadow_mode) group += '-shadow';
     src.group_id = group;
-    const topics = cfg.kafka.input_topics && cfg.kafka.input_topics.length ? cfg.kafka.input_topics : s.topics_pattern ? ['^' + String(s.topics_pattern).replace(/^\^/, '')] : lsList(s.topics || 'logstash');
+    const topics = own && cfg.kafka.input_topics && cfg.kafka.input_topics.length ? cfg.kafka.input_topics : s.topics_pattern ? ['^' + String(s.topics_pattern).replace(/^\^/, '')] : lsList(s.topics || 'logstash');
     src.topics = topics;
     if (s.auto_offset_reset) src.auto_offset_reset = s.auto_offset_reset;
     if (s.session_timeout_ms) src.session_timeout_ms = +s.session_timeout_ms;
@@ -1183,7 +1193,7 @@ function buildSource(v, st, cfg, idx, used) {
   return { name, src, s };
 }
 function uniq(used, base) { let n = base, i = 2; while (used.has(n)) n = `${base}_${i++}`; used.add(n); return n; }
-function buildSink(v, st, cfg, used, singleKafka) {
+function buildSink(v, st, cfg, used, singleKafka, opts) {
   const s = lsSettings(st);
   const tplOf = t => String(t).replace(/%\{([^}]+)\}/g, (m, ref) => {
     if (ref.startsWith('+')) return joda2strf(ref.slice(1));
@@ -1218,6 +1228,14 @@ function buildSink(v, st, cfg, used, singleKafka) {
     return { name, sink };
   }
   const name = uniq(used, compName(s.id || st.name + '_out'));
+  // Sortie pipeline { send_to } : reliée à l’entrée du pipeline destinataire, sans sink Vector
+  if (st.name === 'pipeline') {
+    const to = lsList(s.send_to).map(String).filter(Boolean);
+    if (!opts || !opts.pipelineIO) { v.stats.ko++; v.note('err', `Sortie pipeline non traduite (ligne ${st.line})`, `Les événements partent vers ${to.length ? to.map(x => `« ${x} »`).join(', ') : 'un autre pipeline'} : traduisez l’ensemble depuis pipelines.yml (passerelle ls2vector pipelines.yml), qui relie les pipelines entre eux.`); return null; }
+    if (!to.length) { v.stats.ko++; v.note('err', `Sortie pipeline sans send_to (ligne ${st.line})`, 'send_to est obligatoire : Logstash refuse la configuration.'); return null; }
+    v.stats.ok++;
+    return { name, sink: { type: '__pipeline', inputs: [], send_to: to, __label: `pipeline → ${to.join(', ')}` } };
+  }
   const others = {
     elasticsearch: () => elasticsearchSink(v, s, tplOf),
     stdout: () => ({ type: 'console', inputs: [], encoding: { codec: 'json' } }),
@@ -1414,15 +1432,16 @@ function throttleTransform(v, st, rest) {
   if (s.max_counters !== undefined || s.max_age !== undefined) v.note('info', 'throttle : max_age, max_counters', 'Vector gère seul la mémoire de ses compteurs : ces réglages n’ont pas d’équivalent.');
   return out;
 }
-function translateLogstash(src, cfg) {
-  try { return translatePipeline(src, cfg); }
+function translateLogstash(src, cfg, opts) {
+  try { return translatePipeline(src, cfg, opts || {}); }
   catch (e) {
     // Une construction hors de portée (pile épuisée) ne doit pas devenir une erreur interne du service
     if (e instanceof RangeError) return { error: 'Pipeline trop imbriqué pour être traduit.' };
     throw e;
   }
 }
-function translatePipeline(src, cfg) {
+function translatePipeline(src, cfg, opts) {
+  opts = opts || {};
   const notes = makeNotes();
   // Compatibilité ECS : celle de la configuration (v8 par défaut, comme Logstash 8 et suivants), sauf réglage du plugin
   const v = { ns: cfg.vector.log_namespace !== false, compat: !!cfg.vector.logstash_compat, ecs: String(cfg.vector.ecs_compatibility || 'v8') !== 'disabled', stats: { ok: 0, approx: 0, ko: 0 }, enrich: {}, env: new Set(), refN: 0, note: (l, t, d, c) => notes.add(l, t, d, c) };
@@ -1435,7 +1454,7 @@ function translatePipeline(src, cfg) {
   const srcList = [];
   ast.input.forEach((st, i) => {
     if (st.k !== 'plugin') { v.note('warn', 'Condition dans input', 'Les conditions de la section input sont ignorées.'); return; }
-    const r = buildSource(v, st, cfg, i, used); if (r) srcList.push(r);
+    const r = buildSource(v, st, cfg, i, used, opts); if (r) srcList.push(r);
   });
   if (!srcList.length) { const r = { name: uniq(used, 'kafka_in'), src: { type: 'kafka', bootstrap_servers: cfg.kafka.bootstrap_servers || 'localhost:9092', group_id: cfg.kafka.consumer_group || 'vector', topics: cfg.kafka.input_topics.length ? cfg.kafka.input_topics : ['logs'], decoding: { codec: 'json' }, __label: 'logs', __detail: 'source par défaut' }, s: {} }; if (v.ns) r.src.log_namespace = true; srcList.push(r); v.note('warn', 'Aucune entrée', 'Une source Kafka par défaut a été ajoutée.'); }
   let prev = [];
@@ -1447,7 +1466,14 @@ function translatePipeline(src, cfg) {
     const g = new VrlGen(v);
     // Mode ECS : les codecs de Logstash gardent la ligne reçue dans [event][original]
     const original = v.ns && g.ecsOn(r.s);
-    if (v.ns && r.src.__plain) {
+    if (r.src.__pipeline) {
+      // L’événement arrive déjà décodé ; la finalisation du pipeline expéditeur a écrit @timestamp en texte
+      if (cfg.vector.logstash_compat) {
+        g.comment('Événement reçu d’un autre pipeline : @timestamp redevient une date, comme dans Logstash');
+        g.open('if is_string(."@timestamp")'); g.emit('."@timestamp" = parse_timestamp(string!(."@timestamp"), "%+") ?? ."@timestamp"'); g.close();
+      }
+    }
+    else if (v.ns && r.src.__plain) {
       g.comment('Codec plain : le message brut devient le champ message, comme dans Logstash');
       g.emit(original ? '. = { "message": ., "event": { "original": . } }' : '. = { "message": . }');
     }
@@ -1541,7 +1567,8 @@ function translatePipeline(src, cfg) {
   if (hasConds) routeName = uniq(used, 'routage');
   let ri = 0;
   for (const o of outs) {
-    const r = buildSink(v, o.plugin, cfg, used, kafkaOuts === 1);
+    // Ensemble de pipelines : kafka.output_topic ne remplace le topic que s’il n’y a qu’une sortie Kafka dans tout l’ensemble
+    const r = buildSink(v, o.plugin, cfg, used, opts.singleKafka !== undefined ? opts.singleKafka : kafkaOuts === 1, opts);
     if (!r) continue;
     let input = prev.slice();
     if (o.conds.length) {
@@ -1563,6 +1590,26 @@ function translatePipeline(src, cfg) {
     v.note('info', 'Conditions de sortie → route', 'Les if/else de la section output deviennent un transform route ; chaque branche est une condition VRL exclusive.');
   }
   if (!Object.keys(sinks).length) v.note('err', 'Aucune sortie', 'Le pipeline n’a pas de sortie traduisible.');
+  // Pipeline d’un ensemble (pipelines.yml) : la configuration est assemblée avec les autres, puis écrite une fois
+  if (opts.pipelineIO) return { parts: { sources, transforms, sinks, enrich: v.enrich }, v, notes: notes.list, stats: v.stats, graph, env: [...v.env], srcList, prev };
+  const { config, yaml, toml } = vectorDocument(v, { sources, transforms, sinks, enrich: v.enrich }, cfg, 'depuis un pipeline Logstash');
+  const order = { err: 0, warn: 1, opt: 2, info: 3 };
+  notes.list.sort((a, b) => order[a.level] - order[b.level]);
+  const inTopics = srcList.map(r => r.src.__label).join(', ');
+  const outLabels = graph.nodes.filter(nd => nd.kind === 'sink').map(nd => nd.label);
+  const steps = graph.nodes.filter(nd => nd.kind === 'transform' && nd.type === 'remap' && !['Préparation', 'Finalisation'].includes(nd.label));
+  const group = srcList[0] && srcList[0].src.group_id;
+  const sentenceTxt = `Lit ${inTopics}${group ? ` (groupe ${group})` : ''}, applique ${steps.length} étape${steps.length > 1 ? 's' : ''}${steps.length ? ` (${[...new Set(steps.map(x => x.label))].join(', ')})` : ''}, puis écrit ${outLabels.length > 1 ? `selon des conditions vers ${outLabels.slice(0, -1).join(', ')} ou ${outLabels[outLabels.length - 1]}` : `vers ${outLabels[0] || '—'}`}.`;
+  const first = Object.keys(transforms)[0]; const last = prev[0];
+  return { config, yaml, toml, notes: notes.list, stats: v.stats, graph, sentence: sentenceTxt, env: [...v.env], firstTransform: first, lastTransform: last };
+}
+
+/*
+ * Configuration Vector complète, à partir des composants d’un pipeline ou d’un ensemble de pipelines : $ doublés,
+ * notes communes (API, accusés de réception, namespace), en-tête, YAML et TOML.
+ */
+function vectorDocument(v, parts, cfg, origin) {
+  const { sources, transforms, sinks } = parts;
   // Vector interpole ${VAR} et $VAR dans tout le fichier : les $ du code VRL sont doublés
   let dollar = false;
   const esc = x => { if (x.includes('$')) { dollar = true; return x.replace(/\$/g, '$$$$'); } return x; };
@@ -1577,7 +1624,7 @@ function translatePipeline(src, cfg) {
   // L’API de Vector n’a pas d’authentification : elle n’écoute que sur la boucle locale, ce qui suffit à « vector top »
   const config = { data_dir: '/var/lib/vector', api: { enabled: true, address: '127.0.0.1:8686' } };
   v.note('info', 'API Vector sur la boucle locale', 'L’API de Vector (vector top, santé) écoute sur 127.0.0.1:8686 : elle n’a pas d’authentification et ne doit pas être joignable du réseau. Dans un conteneur, pour l’atteindre depuis l’hôte, remplacez l’adresse par 0.0.0.0:8686 et ne publiez le port que sur une interface de confiance.');
-  if (Object.keys(v.enrich).length) config.enrichment_tables = v.enrich;
+  if (Object.keys(parts.enrich || {}).length) config.enrichment_tables = parts.enrich;
   config.sources = sources; config.transforms = transforms; config.sinks = sinks;
   if (!Object.keys(transforms).length) delete config.transforms;
   if (cfg.vector.acknowledgements) {
@@ -1593,20 +1640,11 @@ function translatePipeline(src, cfg) {
   }
   if (cfg.vector.shadow_mode) v.note('info', 'Mode shadow', 'Le groupe de consommateurs et les topics de sortie sont suffixés par -shadow : Vector tourne en parallèle de Logstash sans lui prendre de partitions.');
   if (v.ns) v.note('info', 'Namespace de logs', 'log_namespace isole les métadonnées Kafka (topic, offset, clé) de la charge utile : les messages écrits restent identiques à ceux de Logstash.');
-  const header = `Configuration Vector générée par Passerelle depuis un pipeline Logstash\nVérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>${interpolation ? '\nVector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)' : ''}${v.env.size ? `\nVariables d’environnement attendues : ${[...v.env].join(', ')}` : ''}`;
+  const header = `Configuration Vector générée par Passerelle ${origin}\nVérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>${interpolation ? '\nVector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)' : ''}${v.env.size ? `\nVariables d’environnement attendues : ${[...v.env].join(', ')}` : ''}`;
   const yaml = header.split('\n').map(l => '# ' + l).join('\n') + '\n\n' + toYAML(config) + '\n';
   const toml = header.split('\n').map(l => '# ' + l).join('\n') + '\n\n' + toTOML(config) + '\n';
-  const order = { err: 0, warn: 1, opt: 2, info: 3 };
-  notes.list.sort((a, b) => order[a.level] - order[b.level]);
-  const inTopics = srcList.map(r => r.src.__label).join(', ');
-  const outLabels = graph.nodes.filter(nd => nd.kind === 'sink').map(nd => nd.label);
-  const steps = graph.nodes.filter(nd => nd.kind === 'transform' && nd.type === 'remap' && !['Préparation', 'Finalisation'].includes(nd.label));
-  const group = srcList[0] && srcList[0].src.group_id;
-  const sentenceTxt = `Lit ${inTopics}${group ? ` (groupe ${group})` : ''}, applique ${steps.length} étape${steps.length > 1 ? 's' : ''}${steps.length ? ` (${[...new Set(steps.map(x => x.label))].join(', ')})` : ''}, puis écrit ${outLabels.length > 1 ? `selon des conditions vers ${outLabels.slice(0, -1).join(', ')} ou ${outLabels[outLabels.length - 1]}` : `vers ${outLabels[0] || '—'}`}.`;
-  const first = Object.keys(transforms)[0]; const last = prev[0];
-  return { config, yaml, toml, notes: notes.list, stats: v.stats, graph, sentence: sentenceTxt, env: [...v.env], firstTransform: first, lastTransform: last };
+  return { config, yaml, toml };
 }
-
 /* ---------- Sérialisation ---------- */
 function yq(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
 function yamlKey(k) { return /^[A-Za-z0-9_][A-Za-z0-9_.\-]*$/.test(k) ? k : yq(k); }

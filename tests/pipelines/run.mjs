@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CASES } from './cases.mjs';
-import { ECS_MODES, inputOf, outputsOf, outputFile, translatedPipeline, logstashPipeline } from './transport.mjs';
+import { ECS_MODES, inputOf, outputsOf, outputFile, translatedPipeline, logstashPipeline, translatedChain, logstashChain } from './transport.mjs';
 import { loadEngine } from '../../scripts/engine.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -47,11 +47,23 @@ function prepare(cases) {
     writeFileSync(join(LS, 'in', `${c.id}.ndjson`), inputOf(c));
     writeFileSync(join(VEC, 'in', `${c.id}.ndjson`), inputOf(c));
     for (const mode of modes) {
+      const cfg = E.mergeConfig(E.DEFAULT_CONFIG, { vector: { ecs_compatibility: mode } });
+      if (c.chain) {
+        // Plusieurs pipelines reliés : un fichier et une entrée de pipelines.yml chacun, une configuration Vector pour l’ensemble
+        for (const m of logstashChain(c, mode)) {
+          writeFileSync(join(LS, 'conf', `${c.id}.${mode}.${m.id}.conf`), m.text);
+          pipelines.push(`- pipeline.id: ${c.id}__${mode}__${m.id}\n  path.config: /work/conf/${c.id}.${mode}.${m.id}.conf\n  pipeline.workers: 1\n  pipeline.ecs_compatibility: ${mode}\n`);
+        }
+        const t = E.translatePipelines(translatedChain(c, mode), cfg);
+        translations.set(`${c.id}.${mode}`, t);
+        if (t.yaml && !t.error) writeFileSync(join(VEC, 'conf', `${c.id}.${mode}.yaml`), t.yaml);
+        continue;
+      }
       writeFileSync(join(LS, 'conf', `${c.id}.${mode}.conf`), logstashPipeline(c, mode));
       // Un seul worker : Logstash garde alors l’ordre des événements
       pipelines.push(`- pipeline.id: ${c.id}__${mode}\n  path.config: /work/conf/${c.id}.${mode}.conf\n  pipeline.workers: 1\n  pipeline.ecs_compatibility: ${mode}\n`);
       // La traduction est faite avec le même mode ECS que Logstash (vector.ecs_compatibility)
-      const t = E.translateLogstash(translatedPipeline(c, mode), E.mergeConfig(E.DEFAULT_CONFIG, { vector: { ecs_compatibility: mode } }));
+      const t = E.translateLogstash(translatedPipeline(c, mode), cfg);
       translations.set(`${c.id}.${mode}`, t);
       if (t.yaml) writeFileSync(join(VEC, 'conf', `${c.id}.${mode}.yaml`), t.yaml);
     }
@@ -59,6 +71,8 @@ function prepare(cases) {
   writeFileSync(join(LS, 'pipelines.yml'), pipelines.join(''));
   // Greffons à installer dans Logstash avant de jouer les cas (voir logstash.sh)
   writeFileSync(join(LS, 'plugins.txt'), [...new Set(cases.flatMap(c => c.plugins || []))].join(' '));
+  // Pipelines reliés : Logstash ne s’arrête pas seul, logstash.sh l’arrête quand chaque pipeline a lu son fichier
+  writeFileSync(join(LS, 'chains.txt'), cases.some(c => c.chain) ? String(cases.length * modes.length) : '');
   return translations;
 }
 
@@ -83,7 +97,7 @@ const eventsOf = file => (existsSync(file) ? readFileSync(file, 'utf8').split('\
 const outputsFrom = (dir, c, prefix) => Object.fromEntries(outputsOf(c).map(name => [name, eventsOf(join(dir, 'out', `${outputFile(prefix, name)}.ndjson`))]));
 
 function logstashResult(c, mode, log) {
-  if (new RegExp(`Failed to execute action.*pipeline_id:${c.id}__${mode}\\b`).test(log)) return { error: 'pipeline refusé par Logstash' };
+  if (new RegExp(`Failed to execute action.*pipeline_id:${c.id}__${mode}(__[A-Za-z0-9_-]+)?\\b`).test(log)) return { error: 'pipeline refusé par Logstash' };
   return { outputs: outputsFrom(LS, c, `${c.id}.${mode}`) };
 }
 
@@ -152,7 +166,9 @@ function compare(c, l, v, window) {
   const diffs = [];
   for (const name of outputsOf(c)) {
     const where = name ? `[sortie ${name}] ` : '';
-    const ln = l.outputs[name].map(e => normalize(e, c, window)); const vn = v.outputs[name].map(e => normalize(e, c, window));
+    // Pipelines reliés : deux pipelines qui écrivent dans une même sortie s’y entrelacent au hasard, l’ordre n’est pas comparé
+    const order = list => (c.chain ? list.slice().sort((x, y) => (canon(x) < canon(y) ? -1 : canon(x) > canon(y) ? 1 : 0)) : list);
+    const ln = order(l.outputs[name].map(e => normalize(e, c, window))); const vn = order(v.outputs[name].map(e => normalize(e, c, window)));
     if (ln.length !== vn.length) diffs.push(`${where}${ln.length} événement(s) côté Logstash, ${vn.length} côté Vector`);
     for (const gap of align(ln.map(canon), vn.map(canon))) {
       gap.a.forEach((i, k) => {

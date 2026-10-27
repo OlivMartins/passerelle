@@ -301,6 +301,23 @@ function serve(opts) {
           if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized' });
           return json(res, 200, { verdict: verdictOf(r), format: fmt, config: r[fmt], notes: r.notes, coverage: coverage(r.stats), topology: r.graph, env: r.env, summary: r.sentence });
         }
+        case '/v1/translate/logstash/pipelines': {
+          // Corps : pipelines.yml seul (config.string), ou JSON { "pipelines": "<pipelines.yml>", "files": { "chemin": "contenu" } }
+          const fmt = url.searchParams.get('format') === 'toml' ? 'toml' : 'yaml';
+          let yml = body; let files = {};
+          if (/^\s*\{/.test(body)) {
+            let j; try { j = JSON.parse(body); } catch (e) { return json(res, 400, { error: `JSON invalide : ${e.message}` }); }
+            if (typeof j.pipelines !== 'string') return json(res, 400, { error: 'champ « pipelines » attendu : le texte de pipelines.yml' });
+            if (j.files !== undefined && (typeof j.files !== 'object' || Array.isArray(j.files) || Object.values(j.files).some(x => typeof x !== 'string'))) return json(res, 400, { error: '« files » attend un objet { chemin: contenu }' });
+            yml = j.pipelines; files = j.files || {};
+          }
+          let list;
+          try { list = pipelinesFromYML(yml, Object.keys(files), f => files[f]); } catch (e) { return json(res, 422, { error: e.message, verdict: 'unrecognized' }); }
+          const r = translatePipelines(list, cfg);
+          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized', notes: r.notes, pipelines: r.pipelines });
+          r.pipelines.forEach((p, k) => Object.assign(p, { from: list[k].from, matched: list[k].matched }));
+          return json(res, 200, { verdict: verdictOf(r), format: fmt, config: r[fmt], notes: r.notes, coverage: coverage(r.stats), topology: r.graph, env: r.env, summary: r.sentence, pipelines: r.pipelines });
+        }
         case '/v1/inventory/kibana': {
           const fmt = url.searchParams.get('format') || 'json';
           if (!['json', 'md', 'html', 'csv'].includes(fmt)) return json(res, 400, { error: `format inconnu « ${fmt} » (json, md, html ou csv)` });
@@ -350,7 +367,7 @@ const HELP = `Passerelle ${VERSION} — traduction Elasticsearch/Logstash vers C
 Utilisation :
   passerelle serve       [--config FICHIER] [--listen HÔTE:PORT]
   passerelle dsl2sql     <fichier|dossier>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo|review] [--verbose]
-  passerelle ls2vector   <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review] [--verbose]
+  passerelle ls2vector   <fichier|dossier|pipelines.yml>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review] [--verbose]
   passerelle schema ddl  <fichier|dossier>... [--config FICHIER] [--preset otel|otel-json] [--compact] [--json] [--table NOM] [--format sql|yaml] [--out DOSSIER]
   passerelle schema pull [--config FICHIER] [--table NOM]...
   passerelle kibana      <export.ndjson>... [--config FICHIER] [--timezone FUSEAU] [--format md|html|csv|json] [--out DOSSIER] [--fail-on todo|review]
@@ -405,6 +422,38 @@ function formatFor(o, allowed, what) {
   if (o.format !== undefined && !allowed.includes(o.format)) fail(`--format attend ${allowed.slice(0, -1).join(', ')}${allowed.length > 1 ? ' ou ' : ''}${allowed[allowed.length - 1]} pour ${what}, pas « ${o.format} »`);
   return o.format;
 }
+/*
+ * pipelines.yml et les fichiers de configuration qu’il désigne. path.config est cherché à côté de pipelines.yml :
+ * tel quel s’il est relatif, par ses fins successives s’il est absolu (/etc/logstash/conf.d/web/*.conf → conf.d/web/*.conf,
+ * web/*.conf, puis *.conf), ce qui permet de copier l’arborescence de la machine Logstash telle quelle.
+ */
+function pipelineSet(file, cfg) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return { fatal: `lecture impossible (${e.code || e.message})` }; }
+  const dir = path.dirname(file);
+  const available = [];
+  const walk = (d, rel, depth) => {
+    if (depth > 8 || available.length > 20000) return;
+    let names; try { names = fs.readdirSync(d, { withFileTypes: true }); } catch (e) { return; }
+    for (const n of names.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      if (n.name.startsWith('.') || n.name === 'node_modules') continue;
+      const r = rel ? `${rel}/${n.name}` : n.name;
+      if (n.isDirectory()) walk(path.join(d, n.name), r, depth + 1);
+      else if (n.isFile()) available.push(r);
+    }
+  };
+  walk(dir, '', 0);
+  let list;
+  try { list = pipelinesFromYML(text, available, f => fs.readFileSync(path.join(dir, f), 'utf8')); } catch (e) { return { fatal: e.message }; }
+  const r = translatePipelines(list, cfg);
+  r.pipelines.forEach((p, k) => Object.assign(p, { from: list[k] && list[k].from, matched: list[k] && list[k].matched }));
+  return r;
+}
+// Dossier de sortie (--out) : une erreur lisible plutôt qu’une pile Node.js
+function outDir(dir) {
+  try { fs.mkdirSync(dir, { recursive: true }); }
+  catch (e) { fail(`--out : impossible de créer le dossier ${dir} (${e.code === 'EEXIST' || e.code === 'ENOTDIR' ? 'un fichier porte ce nom' : e.code || e.message})`); }
+}
 function batch(kind, o) {
   if (kind === 'ls') formatFor(o, ['yaml', 'toml'], 'ls2vector');
   else if (o.format !== undefined) fail('--format ne s’applique pas à dsl2sql');
@@ -412,12 +461,42 @@ function batch(kind, o) {
   let cfg;
   try { cfg = loadConfig(o.config || process.env.PASSERELLE_CONFIG || null); } catch (e) { fail(e.message); }
   const fmt = kind === 'ls' ? o.format || cfg.vector.format : 'sql';
-  const files = collect(o._, kind === 'dsl' ? /\.(json|txt|es)$/i : /\.(conf|cfg|logstash)$/i);
-  if (!files.length) fail('aucun fichier correspondant trouvé');
-  if (o.out) fs.mkdirSync(o.out, { recursive: true });
+  // pipelines.yml : l’ensemble est traduit d’un bloc, avec les liaisons pipeline { send_to }
+  const sets = kind === 'ls' ? o._.filter(p => /\.ya?ml$/i.test(p)) : [];
+  const files = collect(o._.filter(p => !sets.includes(p)), kind === 'dsl' ? /\.(json|txt|es)$/i : /\.(conf|cfg|logstash)$/i);
+  if (!files.length && !sets.length) fail('aucun fichier correspondant trouvé');
+  // Un dossier qui porte pipelines.yml : chaque fichier traduit seul perd les liaisons entre pipelines
+  if (kind === 'ls') for (const p of o._.filter(x => !sets.includes(x))) {
+    let dir = false; try { dir = fs.statSync(p).isDirectory(); } catch (e) { /* signalé par collect */ }
+    const yml = ['pipelines.yml', 'pipelines.yaml'].map(n => path.join(p, n)).find(f => dir && fs.existsSync(f));
+    if (yml) process.stderr.write(`ℹ ${p} contient ${path.basename(yml)} : « passerelle ls2vector ${yml} » traduit l’ensemble avec les liaisons entre pipelines.\n`);
+  }
+  if (o.out) outDir(o.out);
   let errors = 0, failing = 0;
   const threshold = o['fail-on'] ? VERDICT_RANK[o['fail-on']] : Infinity;
-  const MARK = { ready: '✓', review: '~', todo: '!' };
+  const MARK = { ready: '✓', review: '~', todo: '!', unrecognized: '✗' };
+  for (const set of sets) {
+    const r = pipelineSet(set, cfg);
+    if (r.fatal) { errors++; process.stderr.write(`✗ ${set} (non reconnu) : ${r.fatal}\n`); continue; }
+    const cov = coverage(r.stats); const verdict = r.error ? 'unrecognized' : verdictOf(r);
+    if (verdict === 'unrecognized') errors++;
+    else if (VERDICT_RANK[verdict] >= threshold) failing++;
+    const summary = `${VERDICTS[verdict]} : ${r.pipelines.length} pipeline${r.pipelines.length > 1 ? 's' : ''}, ${cov.percent} % traduit, ${r.stats.approx} à vérifier, ${r.stats.ko} à reprendre`;
+    if (o.out) {
+      const target = path.join(o.out, path.basename(set).replace(/\.[^.]+$/, '') + `.${fmt}`);
+      fs.writeFileSync(target, r[fmt]);
+      process.stderr.write(`${MARK[verdict]} ${set} → ${target} (${summary})\n`);
+    } else {
+      process.stdout.write(r[fmt]);
+      process.stderr.write(`${MARK[verdict]} ${set} (${summary})\n`);
+    }
+    for (const p of r.pipelines) {
+      const where = p.from === 'config.string' ? 'config.string' : Array.isArray(p.from) ? `${p.matched}, ${p.from.length} fichier${p.from.length > 1 ? 's' : ''}` : '';
+      const links = [p.addresses.length ? `écoute ${p.addresses.join(', ')}` : '', p.sendTo.length ? `envoie vers ${p.sendTo.join(', ')}` : ''].filter(Boolean).join(' ; ');
+      process.stderr.write(`    ${p.error ? '✗' : MARK[p.verdict]} ${p.id || '(sans pipeline.id)'}${where ? ` (${where})` : ''}${p.error ? ` : ${p.error}` : ''}${links ? ` — ${links}` : ''}\n`);
+    }
+    if (o.verbose) r.notes.forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`));
+  }
   for (const f of files) {
     const text = fs.readFileSync(f, 'utf8');
     const r = kind === 'dsl' ? translateDSL(text, cfg, { index: o.index || '' }) : translateLogstash(text, cfg);
@@ -462,7 +541,7 @@ function schemaDDL(o) {
   if (r.error || r.empty) fail(r.error || 'aucun mapping lisible');
   const verdict = verdictOf(r);
   if (o.out) {
-    fs.mkdirSync(o.out, { recursive: true });
+    outDir(o.out);
     fs.writeFileSync(path.join(o.out, 'schema.sql'), `-- Généré par Passerelle ${VERSION} — verdict : ${VERDICTS[verdict]}\n\n${r.sql}`);
     fs.writeFileSync(path.join(o.out, 'passerelle.tables.yaml'), r.yaml);
     process.stderr.write(`${r.tables.length} table(s) → ${path.join(o.out, 'schema.sql')} et ${path.join(o.out, 'passerelle.tables.yaml')} (${VERDICTS[verdict]})\n`);
@@ -513,7 +592,7 @@ function kibanaReport(o) {
   const title = `Inventaire Kibana — ${files.map(f => path.basename(f)).join(', ')}`;
   const render = f => (f === 'md' ? inventoryMarkdown(inv) : f === 'html' ? inventoryHTML(inv, title) : f === 'csv' ? inventoryCSV(inv) : JSON.stringify(inv, null, 2) + '\n');
   if (o.out) {
-    fs.mkdirSync(path.join(o.out, 'sql'), { recursive: true });
+    outDir(path.join(o.out, 'sql'));
     for (const f of ['md', 'html', 'csv', 'json']) fs.writeFileSync(path.join(o.out, `inventaire.${f}`), render(f));
     const sqlFiles = inventorySQLFiles(inv);
     for (const f of sqlFiles) fs.writeFileSync(path.join(o.out, 'sql', f.name), f.content);
@@ -533,7 +612,7 @@ function grafanaConvert(o) {
   const files = collect(o._, /\.json$/i);
   if (!files.length) fail('aucun fichier .json trouvé');
   if (files.length > 1 && !o.out) fail('plusieurs tableaux de bord : précisez --out DOSSIER');
-  if (o.out) fs.mkdirSync(o.out, { recursive: true });
+  if (o.out) outDir(o.out);
   let errors = 0, failing = 0;
   const MARK = { ready: '✓', review: '~', todo: '!', unrecognized: '✗' };
   for (const f of files) {

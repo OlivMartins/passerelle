@@ -1,0 +1,122 @@
+# Couverture : 7 directs, 0 à vérifier, 0 à reprendre
+
+# Configuration Vector générée par Passerelle depuis 2 pipelines Logstash (pipelines.yml)
+# Vérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>
+
+data_dir: /var/lib/vector
+api:
+  enabled: true
+  address: '127.0.0.1:8686'
+sources:
+  entree_stdin_in:
+    type: stdin
+    log_namespace: true
+transforms:
+  entree_stdin_in_init:
+    type: remap
+    inputs: [entree_stdin_in]
+    source: |
+      # Codec json : décodage de la ligne (invalide : gardée dans message, avec _jsonparsefailure)
+      raw = string(.) ?? ""
+      parsed, err = parse_json(raw)
+      if err == null {
+        . = object(parsed) ?? { "message": parsed }
+        .event.original = raw
+      } else {
+        . = { "message": raw, "tags": ["_jsonparsefailure"] }
+      }
+      # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
+      if !exists(."@timestamp") {
+        ."@timestamp" = now()
+      }
+      if !exists(."@version") {
+        ."@version" = "1"
+      }
+  entree_mutate:
+    type: remap
+    inputs: [entree_stdin_in_init]
+    source: |
+      # mutate
+      if exists(.vu_par) { .vu_par = push(array(.vu_par) ?? [.vu_par], "entree") } else { .vu_par = "entree" }
+  entree_logstash_finalize:
+    type: remap
+    inputs: [entree_mutate]
+    source: |
+      # @timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp
+      if exists(."@timestamp") && !is_timestamp(."@timestamp") {
+        iso = replace(string(."@timestamp") ?? "", ",", ".")
+        ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
+        if ts == null {
+          ."_@timestamp" = ."@timestamp"
+          ."@timestamp" = now()
+          .tags = compact(flatten([.tags, "_timestampparsefailure"]))
+        } else {
+          ."@timestamp" = ts
+        }
+      }
+      # Format de date identique à Logstash (millisecondes, UTC)
+      if is_timestamp(."@timestamp") {
+        ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")
+      }
+  entree_routage:
+    type: route
+    inputs: [entree_logstash_finalize]
+    reroute_unmatched: false
+    route:
+      pipeline_liaison_distributeur_v8_web: .type == "web"
+      file: '!(.type == "web")'
+  web_pipeline_in_init:
+    type: remap
+    inputs: [entree_routage.pipeline_liaison_distributeur_v8_web]
+    source: |
+      # Événement reçu d’un autre pipeline : @timestamp redevient une date, comme dans Logstash
+      if is_string(."@timestamp") {
+        ."@timestamp" = parse_timestamp(string!(."@timestamp"), "%+") ?? ."@timestamp"
+      }
+      # Compatibilité Logstash : @timestamp et @version présents sur chaque événement
+      if !exists(."@timestamp") {
+        ."@timestamp" = now()
+      }
+      if !exists(."@version") {
+        ."@version" = "1"
+      }
+  web_mutate:
+    type: remap
+    inputs: [web_pipeline_in_init]
+    source: |
+      # mutate
+      if exists(.vu_par) { .vu_par = push(array(.vu_par) ?? [.vu_par], "web") } else { .vu_par = "web" }
+      .tags = compact(flatten([.tags, "web"]))
+  web_logstash_finalize:
+    type: remap
+    inputs: [web_mutate]
+    source: |
+      # @timestamp venu du document : lu comme par Logstash ; illisible, rangé dans _@timestamp
+      if exists(."@timestamp") && !is_timestamp(."@timestamp") {
+        iso = replace(string(."@timestamp") ?? "", ",", ".")
+        ts = parse_timestamp(iso, "%+") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M:%S%.f") ?? parse_timestamp(iso, "%Y-%m-%dT%H:%M") ?? parse_timestamp(iso, "%Y-%m-%d %H:%M") ?? parse_timestamp(iso + "T00:00:00", "%Y-%m-%dT%H:%M:%S") ?? null
+        if ts == null {
+          ."_@timestamp" = ."@timestamp"
+          ."@timestamp" = now()
+          .tags = compact(flatten([.tags, "_timestampparsefailure"]))
+        } else {
+          ."@timestamp" = ts
+        }
+      }
+      # Format de date identique à Logstash (millisecondes, UTC)
+      if is_timestamp(."@timestamp") {
+        ."@timestamp" = format_timestamp!(."@timestamp", format: "%Y-%m-%dT%H:%M:%S%.3fZ")
+      }
+sinks:
+  entree_file_out:
+    type: file
+    inputs: [entree_routage.file]
+    path: /work/out/liaison_distributeur.v8.autres.ndjson
+    encoding:
+      codec: json
+  web_file_out:
+    type: file
+    inputs: [web_logstash_finalize]
+    path: /work/out/liaison_distributeur.v8.web.ndjson
+    encoding:
+      codec: json
