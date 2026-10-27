@@ -37,7 +37,7 @@ function chShapeLines(cfg, table, ind) {
   // Colonnes d’attributs et leur forme : Map de chaînes (ou de nombres), JSON
   const attrCols = attrs.map(([c]) => c);
   const store = c => { const t = colType(c); return t && t.kind === 'json' ? 'json' : t && t.kind === 'map' ? (t.value && (t.value.kind === 'int' || t.value.kind === 'float') ? t.value.kind : 'map') : 'map'; };
-  emit('flat = flatten(.)');
+  emit('flat = flatten(object!(.))');
   emit('row = {}');
   attrCols.forEach(c => emit(`row.${segName(c)} = {}`));
   // Valeur écrite dans une Map de chaînes : le texte, ou le JSON d’une liste ou d’un objet

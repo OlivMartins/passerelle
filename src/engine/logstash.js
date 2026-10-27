@@ -1240,6 +1240,36 @@ function buildSink(v, st, cfg, used, singleKafka, opts) {
     v.stats.ok++;
     return { name, sink: { type: '__pipeline', inputs: [], send_to: to, __label: `pipeline → ${to.join(', ')}` } };
   }
+  // Sortie elasticsearch → ClickHouse (vector.elasticsearch_output: clickhouse) : mise en forme, puis sink clickhouse
+  if (st.name === 'elasticsearch' && cfg.vector.elasticsearch_output === 'clickhouse') {
+    const ds = s.data_stream === undefined ? '' : String(s.data_stream).toLowerCase();
+    let index;
+    if (ds === 'true') index = `${s.data_stream_type || 'logs'}-${s.data_stream_dataset || 'generic'}-${s.data_stream_namespace || 'default'}`;
+    else {
+      const raw = String(s.index || 'logstash-%{+yyyy.MM.dd}');
+      if (!/%\{/.test(raw)) index = raw;
+      else {
+        const pre = []; const parts = []; let last = 0; let n = 0; let ts = false; let m; const re = /%\{([^}]+)\}/g;
+        while ((m = re.exec(raw))) {
+          if (m.index > last) parts.push(vq(raw.slice(last, m.index)));
+          if (m[1].startsWith('+')) {
+            if (!ts) { pre.push('ts = now()', 'tv = ."@timestamp"', 'if is_timestamp(tv) {', '  ts = tv', '} else if is_string(tv) {', '  ts = parse_timestamp(string!(tv), "%+") ?? now()', '}'); ts = true; }
+            pre.push(`d${++n} = format_timestamp!(ts, format: ${vq(joda2strf(m[1].slice(1)))}, timezone: "UTC")`);
+          } else pre.push(`d${++n} = to_string(${vPathOf(fieldSegs(m[1]), v.ns)}) ?? ""`);
+          parts.push(`d${n}`); last = re.lastIndex;
+        }
+        if (last < raw.length) parts.push(vq(raw.slice(last)));
+        index = { pre, expr: parts.join(' + ') };
+      }
+    }
+    for (const o of ['action', 'document_id', 'pipeline', 'script', 'routing', 'parent', 'doc_as_upsert', 'upsert']) {
+      if (s[o] !== undefined && !(o === 'action' && String(s[o]) === 'index')) { v.stats.approx++; v.note('warn', `Option ${o} non reprise (sortie ClickHouse)`, `L’option ${o} de la sortie elasticsearch n’a pas d’équivalent dans l’écriture ClickHouse : chaque événement est ajouté à la table (INSERT), sans identifiant de document.`); }
+    }
+    const r = clickhouseOutput(v, cfg, index, 'Sortie elasticsearch');
+    for (const [lv, t, d] of r.notes) v.note(lv, t, d);
+    r.sink.__label = `ClickHouse ${r.tables.join(', ')}`; v.stats.ok++;
+    return { name, sink: r.sink, pre: { name: uniq(used, `${name}_lignes`), source: r.shape } };
+  }
   const others = {
     elasticsearch: () => elasticsearchSink(v, s, tplOf),
     stdout: () => ({ type: 'console', inputs: [], encoding: { codec: 'json' } }),
@@ -1580,6 +1610,12 @@ function translatePipeline(src, cfg, opts) {
       let rn = condCache.get(key);
       if (!rn) { rn = compName(r.sink.__label || `route_${++ri}`).slice(0, 40) || `route_${++ri}`; while (routes[rn]) rn += '_b'; routes[rn] = key; condCache.set(key, rn); }
       input = [`${routeName}.${rn}`];
+    }
+    if (r.pre) {
+      transforms[r.pre.name] = { type: 'remap', inputs: input, source: r.pre.source };
+      graph.nodes.push({ id: r.pre.name, kind: 'transform', type: 'remap', label: 'Mise en forme ClickHouse', detail: 'colonnes de la table' });
+      input.forEach(i => graph.edges.push([i.split('.')[0], r.pre.name]));
+      input = [r.pre.name];
     }
     r.sink.inputs = input;
     const label = r.sink.__label; delete r.sink.__label;

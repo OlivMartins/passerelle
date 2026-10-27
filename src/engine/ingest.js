@@ -2484,12 +2484,27 @@ function translateIngest(inputs, cfg, opts) {
   graph.nodes.push({ id: 'bilan', kind: 'transform', type: 'route', label: 'Bilan', detail: 'échecs à part' });
   pipelines.forEach(p => graph.edges.push([p.transform, 'bilan']));
   if (pipelines.length > 1) graph.edges.push(['aiguillage', 'bilan']);
-  const sinks = opts.sinks ? opts.sinks(cfg, ['bilan._unmatched'], notes) : { sortie: { type: 'console', inputs: ['bilan._unmatched'], encoding: { codec: 'json' } } };
+  const v = { ns: cfg.vector.log_namespace !== false, env: new Set(), note: (l, t2, d) => notes.add(l, t2, d) };
+  let sinks;
+  const toCh = !opts.sinks && cfg.vector.elasticsearch_output === 'clickhouse';
+  if (opts.sinks) sinks = opts.sinks(cfg, ['bilan._unmatched'], notes);
+  else if (toCh) {
+    // Destination d’Elasticsearch : _index si un processeur l’a posé, sinon le data stream type-dataset-namespace
+    const index = { pre: [
+      'ix = to_string(%_index) ?? ""',
+      'ixd = (to_string(.data_stream.type) ?? "logs") + "-" + (to_string(.data_stream.dataset) ?? "generic") + "-" + (to_string(.data_stream.namespace) ?? "default")',
+      'ixf = ixd', 'if ix != "" {', '  ixf = ix', '}'], expr: 'ixf' };
+    const r = clickhouseOutput(v, cfg, index, 'Sortie');
+    for (const [lv, t2, d] of r.notes) notes.add(lv, t2, d);
+    transforms.sortie_lignes = { type: 'remap', inputs: ['bilan._unmatched'], source: r.shape };
+    graph.nodes.push({ id: 'sortie_lignes', kind: 'transform', type: 'remap', label: 'Mise en forme ClickHouse', detail: 'colonnes de la table' });
+    graph.edges.push(['bilan', 'sortie_lignes']);
+    r.sink.inputs = ['sortie_lignes']; sinks = { sortie: r.sink };
+  } else sinks = { sortie: { type: 'console', inputs: ['bilan._unmatched'], encoding: { codec: 'json' } } };
   sinks.echecs = { type: 'file', inputs: ['bilan.echecs'], path: '/var/lib/vector/ingest-echecs-%Y-%m-%d.ndjson', encoding: { codec: 'json' } };
   for (const [n, k] of Object.entries(sinks)) { graph.nodes.push({ id: n, kind: 'sink', type: k.type, label: n === 'echecs' ? 'Documents en échec' : 'Sortie', detail: k.type }); graph.edges.push([k.inputs[0].split('.')[0], n]); }
   notes.add('info', 'Documents en échec', 'Un document qu’Elasticsearch aurait refusé est écrit dans /var/lib/vector/ingest-echecs-*.ndjson tel qu’il est arrivé, avec la cause dans les métadonnées (%ingest_failure) : remplacez cette sortie par la vôtre.');
-  if (!opts.sinks) notes.add('info', 'Sortie console', 'Les documents traités sont écrits sur la sortie standard : remplacez le sink « sortie » par la destination voulue, ou choisissez vector.elasticsearch_output: clickhouse pour écrire dans ClickHouse.');
-  const v = { ns: cfg.vector.log_namespace !== false, env: new Set(), note: (l, t2, d) => notes.add(l, t2, d) };
+  if (!opts.sinks && !toCh) notes.add('info', 'Sortie console', 'Les documents traités sont écrits sur la sortie standard : remplacez le sink « sortie » par la destination voulue, ou choisissez vector.elasticsearch_output: clickhouse pour écrire dans ClickHouse.');
   const doc = vectorDocument(v, { sources, transforms, sinks, enrich }, cfg, `depuis ${defs.size} pipeline${defs.size > 1 ? 's' : ''} d’ingestion Elasticsearch`);
   const order = { err: 0, warn: 1, opt: 2, info: 3 };
   notes.list.sort((a, b) => order[a.level] - order[b.level]);

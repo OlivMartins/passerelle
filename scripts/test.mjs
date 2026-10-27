@@ -161,6 +161,17 @@ snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut
   const bad = one('processors:\n  - grok: { field: m, patterns: ["(?=a)%{WORD:w}"] }\n  - gsub: { field: m, pattern: "(?<=a)b", replacement: "c" }');
   check(bad.pipelines[0].verdict === 'todo' && bad.notes.some(n => n.level === 'err' && /rétrospection/.test(n.detail)), 'ingest : une rétrospection (?<=…) est à reprendre avec sa raison, pas un VRL qui ne compile pas', JSON.stringify(bad.notes.filter(n => n.level === 'err').map(n => n.detail)));
   {
+    const c2 = JSON.parse(JSON.stringify(E.DEFAULT_CONFIG)); c2.vector.elasticsearch_output = 'clickhouse';
+    c2.clickhouse.index_mapping = { 'app-*': 'logs.app' };
+    const ls = E.translateLogstash('input { kafka { topics => ["a"] } }\noutput { elasticsearch { hosts => ["http://es:9200"] index => "app-events" action => "create" } }', c2, {});
+    check(ls.config.sinks.elasticsearch_out && ls.config.sinks.elasticsearch_out.type === 'clickhouse' && ls.config.sinks.elasticsearch_out.table === 'app' && ls.config.transforms.elasticsearch_out_lignes, 'F10 : une sortie elasticsearch devient un sink clickhouse précédé de sa mise en forme');
+    check(ls.notes.some(n => n.level === 'warn' && /action/.test(n.title)), 'F10 : une option sans équivalent (action) est signalée');
+    const dyn = E.translateLogstash('input { kafka { topics => ["a"] } }\noutput { elasticsearch { hosts => ["http://es:9200"] index => "%{idx}-%{+YYYY.MM.dd}" } }', c2, {});
+    check(/%clickhouse\.table/.test(dyn.yaml) && dyn.config.sinks.elasticsearch_out.dangerously_allow_unconfined_template_resolution === true, 'F10 : un index calculé choisit la table pour chaque événement');
+    const ig = E.translateIngest([{ name: 'p', text: JSON.stringify({ processors: [{ set: { field: 'a', value: 1 } }] }) }], c2);
+    check(ig.config.sinks.sortie.type === 'clickhouse' && ig.config.transforms.sortie_lignes, 'F10 : la sortie d’un pipeline d’ingestion peut être ClickHouse');
+  }
+  {
     const src = 'boolean prive(String ip) { if (ip == null) { return false; } return ip.startsWith("10."); }\nString lib(boolean b) { return b ? "privee" : "publique"; }\nctx.net = lib(prive(ctx.ip));';
     const fn = E.translateIngest([{ name: 'f', text: JSON.stringify({ processors: [{ script: { source: src } }] }) }], E.DEFAULT_CONFIG);
     check(fn.pipelines[0].verdict !== 'todo' && /privee/.test(fn.yaml), 'ingest : les fonctions déclarées dans un script Painless sont recopiées sur place', JSON.stringify(fn.notes.filter(n => n.level === 'err').map(n => n.detail)));
