@@ -30,6 +30,9 @@ processors:
         if (t > 1e18 || t < 1.5e-3 || t == 2E3) {
           ctx.hors_plage = true;
         }
+        if (t > (long) 1e18 || (double) 3 > 2.5) {
+          ctx.cast = (int) 2.5;
+        }
   - kv:
       field: message
       field_split: ' '

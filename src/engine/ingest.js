@@ -1013,8 +1013,8 @@ Object.assign(IngestGen.prototype, {
       }
       case 'cast': {
         const a = X(e.e);
-        if (['int', 'long', 'short', 'byte', 'Integer', 'Long'].includes(e.type)) return a.t === 'int' ? a : { c: `(to_int(${a.c}) ?? null)`, t: 'any' };
-        if (['double', 'float', 'Double', 'Float'].includes(e.type)) return a.t === 'num' ? a : { c: `(to_float(${a.c}) ?? null)`, t: 'any' };
+        if (['int', 'long', 'short', 'byte', 'Integer', 'Long'].includes(e.type)) return a.t === 'int' ? a : a.t === 'num' ? { c: `to_int(${a.c})`, t: 'int' } : { c: `(to_int(${a.c}) ?? null)`, t: 'any' };
+        if (['double', 'float', 'Double', 'Float'].includes(e.type)) return a.t === 'num' ? a : a.t === 'int' ? { c: `to_float(${a.c})`, t: 'num' } : { c: `(to_float(${a.c}) ?? null)`, t: 'any' };
         return a;
       }
       case 'tern': {
