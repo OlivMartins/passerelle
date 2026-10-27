@@ -2580,7 +2580,7 @@ function translateIngest(inputs, cfg, opts) {
   const doc = vectorDocument(v, { sources, transforms, sinks, enrich }, cfg, `depuis ${defs.size} pipeline${defs.size > 1 ? 's' : ''} d’ingestion Elasticsearch`);
   const order = { err: 0, warn: 1, opt: 2, info: 3 };
   notes.list.sort((a, b) => order[a.level] - order[b.level]);
-  const result = { config: doc.config, yaml: doc.yaml, toml: doc.toml, notes: notes.list, stats, graph, pipelines, env: [], sentence: `${pipelines.length} pipeline${pipelines.length > 1 ? 's' : ''} traduit${pipelines.length > 1 ? 's' : ''} en VRL${defs.size > pipelines.length ? `, ${defs.size - pipelines.length} appelé${defs.size - pipelines.length > 1 ? 's' : ''} en place` : ''}.` };
+  const result = { config: doc.config, yaml: doc.yaml, toml: doc.toml, notes: notes.list, stats, graph, pipelines, env: [...v.env], sentence: `${pipelines.length} pipeline${pipelines.length > 1 ? 's' : ''} traduit${pipelines.length > 1 ? 's' : ''} en VRL${defs.size > pipelines.length ? `, ${defs.size - pipelines.length} appelé${defs.size - pipelines.length > 1 ? 's' : ''} en place` : ''}.` };
   return result;
 }
 

@@ -30,6 +30,22 @@ const check = (ok, label, detail) => {
   if (!ok) failures++;
 };
 
+
+// Exemples proposés par l’interface pour les autres sources : chacun doit se lire sans erreur
+const SOURCES = {
+  ingest: t => E.translateIngest([{ name: 'exemple', text: t }], E.DEFAULT_CONFIG),
+  kibana: t => E.kibanaInventory(t, E.DEFAULT_CONFIG, {}),
+  grafana: t => E.grafanaDashboard(t, E.DEFAULT_CONFIG, { index: 'logs-*' }),
+  schema: t => E.schemaFromElastic(t, E.DEFAULT_CONFIG, {}),
+  analyzers: t => E.schemaFromElastic(t, E.DEFAULT_CONFIG, {})
+};
+for (const [kind, read] of Object.entries(SOURCES)) {
+  for (const ex of index[kind] || []) {
+    const r = read(rd(join('examples', ex.file)));
+    check(!!r && !r.error && !r.empty, `exemple de l’interface (${kind}) : ${ex.file} se lit sans erreur`, r && (r.error || ''));
+  }
+}
+
 /* ---------- Instantanés ---------- */
 const snapshots = { total: 0, different: 0, seen: new Set() };
 // En-tête d’un instantané : la couverture annoncée et les remarques « à vérifier » / « à reprendre »
@@ -52,7 +68,7 @@ function snapshot(rel, content) {
   check(false, `instantané ${rel}`, `ligne ${i + 1}\n    attendu : ${a[i] === undefined ? '(fin)' : a[i]}\n    obtenu  : ${b[i] === undefined ? '(fin)' : b[i]}`);
 }
 
-for (const [kind, list] of Object.entries(index)) {
+for (const [kind, list] of Object.entries(index).filter(([k]) => k === 'dsl' || k === 'ls')) {
   for (const ex of list) {
     const text = rd(join('examples', ex.file));
     const r = kind === 'dsl' ? E.translateDSL(text, E.DEFAULT_CONFIG, { index: 'logs-*' }) : E.translateLogstash(text, E.DEFAULT_CONFIG);
