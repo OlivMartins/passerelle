@@ -48,6 +48,7 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
 - `_source.excludes` : les exclusions sont gardées quand `includes` est présent ; un champ exclut aussi ses sous-champs (`http` retire `http.method`) et un motif (`http.*`) s’applique. Elles s’écrivent `EXCEPT ('expression régulière')` : une liste de noms n’excluait rien en silence pour un motif ou un nom absent.
 - `fuzzy` : `prefix_length` est appliqué (les premiers caractères doivent être identiques) au lieu d’être signalé « à vérifier » ; `fuzziness: AUTO:bas,haut` respecte ses bornes ; la longueur du mot se compte en caractères.
 - `query_string` : `mot~1` garde sa distance (elle était remplacée par `AUTO`), `mot~` prend l’option `fuzziness` de la requête ; `fuzzy_prefix_length` et `fuzzy_transpositions` sont appliqués, dans `simple_query_string` aussi.
+- `geo_distance` sur un champ rangé dans une Map ou une colonne JSON d’attributs (`otel`, `otel-json`) : la requête est « à reprendre » avec la raison, au lieu d’un SQL qui échouait à l’exécution (une position n’y est pas un Point).
 - `geo_distance` :
   - toutes les unités d’Elasticsearch sont lues (`nmi`, `NM`, `cm`, `mm`, `in`, noms longs comme `miles`, notation `2.5e3m`) ; une unité inconnue faisait chercher à 0 m, elle fait maintenant refuser la requête, comme Elasticsearch ;
   - la distance n’est plus arrondie au mètre (`1.5ft` donnait 0) ;

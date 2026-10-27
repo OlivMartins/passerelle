@@ -1094,6 +1094,9 @@ function clauseSQL(ctx, q) {
       if (Array.isArray(pt)) [lon, lat] = pt; else if (isObj(pt)) ({ lat, lon } = pt); else if (typeof pt === 'string') [lat, lon] = pt.split(',').map(Number);
       lat = chNum(lat, 'geo_distance (latitude)'); lon = chNum(lon, 'geo_distance (longitude)');
       const meters = geoMeters(body.distance);
+      const gt = fieldTarget(ctx, field);
+      // Un attribut (Map ou JSON) n'est pas un Point : .1 et .2 y échoueraient à l'exécution
+      if (gt.kind === 'attr') return todo(ctx, 'geo_distance', `« ${field} » est un attribut (${gt.column}) : une position n’y est pas un Point ClickHouse. Rangez-la dans une colonne Point (lon, lat) ou dans deux colonnes, et adaptez la requête.`);
       const f = mapField(ctx, field); ctx.stats.approx++;
       ctx.notes.add('warn', 'geo_distance', `Suppose une colonne Point (lon, lat) « ${field} ». Adaptez si la position est stockée en deux colonnes.`);
       H(ctx, 'filters', `${field} à moins de ${body.distance}`);

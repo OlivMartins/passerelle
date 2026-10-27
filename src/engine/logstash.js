@@ -274,10 +274,10 @@ class VrlGen {
   asStr(p) { const t = this.tget(p); if (t === 'str') return p; if (t === 'null') return '""'; if (t === 'arr') return `(join(${p}, ",") ?? "")`; return `(to_string(${p}) ?? join(${p}, ",") ?? encode_json(${p}))`; }
   sprintf(s) {
     s = String(s);
-    const parts = []; let last = 0; const re = /%\{([^}]+)\}/g; let m; let dyn = false;
+    const parts = []; let last = 0; const re = /%\{([^}]+)\}/g; let m;
     while ((m = re.exec(s))) {
       if (m.index > last) parts.push(vq(s.slice(last, m.index)));
-      const ref = m[1]; dyn = true;
+      const ref = m[1];
       if (ref.startsWith('+')) parts.push(`(format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: ${vq(joda2strf(ref.slice(1)))}) ?? "")`);
       else {
         // Champ absent ou nul : Logstash laisse « %{champ} » tel quel. Un tableau est joint par des virgules,

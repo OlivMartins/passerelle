@@ -431,7 +431,7 @@ function tsvbQueries(params, base, obj, prefix, views, extra) {
     const tf = (s.override_index_pattern && s.series_time_field) || params.time_field || senv.timeField;
     if (!tf && (type === 'timeseries' || lastValue)) base.issues.push({ kind: 'todo', label: 'TSVB sans champ de temps', detail: 'Ni le panneau ni la vue de données ne nomment le champ de temps des tranches.' });
     const used = new Set();
-    const { metrics, byId } = tsvbMetrics(s, senv, used);
+    const { metrics } = tsvbMetrics(s, senv, used);
     const lastMetric = (s.metrics || [])[(s.metrics || []).length - 1];
     let aggs = metrics;
     if ((type === 'timeseries' || lastValue) && tf) {
@@ -1286,7 +1286,7 @@ function inventoryCSV(inv) {
     rows.push([KB_TYPES[x.type], x.id, x.title, x.parent ? (byKey.get(x.parent) || {}).title || '' : '', x.kind, x.views.join(', '), x.tables.join(', '), kbVerdict(x.verdict), frNum(x.effort), x.queries.length, x.issues.filter(i => i.kind === 'todo').map(i => i.label).concat(notesOf('err')).join(' ; '), x.issues.filter(i => i.kind === 'review').map(i => i.label).concat(notesOf('warn')).join(' ; ')]);
   }
   // Point-virgule et BOM : le fichier s’ouvre tel quel dans un tableur réglé en français
-  return '﻿' + rows.map(r => r.map(q).join(';')).join('\r\n') + '\r\n';
+  return '\uFEFF' + rows.map(r => r.map(q).join(';')).join('\r\n') + '\r\n';
 }
 const kbHtml = s => String(s === undefined || s === null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 function inventoryHTML(inv, title) {

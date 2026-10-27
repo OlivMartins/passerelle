@@ -1320,7 +1320,7 @@ Object.assign(IngestGen.prototype, {
       const v = this.plExpr(single, env);
       // Une condition qui rend null (appel ?. sur une valeur absente) fait échouer le processeur dans Elasticsearch
       this.emit(`${env.cond} = ${v.c}`);
-      return { v: env.cond, env, nullable: !!(single.k === 'mcall' && single.safe && v.t === 'bool') ? single : null };
+      return { v: env.cond, env, nullable: (single.k === 'mcall' && single.safe && v.t === 'bool') ? single : null };
     }
     this.emit(`${env.cond} = null`); this.emit(`${env.retVar} = false`);
     this.plStmts(prog, env);
@@ -2528,7 +2528,7 @@ function translateIngest(inputs, cfg, opts) {
   const called = new Set(); for (const d of defs.values()) ingestCalls(d).forEach(n => called.add(n));
   let tops = [...defs.keys()].filter(n => !called.has(n));
   if (!tops.length) tops = [...defs.keys()];
-  const pipelines = []; const programs = {}; const enrich = {};
+  const pipelines = []; const enrich = {};
   const stats = { ok: 0, approx: 0, ko: 0 };
   const used = new Set(['agent_in', 'aiguillage', 'bilan', 'sortie', 'echecs']);
   for (const name of tops) {

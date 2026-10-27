@@ -38,6 +38,10 @@ const E = loadEngine();
 const KNOWN = {
   audit_top_metrics_size_chaine: 'host est un attribut sans type déclaré : la traduction le suppose numérique et le convertit, avec une remarque « à vérifier », là où Elasticsearch refuse un tri de top_metrics sur un keyword'
 };
+// Même inventaire, par motif d'identifiant
+const KNOWN_RE = [
+  [/^geo_(rayon|londres)/, 'geo_distance sur un attribut : une position n’est pas un Point dans une Map ou une colonne JSON, la traduction est « à reprendre » (throwIf) au lieu d’un SQL qui échouerait à l’exécution']
+];
 
 /* ---------- ClickHouse ---------- */
 function clickhouse(dir, argv, tz) {
@@ -216,7 +220,7 @@ for (const target of targets) {
         }
       }
       if (verdict === '=' && diffs.length) verdict = '≠';
-      const known = KNOWN[c.id];
+      const known = KNOWN[c.id] || (KNOWN_RE.find(([re]) => re.test(c.id)) || [])[1];
       let status;
       if (verdict === '=' && !known) { status = 'ok   '; totals.same++; }
       else if (verdict !== '=' && known) { status = 'connu'; totals.known++; }

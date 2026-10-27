@@ -24,7 +24,7 @@ const MOVING_MODEL = { simple: 'MovingFunctions.unweightedAvg(values)', linear: 
 /* ---------- Lecture ---------- */
 function grafanaRead(text) {
   let j;
-  try { j = JSON.parse(String(text || '').replace(/^﻿/, '')); } catch (e) { return { error: `JSON invalide : ${e.message}` }; }
+  try { j = JSON.parse(String(text || '').replace(/^\uFEFF/, '')); } catch (e) { return { error: `JSON invalide : ${e.message}` }; }
   if (!isObj(j)) return { error: 'Le tableau de bord doit être un objet JSON.' };
   if (typeof j.apiVersion === 'string' && /dashboard\.grafana\.app\/v2/.test(j.apiVersion)) return { error: 'Tableau de bord au schéma v2 (dashboard.grafana.app/v2) : exportez-le au format JSON classique (Exporter > Exporter au format JSON, modèle classique).' };
   const wrapper = isObj(j.dashboard) && (isObj(j.meta) || j.overwrite !== undefined || j.folderUid !== undefined) ? 'api' : isObj(j.spec) && typeof j.apiVersion === 'string' ? 'resource' : null;
