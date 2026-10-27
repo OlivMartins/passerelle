@@ -103,7 +103,7 @@ export const CASES = [
   { id: 'pipeline_derivative', dsl: perDay({ s: { sum: { field: 'bytes' } }, dv: { derivative: { buckets_path: 's' } } }) },
   // rate : valeur par unité de temps ; une tranche mensuelle compte ses jours, une tranche fixe sa durée
   { id: 'agg_rate_mois_jour', dsl: { size: 0, aggs: { m: { date_histogram: { field: TS, calendar_interval: 'month' }, aggs: { octets_jour: { rate: { field: 'bytes', unit: 'day' } }, docs_an: { rate: { unit: 'year' } } } } } } },
-  { id: 'agg_rate_tranche_fixe', dsl: { size: 0, aggs: { t: { date_histogram: { field: TS, fixed_interval: '6h' }, aggs: { docs_heure: { rate: { unit: 'hour' } }, valeurs_minute: { rate: { field: 'retries', mode: 'value_count', unit: 'minute' } } } } } } },
+  { id: 'agg_rate_tranche_fixe', known: { D: 'valeur par défaut : 0 compte aussi les documents sans retries (mode value_count)' }, dsl: { size: 0, aggs: { t: { date_histogram: { field: TS, fixed_interval: '6h' }, aggs: { docs_heure: { rate: { unit: 'hour' } }, valeurs_minute: { rate: { field: 'retries', mode: 'value_count', unit: 'minute' } } } } } } },
   { id: 'agg_rate_sans_unite', dsl: perDay({ octets: { rate: { field: 'bytes' } } }) },
   { id: 'agg_rate_semaine', dsl: { size: 0, aggs: { w: { date_histogram: { field: TS, calendar_interval: 'week' }, aggs: { octets_jour: { rate: { field: 'bytes', unit: 'day' } } } } } } },
   // rate sous un terms, lui-même sous le date_histogram : Elasticsearch divise par la tranche de l’ancêtre (graphiques Lens ventilés)
