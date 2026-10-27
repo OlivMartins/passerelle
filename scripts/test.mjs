@@ -160,6 +160,13 @@ snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut
   check(!lit.error && vrlOf(lit).includes('"x\\{{y"'), 'ingest : « {{ » littéral dans une valeur est échappé, VRL l’interpolerait en silence', vrlOf(lit).split('\n').find(l => /x.*\{\{y/.test(l)));
   const bad = one('processors:\n  - grok: { field: m, patterns: ["(?=a)%{WORD:w}"] }\n  - gsub: { field: m, pattern: "(?<=a)b", replacement: "c" }');
   check(bad.pipelines[0].verdict === 'todo' && bad.notes.some(n => n.level === 'err' && /rétrospection/.test(n.detail)), 'ingest : une rétrospection (?<=…) est à reprendre avec sa raison, pas un VRL qui ne compile pas', JSON.stringify(bad.notes.filter(n => n.level === 'err').map(n => n.detail)));
+  {
+    const src = 'boolean prive(String ip) { if (ip == null) { return false; } return ip.startsWith("10."); }\nString lib(boolean b) { return b ? "privee" : "publique"; }\nctx.net = lib(prive(ctx.ip));';
+    const fn = E.translateIngest([{ name: 'f', text: JSON.stringify({ processors: [{ script: { source: src } }] }) }], E.DEFAULT_CONFIG);
+    check(fn.pipelines[0].verdict !== 'todo' && /privee/.test(fn.yaml), 'ingest : les fonctions déclarées dans un script Painless sont recopiées sur place', JSON.stringify(fn.notes.filter(n => n.level === 'err').map(n => n.detail)));
+    const rec = E.translateIngest([{ name: 'r', text: JSON.stringify({ processors: [{ script: { source: 'int f(int n) { return f(n); }\nctx.a = f(1);' } }] }) }], E.DEFAULT_CONFIG);
+    check(rec.pipelines[0].verdict === 'todo' && rec.notes.some(n => /récursive/.test(n.detail)), 'ingest : une fonction récursive est à reprendre avec sa raison');
+  }
   const sub = E.translateIngest([{ name: 'haut', text: 'processors:\n  - pipeline: { name: bas }\n  - set: { field: z, value: 1 }' }, { name: 'bas', text: 'processors:\n  - set: { field: y, value: 1 }' }], E.DEFAULT_CONFIG);
   check(sub.pipelines.length === 1 && sub.pipelines[0].name === 'haut' && sub.pipelines[0].calls.includes('bas') && /\.y = 1/.test(vrlOf(sub)), 'ingest : un pipeline appelé est traduit en place, seul le pipeline principal a son transform');
   const manquant = one('processors:\n  - pipeline: { name: absent }');

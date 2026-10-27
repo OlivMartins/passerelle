@@ -344,6 +344,7 @@ function ingPainless(src) {
   const next = () => toks[p++];
   const expect = v => { if (!is(v)) throw new Error(`« ${v} » attendu${peek() ? `, trouvé « ${peek().v} »` : ''}`); p++; };
   const BIN = { '||': 2, '&&': 3, '==': 7, '!=': 7, '===': 7, '!==': 7, '<': 8, '>': 8, '<=': 8, '>=': 8, '=~': 8, '==~': 8, instanceof: 8, '+': 9, '-': 9, '*': 10, '/': 10, '%': 10 };
+  const fns = new Map();
   function block() { const out = []; while (p < toks.length && !is('}')) out.push(stmt()); return out; }
   const endStmt = () => { if (is(';')) p++; };
   const isType = (k) => { const t = peek(k); return t && t.t === 'id' && (P_TYPES.has(t.v) || /^[A-Z]\w*$/.test(t.v)); };
@@ -398,7 +399,21 @@ function ingPainless(src) {
     // Fonction déclarée dans le script : « type nom(…) { … } »
     if ((isType(0) || (peek() && peek().t === 'id' && peek().v === 'void')) && peek(1) && peek(1).t === 'id' && is('(', 2)) {
       let k = 3; let d = 1; while (p + k < toks.length && d > 0) { if (is('(', k)) d++; else if (is(')', k)) d--; k++; }
-      if (is('{', k)) throw new Error(`fonction « ${peek(1).v} » déclarée dans le script : non prise en charge`);
+      if (is('{', k)) {
+        next(); const name = next().v; expect('(');
+        const params = []; let cur = null; let ang = 0;
+        while (!is(')') || ang > 0) {
+          if (p >= toks.length) throw new Error(`fonction « ${name} » : parenthèse fermante absente`);
+          if (is('<')) ang++; else if (is('>')) ang--;
+          else if (is(',') && ang === 0) { if (cur) params.push(cur); cur = null; next(); continue; }
+          const t = next(); if (t.t === 'id') cur = t.v;
+        }
+        if (cur) params.push(cur);
+        expect(')'); expect('{'); const body = block(); expect('}');
+        if (fns.has(name)) throw new Error(`fonction « ${name} » déclarée deux fois (surcharge non prise en charge)`);
+        fns.set(name, { params, body });
+        return { k: 'nop' };
+      }
     }
     // Déclaration : type (générique compris) puis nom
     if (isType(0)) {
@@ -495,6 +510,7 @@ function ingPainless(src) {
   }
   const prog = block();
   if (p < toks.length) throw new Error(`symbole inattendu « ${toks[p].v} »`);
+  prog.fns = fns;
   return prog;
 }
 
@@ -982,7 +998,7 @@ Object.assign(IngestGen.prototype, {
       case 'elvis': { const a = X(e.a); const b = X(e.b); return this.plTmp(`if ${a.c} != null { ${a.c} } else { ${b.c} }`); }
       case 'bin': return this.plBin(e, env);
       case 'mcall': return this.plCall(e, env);
-      case 'call': throw new Error(`fonction « ${e.name} » non prise en charge`);
+      case 'call': return this.plInline(e, env);
       case 're': throw new Error('expression régulière hors d’un =~');
     }
     throw new Error(`expression « ${e.k} » non prise en charge`);
@@ -1134,7 +1150,7 @@ Object.assign(IngestGen.prototype, {
         return;
       }
       case 'ret': {
-        if (env.cond) { const v = s.v ? this.plExpr(s.v, env) : { c: 'null', t: 'null' }; this.emit(`${env.cond} = ${v.c}`); }
+        if (env.res || env.cond) { const v = s.v ? this.plExpr(s.v, env) : { c: 'null', t: 'null' }; this.emit(`${env.res || env.cond} = ${v.c}`); }
         this.emit(`${env.retVar} = true`); env.retPossible = true;
         // Un return dans une boucle l’arrête, ainsi que les boucles qui l’entourent
         for (const loop of env.loops || []) { this.emit(`${loop.brk} = true`); loop.brkPossible = true; }
@@ -1143,7 +1159,7 @@ Object.assign(IngestGen.prototype, {
       case 'expr': {
         const e = s.e;
         if (e.k === 'mcall' && ['add', 'put', 'remove', 'addAll', 'clear', 'putAll'].includes(e.name)) return this.plMutate(e, env);
-        if (env.cond) { const v = this.plExpr(e, env); this.emit(`${env.cond} = ${v.c}`); return; }
+        if (env.cond && !env.res) { const v = this.plExpr(e, env); this.emit(`${env.cond} = ${v.c}`); return; }
         // Une expression sans effet (appel de méthode qui ne modifie rien) : évaluée pour rien en Painless
         this.plExpr(e, env); return;
       }
@@ -1161,10 +1177,34 @@ Object.assign(IngestGen.prototype, {
     // Variable locale de type table ou liste : m.k = v, m['k'] = v, l[0] = v
     let x = target; const segs = [];
     while (x.k === 'member' || x.k === 'index') { segs.unshift(x.k === 'member' ? vq(x.name) : this.plExpr(x.idx, env).c); x = x.obj; }
+    if (x.k === 'id' && env.noMutate && env.noMutate.has(x.v)) throw new Error('fonction qui modifie un de ses arguments (passage par référence non pris en charge)');
     if (x.k === 'id' && env.locals.has(x.v)) { this.emit(`p_${x.v} = set!(p_${x.v}, [${segs.join(', ')}], ${v.c})`); return; }
     throw new Error('affectation non prise en charge');
   },
+  // Appel d’une fonction déclarée dans le script : son corps est recopié sur place, variables renommées
+  plInline(e, env) {
+    const fn = env.fns && env.fns.get(e.name);
+    if (!fn) throw new Error(`fonction « ${e.name} » non prise en charge`);
+    if ((env.stack || []).includes(e.name)) throw new Error(`fonction « ${e.name} » récursive : non prise en charge`);
+    if (e.args.length !== fn.params.length) throw new Error(`fonction « ${e.name} » appelée avec ${e.args.length} argument(s) pour ${fn.params.length} attendu(s)`);
+    const args = e.args.map(a => this.plExpr(a, env));
+    const n = ++this.t.k; const names = new Set(fn.params);
+    const collect = x => { if (Array.isArray(x)) x.forEach(collect); else if (x && typeof x === 'object') { if ((x.k === 'let' || x.k === 'for' || x.k === 'forIdx') && x.name) names.add(x.name); Object.values(x).forEach(collect); } };
+    collect(fn.body);
+    const ren = x => Array.isArray(x) ? x.map(ren) : x && typeof x === 'object'
+      ? Object.fromEntries(Object.entries(x).map(([k, v]) => [k, (k === 'v' && x.k === 'id' && names.has(v)) || (k === 'name' && ['let', 'for', 'forIdx'].includes(x.k) && names.has(v)) ? `${v}_f${n}` : ren(v)]))
+      : x;
+    const body = ren(fn.body);
+    const env2 = { locals: new Map(), retVar: this.tmp('ret'), res: this.tmp('res'), fns: env.fns, stack: (env.stack || []).concat(e.name), loops: [], noMutate: new Set(fn.params.map(x => `${x}_f${n}`)) };
+    fn.params.forEach((x, i) => { env2.locals.set(`${x}_f${n}`, args[i].t === 'null' ? 'any' : args[i].t); this.emit(`p_${x}_f${n} = ${args[i].c}`); });
+    this.emit(`${env2.res} = null`); this.emit(`${env2.retVar} = false`);
+    this.plStmts(body, env2);
+    if (env2.usesParams) env.usesParams = true;
+    if (env2.unsafe) env.unsafe = true;
+    return { c: env2.res, t: 'any' };
+  },
   plMutate(e, env) {
+    if (e.obj.k === 'id' && env.noMutate && env.noMutate.has(e.obj.v)) throw new Error('fonction qui modifie un de ses arguments (passage par référence non pris en charge)');
     const a = e.args.map(x => this.plExpr(x, env));
     const path = this.plPath(e.obj);
     const isRoot = e.obj.k === 'id' && e.obj.v === 'ctx';
@@ -1192,8 +1232,8 @@ Object.assign(IngestGen.prototype, {
   },
   // Condition « if » d’un processeur : expression ou script, rendue dans une variable booléenne
   plCondition(src) {
-    const env = { locals: new Map(), cond: this.tmp('cond'), retVar: this.tmp('ret') };
     const prog = ingPainless(src);
+    const env = { locals: new Map(), cond: this.tmp('cond'), retVar: this.tmp('ret'), fns: prog.fns };
     const single = prog.length === 1 && prog[0].k === 'expr' ? prog[0].e : prog.length === 1 && prog[0].k === 'ret' && prog[0].v ? prog[0].v : null;
     if (single) {
       const v = this.plExpr(single, env);
@@ -1979,7 +2019,7 @@ Object.assign(IngestGen.prototype, {
     const env = { locals: new Map(), retVar: this.tmp('ret') };
     const start = this.lines.length; const ind = this.ind;
     try {
-      const prog = ingPainless(o.source);
+      const prog = ingPainless(o.source); env.fns = prog.fns;
       if (isObj(o.params)) this.emit(`p_params = ${this.valueSource(o.params)}`);
       this.emit(`${env.retVar} = false`);
       this.plStmts(prog, env);
