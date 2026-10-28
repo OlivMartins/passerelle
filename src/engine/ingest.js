@@ -5,7 +5,12 @@
 const INLINE_LINES = 2500;
 // Blocs imbriqués au plus dans une copie récursive : la mémoire de compilation de Vector croît très vite avec l’imbrication
 // (≈ 0,5 Go à 26 niveaux, plus de 5 Go à 50)
-const INLINE_NEST = 26;
+const INLINE_NEST = 34;
+const INLINE_NEST_MANY = 24;
+// Lignes recopiées au plus par l’ensemble des fonctions récursives d’un script
+const SCRIPT_INLINE_LINES = 3000;
+// Niveaux recopiés au moins pour qu’une fonction récursive soit traduite
+const REC_MIN = 3;
 // Tours au plus d’une boucle dont le nombre de tours n’est pas connu à l’entrée (while, for à condition quelconque)
 const LOOP_MAX = 1024;
 class InlineTooBig extends Error {}
@@ -743,7 +748,20 @@ class IngestGen {
     if (!scalar) { this.emit(`if is_array(${x}) { ${v} = "java.util.ArrayList" }`); this.emit(`if is_object(${x}) { ${v} = "java.util.HashMap" }`); }
   }
   emit(l) { this.lines.push('  '.repeat(this.ind) + l); }
-  open(l) { this.emit(l + ' {'); this.ind++; if (this.ind > (this.maxInd || 0)) this.maxInd = this.ind; }
+  open(l) { this.emit(l + ' {'); this.ind++; }
+  // Retire le bloc ouvert à la ligne k (sa première et sa dernière ligne) et désindente son contenu
+  unwrap(k) {
+    const last = this.lines.length - 1;
+    if (!/\{$/.test(this.lines[k]) || this.lines[last].trim() !== '}') return;
+    const body = this.lines.slice(k + 1, last).filter(l => l.trim() !== 'null' || last - k > 2).map(l => l.replace(/^ {2}/, ''));
+    this.lines.splice(k, last - k + 1, ...(body.length ? body : []));
+  }
+  // Imbrication maximale des lignes émises depuis start, par rapport au niveau ind
+  nestSince(start, ind) {
+    let m = 0;
+    for (let i = start; i < this.lines.length; i++) { const n = (this.lines[i].length - this.lines[i].trimStart().length) / 2; if (n > m) m = n; }
+    return m - ind;
+  }
   // Un bloc vide est refusé par VRL : null y tient lieu d’instruction
   close(l) {
     let k = this.lines.length - 1; while (k >= 0 && /^\s*(#|$)/.test(this.lines[k])) k--;
@@ -1841,9 +1859,12 @@ Object.assign(IngestGen.prototype, {
     const mk = this.plMark(env);
     if (origin) this.plBind(s.name, origin(iv), env);
     env.loops.push(loop);
+    const gl = this.lines.length;
     this.open(`if !${loop.brk}${guard ? ` && ${guard}` : ''}`);
     this.plStmt(s.body, env);
     this.close();
+    // Ni break ni return dans le corps : le garde ne sert à rien et chaque bloc imbriqué coûte cher à compiler
+    if (!guard && !loop.brkPossible) this.unwrap(gl);
     env.loops.pop();
     this.plMerge(env, mk, [{ st: this.plRestore(env, mk), v: 0 }, { st: mk.o, v: 0 }], null);
     this.close();
@@ -2238,21 +2259,31 @@ Object.assign(IngestGen.prototype, {
     const g = fn.group;
     if (g && !(env.stack || []).some(n => env.fns.get(n).group === g)) {
       if (!env.canFail) throw new Error(`fonction « ${e.name} » récursive : non prise en charge hors d’un script de processeur`);
-      const start0 = this.lines.length; const ind = this.ind; const outer = this.inlineBudget; const h0 = this.hoisted || 0; const outerMax = this.maxInd || 0;
+      const start0 = this.lines.length; const ind = this.ind; const outer = this.inlineBudget; const h0 = this.hoisted || 0;
       // Les indicateurs déclarés en tête du script décalent le début de la copie
       const startNow = () => start0 + (this.hoisted || 0) - h0;
-      for (let d = g.sites <= 1 ? 8 : 5; d >= 1; d--) {
+      // Moins de trois niveaux, la plupart des documents réels seraient refusés : mieux vaut « à reprendre »
+      for (let d = g.sites <= 1 ? 5 : 4; d >= REC_MIN; d--) {
         g.limit = d;
         const start = startNow();
-        this.inlineBudget = { start, max: INLINE_LINES, ind0: ind }; this.maxInd = ind;
+        // Budget de la copie : le plafond par groupe, et ce qui reste du plafond du script (plusieurs appels se cumulent)
+        const max = Math.min(INLINE_LINES, Math.max(200, SCRIPT_INLINE_LINES - (this.inlineUsed || 0)));
+        this.inlineBudget = { start, max, ind0: ind };
         try {
           const r = this.plInline1(e, env);
-          if (this.lines.length - startNow() <= INLINE_LINES && this.maxInd - ind <= INLINE_NEST) { this.inlineBudget = outer; this.maxInd = Math.max(outerMax, this.maxInd); return r; }
-        } catch (err) { if (!(err instanceof InlineTooBig)) { this.inlineBudget = outer; this.maxInd = Math.max(outerMax, this.maxInd); throw err; } }
+          const used = this.lines.length - startNow(); const nest = this.nestSince(startNow(), ind);
+          // Les copies très imbriquées coûtent le plus à compiler : au-delà de quatre dans un script, la borne se resserre
+          const nestMax = (this.deepUsed || 0) >= 4 ? INLINE_NEST_MANY : INLINE_NEST;
+          if (used <= max && nest <= nestMax) {
+            this.inlineBudget = outer; this.inlineUsed = (this.inlineUsed || 0) + used;
+            if (nest > INLINE_NEST_MANY) this.deepUsed = (this.deepUsed || 0) + 1;
+            return r;
+          }
+        } catch (err) { if (!(err instanceof InlineTooBig)) { this.inlineBudget = outer; throw err; } }
         this.lines.length = startNow(); this.ind = ind;
       }
-      this.inlineBudget = outer; this.maxInd = outerMax;
-      throw new Error(`fonction « ${e.name} » récursive : copie trop volumineuse`);
+      this.inlineBudget = outer;
+      throw new Error(`fonction « ${e.name} » récursive : la recopier sur ${REC_MIN} niveaux dépasse ce que Vector compile raisonnablement`);
     }
     return this.plInline1(e, env);
   },
@@ -3204,7 +3235,7 @@ Object.assign(IngestGen.prototype, {
     if (idiom && this.pruneIdiom(idiom, label)) { this.t.stats.ok++; return; }
     const env = { locals: new Map(), retVar: this.tmp('ret'), canFail: true };
     const start = this.lines.length; const ind = this.ind;
-    const home = this.flagHome; this.flagHome = { at: start, ind };
+    const home = this.flagHome; this.flagHome = { at: start, ind }; this.inlineUsed = 0; this.deepUsed = 0;
     try {
       const prog = ingPainless(o.source); env.fns = prog.fns;
       if (isObj(o.params)) this.emit(`p_params = ${this.valueSource(o.params)}`);
