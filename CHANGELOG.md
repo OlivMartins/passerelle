@@ -2,7 +2,7 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
-## [Non publié]
+## [1.7.0] - 2026-10-28
 
 ### Ajouté
 
@@ -389,6 +389,7 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
+[1.7.0]: https://github.com/OlivMartins/passerelle/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/OlivMartins/passerelle/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/OlivMartins/passerelle/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/OlivMartins/passerelle/compare/v1.3.0...v1.4.0
