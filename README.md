@@ -31,7 +31,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/demo-dark.gif">
-  <img src="docs/assets/demo-light.gif" width="100%" alt="Démonstration : un fichier de requête déposé dans Passerelle est traduit instantanément en SQL ClickHouse, avec remarques d’optimisation, lecture en langage clair, puis topologie d’un pipeline Logstash traduit pour Vector">
+  <img src="docs/assets/demo-light.gif" width="100%" alt="Démonstration : un fichier de requête déposé dans Passerelle est traduit instantanément en SQL ClickHouse, avec remarques d’optimisation et lecture en langage clair ; puis la topologie d’un pipeline Logstash traduit pour Vector, et un export Kibana dont chaque panneau donne ses requêtes SQL">
 </picture>
 
 <br>
@@ -191,7 +191,7 @@ Sont reconnus les modèles de Watcher et des alertes Kibana (`{{…}}`) et les v
   <img src="docs/assets/pipelines-light.png" width="100%" alt="Un pipeline Logstash de routage multi-topics et sa topologie Vector : étapes VRL, aiguillage et trois destinations Kafka">
 </picture>
 
-- **Chaque filtre devient une étape VRL nommée** : grok, dissect, date, mutate, json, kv, geoip, translate, fingerprint, et neuf autres. Le code est typé selon les règles du compilateur VRL : aucune erreur ignorée en silence.
+- **Chaque filtre devient une étape VRL nommée** : grok, dissect, date, mutate, json, kv, geoip, translate, fingerprint, et seize autres. Le code est typé selon les règles du compilateur VRL : aucune erreur ignorée en silence.
 - **Les sorties conditionnelles deviennent un aiguillage** `route`, avec une destination par branche.
 - **Kafka reste au cœur du flux** : mêmes topics, groupe de consommateurs, SASL et TLS. Les identifiants sont référencés par des variables d’environnement plutôt qu’écrits en clair ; depuis la 0.57, Vector ne les remplace qu’avec l’option `--dangerously-allow-env-var-interpolation`, que rappelle l’en-tête du fichier généré.
 - **Elasticsearch en sortie, configuration comprise** : identifiants lus dans des variables d’environnement, TLS, data streams, identifiant de document et pipeline d’ingestion. Ce qui n’a pas d’équivalent dans Vector (mise à jour de documents, modèles d’index, ILM) est signalé.
