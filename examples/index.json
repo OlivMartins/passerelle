@@ -26,5 +26,43 @@
       "title": "Filtres avancés",
       "file": "logstash/batch.conf"
     }
+  ],
+  "ingest": [
+    {
+      "title": "Journaux d’accès web",
+      "file": "ingest/acces-web.yml"
+    },
+    {
+      "title": "Navigateur et système",
+      "file": "ingest/navigateur.yml"
+    }
+  ],
+  "kibana": [
+    {
+      "title": "Supervision web (export Kibana)",
+      "file": "kibana/supervision_web.ndjson"
+    },
+    {
+      "title": "Règles de détection",
+      "file": "kibana/regles_detection.ndjson"
+    }
+  ],
+  "grafana": [
+    {
+      "title": "Supervision Elasticsearch",
+      "file": "grafana/supervision_es.json"
+    }
+  ],
+  "schema": [
+    {
+      "title": "Modèle d’index de logs applicatifs",
+      "file": "schema/logs_app.txt"
+    }
+  ],
+  "analyzers": [
+    {
+      "title": "Catalogue de produits",
+      "file": "analyseurs/catalogue.txt"
+    }
   ]
 }

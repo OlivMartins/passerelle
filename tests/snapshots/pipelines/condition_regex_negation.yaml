@@ -5,7 +5,7 @@ transforms:
     type: remap
     inputs: [stdin_in_init]
     source: |
-      if !(match(.a, r'^web') ?? false) {
+      if !(match(.a, r'(?m)^web') ?? false) {
         # mutate
         .tags = compact(flatten([.tags, "oui"]))
       } else {

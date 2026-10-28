@@ -1,0 +1,29 @@
+# Configuration de l’exemple Grafana (supervision_es.json)
+#   passerelle grafana examples/grafana/supervision_es.json --config examples/grafana/passerelle.yaml --index logs-web-*
+# Le tableau de bord ne nomme pas l’index (il est dans la source de données Elasticsearch) : --index le désigne.
+# exactes les exclusions et les tests d’existence (colonnes Nullable ou non).
+clickhouse:
+  database: logs
+  index_mapping:
+    logs-web-*: logs.web
+  field_mapping:
+    '@timestamp': timestamp
+  time_field: timestamp
+  text_fields: [message]
+  tables:
+    logs.web:
+      columns:
+        timestamp: DateTime64(3, 'UTC')
+        service.name: LowCardinality(String)
+        service.environment: LowCardinality(String)
+        host.name: LowCardinality(String)
+        url.path: String
+        http.request.method: LowCardinality(String)
+        http.response.status_code: UInt16
+        http.response.bytes: UInt64
+        event.duration: Int64
+        event.category: LowCardinality(String)
+        event.outcome: LowCardinality(String)
+        user.name: String
+        source.ip: String
+        message: String

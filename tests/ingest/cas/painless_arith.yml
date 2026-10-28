@@ -1,0 +1,42 @@
+---
+description: arithmétique sur des valeurs de type inconnu, variable réaffectée, kv avec guillemets
+processors:
+  - set:
+      field: n
+      value: 3
+  - script:
+      lang: painless
+      source: |
+        def a = ctx.n;
+        def b = a + 1;
+        def c = a - 1;
+        def d = a * 2;
+        ctx.calc = [b, c, d];
+        if (a >= 0 || b < 5) {
+          ctx.pos = true;
+        }
+  - script:
+      lang: painless
+      source: |
+        String s = ctx.message.trim();
+        if (s.startsWith('(')) {
+          s = s.substring(1);
+        }
+        ctx.parts = s.split('>');
+  - script:
+      lang: painless
+      source: |
+        long t = ctx.t;
+        if (t > 1e18 || t < 1.5e-3 || t == 2E3) {
+          ctx.hors_plage = true;
+        }
+        if (t > (long) 1e18 || (double) 3 > 2.5) {
+          ctx.cast = (int) 2.5;
+        }
+  - kv:
+      field: message
+      field_split: ' '
+      value_split: '='
+      trim_key: ' "'
+      trim_value: "' \""
+      ignore_missing: true

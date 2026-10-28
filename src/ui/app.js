@@ -93,7 +93,17 @@ const CFG_KEY = SERVER_CFG ? 'config-srv' : 'config';
 const S = {
   view: store.get('view', 'dsl'),
   dsl: { files: [{ name: EXAMPLES.dsl[0].file, text: EXAMPLES.dsl[0].text, example: true }], active: 0, index: 'logs-*', tab: 'sql', res: null, ed: null, lang: 'json' },
-  ls: { files: [{ name: EXAMPLES.ls[0].file, text: EXAMPLES.ls[0].text, example: true }], active: 0, tab: 'config', res: null, ed: null, lang: 'logstash' }
+  ls: { files: [{ name: EXAMPLES.ls[0].file, text: EXAMPLES.ls[0].text, example: true }], active: 0, tab: 'config', res: null, ed: null, lang: 'logstash' },
+  ingest: { files: EXAMPLES.ingest.map(e => ({ name: e.file, text: e.text, example: true })), active: 0, tab: 'config', res: null, ed: null, lang: 'yaml' }
+};
+// Libellés propres à chaque banc de traduction
+const BENCH = {
+  dsl: { file: 'requete.json', label: 'Requête DSL Elasticsearch', placeholder: 'Collez ici une requête DSL, par exemple { "query": { "match_all": {} } }, ou une requête de la console Kibana (GET index/_search).',
+    empty: 'Aucune requête à traduire', emptyHint: 'Collez une requête DSL à gauche ou déposez des fichiers .json.', error: 'Vérifiez les virgules et accolades du JSON, ou la ligne « GET index/_search » en tête.', zip: 'passerelle-sql.zip', copy: 'SQL' },
+  ls: { file: 'pipeline.conf', label: 'Pipeline Logstash', placeholder: 'Collez ici un pipeline Logstash : input { kafka { … } } filter { … } output { kafka { … } }',
+    empty: 'Aucun pipeline à traduire', emptyHint: 'Collez un pipeline Logstash à gauche ou déposez des fichiers .conf.', error: 'Vérifiez l’équilibre des accolades et la syntaxe des blocs input, filter et output.', zip: 'passerelle-vector.zip', copy: 'Configuration' },
+  ingest: { file: 'pipeline.yml', label: 'Pipeline d’ingestion Elasticsearch', placeholder: 'Collez ici un pipeline d’ingestion : processors: [ { set: { field: …, value: … } } ], en YAML ou en JSON, ou la requête PUT _ingest/pipeline de la console Kibana.',
+    empty: 'Aucun pipeline d’ingestion à traduire', emptyHint: 'Collez un pipeline d’ingestion à gauche ou déposez des fichiers .yml ou .json.', error: 'Vérifiez l’indentation du YAML (ou les accolades du JSON) et la liste processors.', zip: 'passerelle-ingest.zip', copy: 'Configuration' }
 };
 let downloads = null;
 
@@ -125,6 +135,16 @@ function statusOf(r) {
 function translate(kind, file) {
   if (!file) return { empty: true };
   try {
+    if (kind === 'ingest') {
+      if (!file.text.trim()) return { empty: true };
+      const pname = f => String(f.name).replace(/^.*[\\/]/, '').replace(/\.(ya?ml|json|txt)$/i, '') || 'pipeline';
+      const mine = { name: pname(file), text: file.text };
+      // Les autres fichiers ouverts servent aux processeurs pipeline : le pipeline appelé est traduit en place
+      const others = S.ingest.files.filter(f => f !== file && f.text.trim()).map(f => ({ name: pname(f), text: f.text }));
+      const all = others.length ? translateIngest([mine, ...others], cfg) : null;
+      if (all && !all.error && all.pipelines.some(p => p.name === mine.name)) return all;
+      return translateIngest([mine], cfg);
+    }
     return kind === 'dsl' ? translateDSL(file.text, cfg, { index: S.dsl.index }) : translateLogstash(file.text, cfg);
   } catch (e) { return { error: `Erreur interne du traducteur : ${e.message}` }; }
 }
@@ -145,7 +165,8 @@ function pulseSeam(kind) {
 /* ---------- Rendu des vues de traduction ---------- */
 const TABS = {
   dsl: [['sql', 'SQL'], ['notes', 'Remarques'], ['anatomy', 'Lecture'], ['validate', 'Valider']],
-  ls: [['config', 'Configuration'], ['flow', 'Topologie'], ['notes', 'Remarques'], ['validate', 'Valider']]
+  ls: [['config', 'Configuration'], ['flow', 'Topologie'], ['notes', 'Remarques'], ['validate', 'Valider']],
+  ingest: [['config', 'Configuration'], ['flow', 'Topologie'], ['notes', 'Remarques'], ['validate', 'Valider']]
 };
 function render(kind) {
   const view = $(`#view-${kind}`); const st = S[kind]; const r = st.res || { empty: true };
@@ -179,19 +200,19 @@ function render(kind) {
   const foot = $('.out-foot', view);
   foot.hidden = !!(r.empty || r.error);
   if (r.empty) { out.innerHTML = emptyState(kind); return; }
-  if (r.error) { out.innerHTML = `<div class="empty"><strong>La saisie n’est pas encore analysable</strong><span>${kind === 'dsl' ? 'Vérifiez les virgules et accolades du JSON, ou la ligne « GET index/_search » en tête.' : 'Vérifiez l’équilibre des accolades et la syntaxe des blocs input, filter et output.'}</span></div>`; return; }
+  if (r.error) { out.innerHTML = `<div class="empty"><strong>La saisie n’est pas encore analysable</strong><span>${esc(BENCH[kind].error)}</span></div>`; return; }
   const tab = st.tab;
   if (tab === 'sql') out.innerHTML = r.statements.map((s, i) => `<div class="stmt"><div class="stmt-head"><span>${esc(s.title)}</span><button class="icon-btn" type="button" data-copy-stmt="${i}" title="Copier cette requête" aria-label="Copier cette requête">${ICON_COPY}</button></div><pre class="code">${hl(s.sql + ';', 'sql')}</pre></div>`).join('');
   else if (tab === 'config') out.innerHTML = `<div class="stmt"><div class="stmt-head"><span>vector.${cfg.vector.format}</span><div class="seg" role="group" aria-label="Format">${['yaml', 'toml'].map(f => `<button type="button" data-format="${f}" aria-pressed="${cfg.vector.format === f}">${f.toUpperCase()}</button>`).join('')}</div></div><pre class="code">${hl(r[cfg.vector.format], cfg.vector.format)}</pre></div>`;
   else if (tab === 'notes') out.innerHTML = notesHTML(r.notes);
   else if (tab === 'anatomy') out.innerHTML = anatomyHTML(r);
-  else if (tab === 'validate') out.innerHTML = kind === 'dsl' ? validateDSL(r) : validateLS(r);
+  else if (tab === 'validate') out.innerHTML = kind === 'dsl' ? validateDSL(r) : validateLS(r, kind);
   else if (tab === 'flow') { out.innerHTML = flowHTML(r.graph); requestAnimationFrame(() => drawEdges(out, r.graph)); }
 }
 function emptyState(kind) {
   const ex = EXAMPLES[kind];
-  return `<div class="empty"><strong>${kind === 'dsl' ? 'Aucune requête à traduire' : 'Aucun pipeline à traduire'}</strong>
-    <span>${kind === 'dsl' ? 'Collez une requête DSL à gauche ou déposez des fichiers .json.' : 'Collez un pipeline Logstash à gauche ou déposez des fichiers .conf.'}</span>
+  return `<div class="empty"><strong>${BENCH[kind].empty}</strong>
+    <span>${BENCH[kind].emptyHint}</span>
     <div class="row">${ex.map((e, i) => `<button class="btn" type="button" data-load-example="${i}">${esc(e.title)}</button>`).join('')}</div></div>`;
 }
 const LEVEL = { err: 'À reprendre', warn: 'À vérifier', opt: 'Optimisation', info: 'Information' };
@@ -226,7 +247,7 @@ SQL`;
     <pre class="code boxed">${hl(cmd, 'bash')}</pre>
     <p>${r.statements.length > 1 ? `La commande porte sur la première des ${r.statements.length} requêtes ; répétez-la pour les suivantes.` : 'Comparez ensuite quelques résultats avec Elasticsearch sur la même période : c’est le meilleur test de non-régression.'}</p></div>`;
 }
-function validateLS(r) {
+function validateLS(r, kind) {
   const f = `vector.${cfg.vector.format}`;
   // Vector 0.57 et suivants ne remplacent ${VAR} (et $$) qu’avec cette option, que demande l’en-tête du fichier
   const interp = /^# Vector 0\.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation/m.test(r.yaml || '');
@@ -241,7 +262,7 @@ ${env ? env + ' ' : ''}vector validate --skip-healthchecks ${f}
 # 2. Rejouer une étape sur un événement réel extrait du topic source
 vector vrl --input evenement.json --program etape.vrl --print-object
 
-# 3. Lancer en parallèle de Logstash (mode shadow conseillé dans la configuration)
+${kind === 'ingest' ? '# 3. Lancer : Elastic Agent ou Beats envoient leurs documents au port 5044 (sortie Logstash)' : '# 3. Lancer en parallèle de Logstash (mode shadow conseillé dans la configuration)'}
 docker run --rm -v "$PWD/${f}:/etc/vector/vector.${cfg.vector.format}:ro" \\
   ${mmdb ? `-v "$PWD/${base}:${mmdb}:ro" \\\n  ` : ''}${(r.env || []).map(e => `-e ${e} `).join('')}${interp ? '-e VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true ' : ''}timberio/vector:0.59.0-debian --config /etc/vector/vector.${cfg.vector.format}`;
   return `<div class="prose"><p>Cette configuration a été générée pour Vector 0.59 et suit ses règles de typage VRL : chaque appel faillible est traité explicitement.</p>
@@ -287,12 +308,12 @@ function exportKind(kind) {
       files.push({ name: `vector/${base(name)}.${fmt}`, content: r[fmt] });
       const tnames = Object.keys(r.config.transforms || {});
       const first = tnames.find(t => !/_init$/.test(t)) || tnames[0]; const last = r.lastTransform || tnames[tnames.length - 1];
-      if (first) files.push({ name: `tests/${base(name)}.test.yaml`, content: `# Test unitaire : vector test vector/${base(name)}.${fmt} tests/${base(name)}.test.yaml\n# Remplacez le message par un événement réel du topic source.\ntests:\n  - name: '${base(name)} : événement de référence'\n    inputs:\n      - insert_at: ${first}\n        type: log\n        log_fields:\n          message: '<message réel>'\n    outputs:\n      - extract_from: ${last}\n        conditions:\n          - type: vrl\n            source: |\n              assert!(exists(."@timestamp"))\n` });
+      if (first && kind === 'ls') files.push({ name: `tests/${base(name)}.test.yaml`, content: `# Test unitaire : vector test vector/${base(name)}.${fmt} tests/${base(name)}.test.yaml\n# Remplacez le message par un événement réel du topic source.\ntests:\n  - name: '${base(name)} : événement de référence'\n    inputs:\n      - insert_at: ${first}\n        type: log\n        log_fields:\n          message: '<message réel>'\n    outputs:\n      - extract_from: ${last}\n        conditions:\n          - type: vrl\n            source: |\n              assert!(exists(."@timestamp"))\n` });
     });
-    files.push({ name: 'NOTES.md', content: notesMD('Remarques de traduction Logstash vers Vector', results) });
+    files.push({ name: 'NOTES.md', content: notesMD(kind === 'ingest' ? 'Remarques de traduction des pipelines d’ingestion vers Vector' : 'Remarques de traduction Logstash vers Vector', results) });
   }
   files.push({ name: 'passerelle.yaml', content: configToYAML(cfg) });
-  saveFile(kind === 'dsl' ? 'passerelle-sql.zip' : 'passerelle-vector.zip', makeZip(files));
+  saveFile(BENCH[kind].zip, makeZip(files));
 }
 
 /* ---------- Fichiers et glisser-déposer ---------- */
@@ -306,14 +327,30 @@ function addFiles(kind, files) {
   st.ed.value = st.files[st.active].text;
   run(kind, true);
 }
-async function handleDrop(fileList) {
-  const files = await readFiles(fileList);
+async function handleDrop(fileList) { handleFiles(await readFiles(fileList)); }
+function handleFiles(files) {
   const cfgFile = files.find(f => /passerelle.*\.(ya?ml|json)$/i.test(f.name) || (S.view === 'config' && /\.(ya?ml|json)$/i.test(f.name)));
   if (cfgFile) { importConfig(cfgFile); return; }
-  const ls = files.filter(f => /\.(conf|cfg|logstash)$/i.test(f.name) || (S.view === 'ls' && !/\.json$/i.test(f.name)));
-  const dsl = files.filter(f => !ls.includes(f));
-  if (ls.length) { addFiles('ls', ls); if (!dsl.length) show('ls'); }
-  if (dsl.length) { addFiles('dsl', dsl); show('dsl'); }
+  // Chaque fichier va où son contenu le désigne : export Kibana, tableau Grafana, pipeline d’ingestion, pipeline Logstash, requête DSL
+  const kindOf = f => {
+    if (/\.ndjson$/i.test(f.name)) return 'kibana';
+    // Dans la vue « autres sources », un fichier .json ou .txt va à l’outil choisi (schéma, analyseurs), sauf un tableau Grafana reconnu
+    if (S.view === 'tools' && /\.(json|txt|es)$/i.test(f.name) && !(/"panels"\s*:|"rows"\s*:/.test(f.text) && /"(?:datasource|targets)"/.test(f.text))) return 'tools';
+    if (/\.(conf|cfg|logstash)$/i.test(f.name)) return 'ls';
+    if (/"panels"\s*:|"rows"\s*:/.test(f.text) && /"(?:datasource|targets)"/.test(f.text)) return 'grafana';
+    if (/^\s*[{\[]?\s*"?(?:processors|description)"?\s*:/m.test(f.text) && /"?processors"?\s*:/.test(f.text)) return 'ingest';
+    if (/\.ya?ml$/i.test(f.name)) return 'ingest';
+    if (S.view === 'ls' && !/\.json$/i.test(f.name)) return 'ls';
+    return 'dsl';
+  };
+  const groups = {}; files.forEach(f => (groups[kindOf(f)] = groups[kindOf(f)] || []).push(f));
+  let last = null;
+  for (const [k, list] of Object.entries(groups)) {
+    if (k === 'tools') { S.tools.texts[S.tools.tool] = list[0].text; S.tools.ed.value = list[0].text; runTool(); last = 'tools'; }
+    else if (k === 'kibana' || k === 'grafana') { S.tools.tool = k; S.tools.texts[k] = list[0].text; S.tools.ed && (S.tools.ed.value = list[0].text); runTool(); last = 'tools'; }
+    else { addFiles(k, list); last = k; }
+  }
+  if (last) show(last);
   toast(`${files.length} fichier${files.length > 1 ? 's' : ''} ajouté${files.length > 1 ? 's' : ''}`);
 }
 let dragDepth = 0;
@@ -328,6 +365,7 @@ const CFG_FORM = [
   { title: 'ClickHouse', intro: 'Utilisé pour résoudre les tables cibles, renommer les champs et générer les commandes de vérification.', fields: [
     ['clickhouse.endpoint', 'Endpoint HTTP(S)', 'text', 'Port 8443 en TLS, 8123 en clair.'], ['clickhouse.database', 'Base de données', 'text'],
     ['clickhouse.user', 'Utilisateur', 'text', 'Une variable ${…} est résolue au déploiement.'], ['clickhouse.password', 'Mot de passe', 'text', 'Jamais en clair : gardez ${CLICKHOUSE_PASSWORD}.'],
+    ['clickhouse.sink_user', 'Utilisateur d’écriture (sortie Vector)', 'text', 'Compte qui a INSERT, pour vector.elasticsearch_output: clickhouse. Vide : l’utilisateur ci-dessus.'], ['clickhouse.sink_password', 'Mot de passe d’écriture', 'text', 'Gardez ${CLICKHOUSE_SINK_PASSWORD}.'],
     ['clickhouse.default_table', 'Table par défaut', 'text'], ['clickhouse.cluster', 'Cluster (optionnel)', 'text', 'Pour cibler des tables Distributed.'],
     ['clickhouse.time_field', 'Colonne temporelle', 'text', 'Tri par défaut des documents.'], ['clickhouse.timezone', 'Fuseau du serveur', 'text', 'UTC si le serveur et les colonnes de date sont en UTC. Vide : le SQL précise « UTC » dans chaque calcul de date, comme le fait Elasticsearch.'],
     ['clickhouse.composite_mode', 'Agrégations composite', 'select', 'page : une requête par page, avec curseur. stream : une seule requête sans pagination, à lire en flux.', ['page', 'stream']],
@@ -373,12 +411,12 @@ function renderEnv() {
   $('#env-chip').innerHTML = `<span>ClickHouse<em title="${esc(cfg.clickhouse.endpoint)}">${esc(chHost())}</em></span><span>Kafka<em title="${esc(k)}">${esc(k)}</em></span>${cfg.vector.shadow_mode ? '<span>Mode<em>shadow</em></span>' : ''}${SERVER_CFG ? '<span>Source<em>serveur</em></span>' : ''}`;
   $('#index-list').innerHTML = Object.keys(cfg.clickhouse.index_mapping || {}).map(k2 => `<option value="${esc(k2)}">`).join('');
 }
-function configChanged() { store.set(CFG_KEY, cfg); renderConfigPreview(); clearTimeout(configChanged.h); configChanged.h = setTimeout(() => { run('dsl'); run('ls'); }, 250); }
+function configChanged() { store.set(CFG_KEY, cfg); renderConfigPreview(); clearTimeout(configChanged.h); configChanged.h = setTimeout(() => { run('dsl'); run('ls'); run('ingest'); }, 250); }
 function importConfig(f) {
   try {
     const parsed = /\.json$/i.test(f.name) ? JSON.parse(f.text) : parseYAMLConfig(f.text);
     cfg = mergeConfig(DEFAULT_CONFIG, { clickhouse: parsed.clickhouse, kafka: parsed.kafka, vector: parsed.vector });
-    store.set(CFG_KEY, cfg); renderConfigForm(); run('dsl'); run('ls');
+    store.set(CFG_KEY, cfg); renderConfigForm(); run('dsl'); run('ls'); run('ingest');
     toast(`Configuration importée depuis ${f.name}`);
   } catch (e) { toast(`${f.name} n’est pas lisible : ${e.message}`); }
 }
@@ -392,6 +430,12 @@ function renderAPI() {
       <div class="endpoints">${[
         ['POST', '/v1/translate/dsl?index=logs-*', 'Traduit une requête DSL (JSON brut ou format console Kibana). Renvoie verdict, sql, statements, parameters, notes et coverage.'],
         ['POST', '/v1/translate/logstash?format=yaml', 'Traduit un pipeline .conf. Renvoie le verdict, la configuration Vector, la topologie et les remarques.'],
+        ['POST', '/v1/translate/logstash/pipelines', 'Traduit tout un parc de pipelines : pipelines.yml (ou { pipelines, files }) devient une seule configuration Vector, les sorties pipeline { send_to } reliées entre elles.'],
+        ['POST', '/v1/translate/ingest?format=yaml', 'Traduit des pipelines d’ingestion Elasticsearch (YAML, JSON ou requête PUT _ingest/pipeline, ou { files }) en VRL, avec verdict par pipeline.'],
+        ['POST', '/v1/inventory/kibana?format=json', 'Inventaire d’un export Kibana (.ndjson) : objets, requêtes traduites, verdict et effort par objet. Formats json, md, html, csv.'],
+        ['POST', '/v1/translate/grafana?format=md', 'Convertit un tableau de bord Grafana de la source Elasticsearch au plugin ClickHouse. Sans format, renvoie le tableau converti et son rapport.'],
+        ['POST', '/v1/schema/ddl?preset=otel&format=sql', 'CREATE TABLE ClickHouse déduit d’un mapping ou d’un modèle d’index (ou { files }). Sans format, renvoie verdict, sql, profils par table et remarques.'],
+        ['POST', '/v1/schema/analyzers?text=…&field=…', 'Plan ClickHouse des analyseurs personnalisés d’un mapping : colonne de mots, index, requêtes, et aperçu des mots pour le texte donné. format=md pour le rapport.'],
         ['POST', '/v1/validate/sql', 'Vérifie les tables lues (EXPLAIN AST), puis exécute EXPLAIN indexes = 1 sur le ClickHouse de recette et renvoie le plan. Paramètres : param_nom=… dans l’adresse.'],
         ['POST', '/v1/validate/vector', 'Compile la configuration et son VRL avec vector validate.'],
         ['GET', '/v1/config', 'Configuration active, secrets masqués.']
@@ -405,7 +449,12 @@ curl -sS -X POST "https://passerelle.internal/v1/translate/logstash?format=${cfg
   -H "Authorization: Bearer $PASSERELLE_TOKEN" \\
   --data-binary @pipelines/nginx.conf | jq -r .config > vector/nginx.${cfg.vector.format}`, 'bash')}</section>
     <section><h2>CLI pour les dépôts Git</h2><p>La CLI lit passerelle.yaml, traduit des dossiers entiers et échoue si une traduction contient un élément à reprendre : les régressions sont bloquées avant la fusion.</p>${codeCard('CLI', `passerelle dsl2sql requetes/ --config passerelle.yaml --out build/sql --fail-on todo
-passerelle ls2vector pipelines/ --config passerelle.yaml --format ${cfg.vector.format} --out build/vector --fail-on todo`, 'bash')}</section>
+passerelle ls2vector pipelines/ --config passerelle.yaml --format ${cfg.vector.format} --out build/vector --fail-on todo
+passerelle ingest ingest_pipelines/ --config passerelle.yaml --out build/ingest --fail-on todo
+passerelle kibana export.ndjson --config passerelle.yaml --format md --out build/kibana
+passerelle grafana tableaux/ --config passerelle.yaml --out build/grafana
+passerelle schema ddl modeles/ --config passerelle.yaml --out build/schema
+passerelle schema analyzers modeles/catalogue.txt --text "Les téléviseurs d’été" --out build/analyseurs`, 'bash')}</section>
     <section><h2>Chaîne d’intégration continue</h2><p>Exemple GitLab CI : traduction, validation avec les vrais moteurs, puis déploiement de la configuration Vector par ConfigMap, repris par Argo CD.</p>${codeCard('.gitlab-ci.yml', `stages: [traduire, valider, deployer]
 
 traduire:
@@ -472,19 +521,157 @@ function renderArch() {
 }
 
 /* ---------- Navigation et événements ---------- */
+/* ---------- Autres sources : Kibana, Grafana, schéma, analyseurs ---------- */
+// Rendu minimal d’un rapport Markdown : titres, listes, tableaux, blocs de code, gras, italique, code
+function mdInline(t) { return esc(t).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<i>$2</i>'); }
+function mdHTML(md) {
+  const L = String(md).split('\n'); const out = []; let i = 0;
+  while (i < L.length) {
+    const l = L[i];
+    if (/^```/.test(l)) { const lang = l.slice(3).trim(); const buf = []; i++; while (i < L.length && !/^```/.test(L[i])) buf.push(L[i++]); i++; out.push(`<pre class="code boxed">${hl(buf.join('\n'), lang || 'sql')}</pre>`); continue; }
+    const h = /^(#{1,4})\s+(.*)$/.exec(l);
+    if (h) { out.push(`<h${h[1].length + 1}>${mdInline(h[2])}</h${h[1].length + 1}>`); i++; continue; }
+    if (/^\|/.test(l) && /^\|[\s:|-]+\|?$/.test(L[i + 1] || '')) {
+      const cells = r => r.replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'));
+      const head = cells(l); i += 2; const rows = [];
+      while (i < L.length && /^\|/.test(L[i])) rows.push(cells(L[i++]));
+      out.push(`<div class="tw"><table><thead><tr>${head.map(c => `<th>${mdInline(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${mdInline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`); continue;
+    }
+    if (/^\s*[-*]\s+/.test(l)) { const items = []; while (i < L.length && /^\s*[-*]\s+/.test(L[i])) items.push(L[i++].replace(/^\s*[-*]\s+/, '')); out.push(`<ul>${items.map(x => `<li>${mdInline(x)}</li>`).join('')}</ul>`); continue; }
+    if (!l.trim()) { i++; continue; }
+    const para = []; while (i < L.length && L[i].trim() && !/^(#{1,4}\s|```|\||\s*[-*]\s)/.test(L[i])) para.push(L[i++]);
+    out.push(`<p>${mdInline(para.join(' '))}</p>`);
+  }
+  return `<div class="prose md">${out.join('')}</div>`;
+}
+// Le pire verdict d’une liste, du pire au meilleur : non reconnu, à reprendre, à vérifier, prêt
+const worstOf = list => ['unrecognized', 'todo', 'review', 'ready'].find(v => list.includes(v)) || 'ready';
+const schemaText = t => (/^\s*(GET|PUT|POST)\s/i.test(t) ? t : `POST _passerelle\n${t}`);
+const notesMDList = notes => notes.map(n => `- **${LEVEL[n.level] || n.level}** — ${n.title}${n.detail ? ` : ${n.detail}` : ''}`).join('\n');
+const TOOLS = {
+  kibana: {
+    label: 'Inventaire Kibana', title: 'Export Kibana', file: 'export.ndjson', hint: 'Fichiers .ndjson : l’export de Gestion de la pile > Objets enregistrés',
+    run(text) {
+      const inv = kibanaInventory(text, cfg, {});
+      if (!inv.summary.objects && !Object.keys(inv.source.ignored).length) return { error: `Aucun objet sauvegardé lisible${inv.source.errors.length ? ` (${inv.source.errors[0]})` : ''}.` };
+      const s = inv.summary; const b = s.byVerdict;
+      return { verdict: worstOf(Object.keys(b).filter(k => b[k])), counts: { ok: b.ready, approx: b.review, ko: b.todo + b.unrecognized },
+        sentence: `${s.objects} objet${s.objects > 1 ? 's' : ''} à migrer, ${s.queries} requête${s.queries > 1 ? 's' : ''} traduite${s.queries > 1 ? 's' : ''}. Effort estimé : ${frHours(s.effort.hours)}.`,
+        tabs: [['rapport', 'Inventaire', 'md', inventoryMarkdown(inv)], ['csv', 'CSV', 'text', inventoryCSV(inv)]],
+        files: [{ name: 'inventaire/inventaire.md', content: inventoryMarkdown(inv) }, { name: 'inventaire/inventaire.csv', content: inventoryCSV(inv) }, { name: 'inventaire/inventaire.html', content: inventoryHTML(inv, 'Inventaire Kibana') }], copy: inventoryMarkdown(inv) };
+    }
+  },
+  grafana: {
+    label: 'Tableau Grafana', title: 'Tableau de bord Grafana (JSON)', file: 'tableau.json', hint: 'Fichiers .json : l’export d’un tableau de bord (schéma classique)',
+    opts: [['index', 'Index', 'text', 'logs-*']],
+    run(text) {
+      const r = grafanaDashboard(text, cfg, { index: S.tools.opts.index || '' });
+      if (r.error) return { error: r.error };
+      if (r.empty) return { error: 'Aucune requête Elasticsearch dans ce tableau de bord.' };
+      const v = r.summary.byVerdict; const md = grafanaReportMarkdown(r); const json = JSON.stringify(r.dashboard, null, 2);
+      return { verdict: r.verdict, counts: { ok: v.ready, approx: v.review, ko: v.todo + (v.unrecognized || 0) },
+        sentence: `${r.summary.panels} panneau${r.summary.panels > 1 ? 'x' : ''} converti${r.summary.panels > 1 ? 's' : ''} pour le plugin ClickHouse.`,
+        tabs: [['rapport', 'Rapport', 'md', md], ['json', 'Tableau converti', 'json', json]],
+        files: [{ name: 'grafana/tableau-clickhouse.json', content: json }, { name: 'grafana/rapport.md', content: md }], copy: json };
+    }
+  },
+  schema: {
+    label: 'Schéma', title: 'Modèles d’index et mappings', file: 'modele.txt', hint: 'Fichiers .json ou .txt : PUT _index_template, PUT mon-index, GET _mapping, politique ILM',
+    opts: [['preset', 'Préréglage', 'select', '', [['', 'Aucun'], ['otel', 'OpenTelemetry'], ['otel-json', 'OpenTelemetry (JSON)']]]],
+    run(text) {
+      const r = schemaFromElastic(schemaText(text), cfg, { preset: S.tools.opts.preset || undefined });
+      if (r.error) return { error: r.error };
+      if (r.empty) return { error: 'Aucun mapping lisible.' };
+      return { verdict: verdictOf(r), counts: r.stats, sentence: `${r.tables.length} table${r.tables.length > 1 ? 's' : ''} ClickHouse à créer.`,
+        tabs: [['ddl', 'CREATE TABLE', 'sql', r.sql], ['profils', 'Profils', 'yaml', r.yaml], ['notes', 'Remarques', 'md', notesMDList(r.notes) || 'Aucune remarque.']],
+        files: [{ name: 'schema/schema.sql', content: r.sql }, { name: 'schema/passerelle.tables.yaml', content: r.yaml }], copy: r.sql };
+    }
+  },
+  analyzers: {
+    label: 'Analyseurs', title: 'Index avec analyseurs personnalisés', file: 'catalogue.txt', hint: 'Fichiers .json ou .txt : la définition de l’index (settings.analysis et mappings)',
+    opts: [['field', 'Champ', 'text', 'tous'], ['text', 'Texte d’essai', 'text', 'Les téléviseurs d’été']],
+    run(text) {
+      const r = schemaFromElastic(schemaText(text), cfg, {});
+      if (r.error) return { error: r.error };
+      if (r.empty) return { error: 'Aucun mapping lisible.' };
+      const o = S.tools.opts; const rep = anReport(r.tables, o.text || undefined, o.field || undefined);
+      const ps = rep.plans.map(p => p.plan.verdict);
+      const sql = rep.plans.filter(p => p.plan.ddl).map(p => `-- ${p.plan.table} · ${p.plan.field} · analyseur ${p.plan.name}\n${p.plan.ddl.join('\n')}`).join('\n\n');
+      return { verdict: rep.verdict, counts: { ok: ps.filter(v => v === 'ready').length, approx: ps.filter(v => v === 'review').length, ko: ps.filter(v => v === 'todo').length },
+        sentence: rep.plans.length ? `${rep.plans.length} analyseur${rep.plans.length > 1 ? 's' : ''} à traduire en colonne de mots et index de texte.` : 'Aucun analyseur personnalisé : le standard est déjà reproduit par la traduction des requêtes.',
+        tabs: [['rapport', 'Plan', 'md', rep.markdown], ['ddl', 'DDL', 'sql', sql || '-- aucun analyseur à traduire']],
+        files: [{ name: 'analyseurs/analyseurs.md', content: rep.markdown }, { name: 'analyseurs/analyseurs.sql', content: sql + '\n' }], copy: sql };
+    }
+  }
+};
+S.tools = { tool: store.get('tool', 'kibana'), texts: {}, opts: { index: 'logs-*', preset: '', field: '', text: 'Les téléviseurs d’été' }, tab: {}, res: null, ed: null };
+if (!TOOLS[S.tools.tool]) S.tools.tool = 'kibana';
+Object.keys(TOOLS).forEach(k => { S.tools.texts[k] = EXAMPLES[k][0].text; S.tools.tab[k] = null; });
+function runTool() {
+  const st = S.tools; const t = TOOLS[st.tool]; const text = st.texts[st.tool] || '';
+  try { st.res = text.trim() ? t.run(text) : { empty: true }; } catch (e) { st.res = { error: `Erreur interne : ${e.message}` }; }
+  renderTools();
+}
+function renderTools() {
+  const st = S.tools; const t = TOOLS[st.tool]; const view = $('#view-tools'); if (!view) return;
+  $$('[data-tool]', view).forEach(b => b.setAttribute('aria-pressed', b.dataset.tool === st.tool));
+  $('[data-role="tool-title"]', view).textContent = t.title; $('[data-role="drop-hint"]', view).textContent = t.hint;
+  $('[data-role="tool-opts"]', view).innerHTML = (t.opts || []).map(([k, label, kind, ph, choices]) => `<label for="tool-${k}">${esc(label)}</label>${kind === 'select' ? `<select id="tool-${k}" data-opt="${k}" class="btn" style="height:30px">${choices.map(([v, l]) => `<option value="${esc(v)}"${st.opts[k] === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>` : `<input id="tool-${k}" data-opt="${k}" value="${esc(st.opts[k] || '')}" placeholder="${esc(ph)}" spellcheck="false">`}`).join('') + '<button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>';
+  const r = st.res || { empty: true };
+  const v = $('[data-role="verdict"]', view); const tabs = $('[data-role="tabs"]', view); const out = $('[data-role="out"]', view);
+  $('.out-foot', view).hidden = !!(r.empty || r.error);
+  if (r.empty) { v.hidden = true; tabs.hidden = true; out.innerHTML = `<div class="empty"><strong>Rien à analyser</strong><span>${esc(t.hint)}. Collez le contenu à gauche ou chargez un exemple.</span><div class="row">${EXAMPLES[st.tool].map((e, i) => `<button class="btn" type="button" data-load-example="${i}">${esc(e.title)}</button>`).join('')}</div></div>`; return; }
+  if (r.error) { v.hidden = false; v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-unrecognized"><i></i>${verdictLabel('unrecognized')}</span></div><p class="sentence error">${esc(r.error)}</p>`; tabs.hidden = true; out.innerHTML = ''; $('.out-foot', view).hidden = true; return; }
+  const { ok, approx, ko } = r.counts; const total = ok + approx + ko || 1;
+  v.hidden = false;
+  v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-${r.verdict}"><i></i>${verdictLabel(r.verdict)}</span>
+    <span class="counts"><span><i class="c-ok"></i>${ok} prêt${ok > 1 ? 's' : ''}</span><span><i class="c-approx"></i>${approx} à vérifier</span><span><i class="c-ko"></i>${ko} à reprendre</span></span></div>
+    <div class="gauge" role="img" aria-label="${ok} prêts, ${approx} à vérifier, ${ko} à reprendre"><span class="c-ok" style="width:${(100 * ok) / total}%"></span><span class="c-approx" style="width:${(100 * approx) / total}%"></span><span class="c-ko" style="width:${(100 * ko) / total}%"></span></div>
+    <p class="sentence">${esc(r.sentence)}</p>`;
+  const cur = r.tabs.find(x => x[0] === st.tab[st.tool]) || r.tabs[0]; st.tab[st.tool] = cur[0];
+  tabs.hidden = r.tabs.length < 2;
+  tabs.innerHTML = r.tabs.map(([id, label]) => `<button class="tab" role="tab" type="button" data-tab="${id}" aria-selected="${cur[0] === id}">${esc(label)}</button>`).join('');
+  const [, , kind, body] = cur;
+  out.innerHTML = kind === 'md' ? mdHTML(body) : `<pre class="code">${kind === 'text' ? esc(body) : hl(body, kind)}</pre>`;
+}
+function setupTools() {
+  const view = $('#view-tools'); const st = S.tools;
+  st.ed = makeEditor($('[data-role="editor"]', view), 'json', 'Source à analyser', 'Collez ici un export Kibana, un tableau de bord Grafana, un modèle d’index ou la définition d’un index.', text => { st.texts[st.tool] = text; clearTimeout(setupTools.h); setupTools.h = setTimeout(runTool, 180); });
+  $('[data-role="tool-seg"]', view).innerHTML = Object.entries(TOOLS).map(([k, t]) => `<button type="button" data-tool="${k}" aria-pressed="false">${esc(t.label)}</button>`).join('');
+  const sel = $('[data-act="example"]', view);
+  const fillExamples = () => { sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES[st.tool].map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`; };
+  const load = i => { const e = EXAMPLES[st.tool][i]; if (!e) return; st.texts[st.tool] = e.text; st.ed.value = e.text; runTool(); };
+  const pick = k => { st.tool = k; store.set('tool', k); st.ed.value = st.texts[k] || ''; fillExamples(); runTool(); };
+  sel.addEventListener('change', () => { load(+sel.value); sel.value = ''; });
+  const fi = $('input[type="file"]', view);
+  $('[data-act="open"]', view).addEventListener('click', () => fi.click());
+  fi.addEventListener('change', async () => { const files = await readFiles(fi.files); if (files.length) handleFiles(files); fi.value = ''; });
+  $('[data-act="copy"]', view).addEventListener('click', () => { const r = st.res; if (r && r.copy) copyText(r.copy, 'Rapport'); });
+  $('[data-act="export"]', view).addEventListener('click', () => { const r = st.res; if (r && r.files) saveFile(`passerelle-${st.tool}.zip`, makeZip(r.files)); });
+  view.addEventListener('click', e => {
+    const t = e.target.closest('[data-tool],[data-tab],[data-load-example],[data-act="clear"]'); if (!t) return;
+    if (t.dataset.tool) pick(t.dataset.tool);
+    else if (t.dataset.tab) { st.tab[st.tool] = t.dataset.tab; renderTools(); }
+    else if (t.dataset.loadExample !== undefined) load(+t.dataset.loadExample);
+    else if (t.dataset.act === 'clear') { st.texts[st.tool] = ''; st.ed.value = ''; runTool(); st.ed.focus(); }
+  });
+  view.addEventListener('input', e => { const o = e.target.closest('[data-opt]'); if (!o) return; st.opts[o.dataset.opt] = o.value.trim(); clearTimeout(setupTools.h2); setupTools.h2 = setTimeout(runTool, 180); });
+  st.ed.value = st.texts[st.tool]; fillExamples(); runTool();
+}
 function show(view) {
   S.view = view; store.set('view', view);
   $$('.view').forEach(v => (v.hidden = v.id !== `view-${view}`));
   $$('.nav-item').forEach(b => (b.getAttribute('data-view') === view ? b.setAttribute('aria-current', 'page') : b.removeAttribute('aria-current')));
   if (view === 'api') renderAPI();
   if (view === 'arch') renderArch();
-  if (view === 'ls' && S.ls.tab === 'flow') render('ls');
+  if ((view === 'ls' || view === 'ingest') && S[view].tab === 'flow') render(view);
+  if (view === 'tools') renderTools();
 }
 function setupBench(kind) {
   const view = $(`#view-${kind}`); const st = S[kind];
-  st.ed = makeEditor($('[data-role="editor"]', view), st.lang, kind === 'dsl' ? 'Requête DSL Elasticsearch' : 'Pipeline Logstash',
-    kind === 'dsl' ? 'Collez ici une requête DSL, par exemple { "query": { "match_all": {} } }, ou une requête de la console Kibana (GET index/_search).' : 'Collez ici un pipeline Logstash : input { kafka { … } } filter { … } output { kafka { … } }',
-    text => { const f = st.files[st.active]; if (f) { f.text = text; f.example = false; } else st.files.push({ name: kind === 'dsl' ? 'requete.json' : 'pipeline.conf', text }); runSoon(kind); });
+  st.ed = makeEditor($('[data-role="editor"]', view), st.lang, BENCH[kind].label,
+    BENCH[kind].placeholder,
+    text => { const f = st.files[st.active]; if (f) { f.text = text; f.example = false; } else st.files.push({ name: BENCH[kind].file, text }); runSoon(kind); });
   st.ed.value = st.files[st.active].text;
   const sel = $('[data-act="example"]', view);
   sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES[kind].map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`;
@@ -500,14 +687,14 @@ function setupBench(kind) {
   fileInput.addEventListener('change', async () => { const files = await readFiles(fileInput.files); if (files.length) addFiles(kind, files); fileInput.value = ''; });
   $('[data-act="clear"]', view).addEventListener('click', () => { const f = st.files[st.active]; if (f) f.text = ''; st.ed.value = ''; run(kind); st.ed.focus(); });
   if (kind === 'dsl') { const ix = $('[data-role="index"]', view); ix.value = st.index; ix.addEventListener('input', () => { S.dsl.index = ix.value.trim(); runSoon('dsl'); }); }
-  $('[data-act="copy"]', view).addEventListener('click', () => { const r = st.res; if (!r || r.error || r.empty) return; copyText(kind === 'dsl' ? r.sql : r[cfg.vector.format], kind === 'dsl' ? 'SQL' : 'Configuration'); });
+  $('[data-act="copy"]', view).addEventListener('click', () => { const r = st.res; if (!r || r.error || r.empty) return; copyText(kind === 'dsl' ? r.sql : r[cfg.vector.format], BENCH[kind].copy); });
   $('[data-act="export"]', view).addEventListener('click', () => exportKind(kind));
   view.addEventListener('click', e => {
     const t = e.target.closest('[data-tab],[data-file],[data-close],[data-format],[data-copy-stmt],[data-load-example]'); if (!t) return;
-    if (t.dataset.close !== undefined) { e.stopPropagation(); const i = +t.dataset.close; st.files.splice(i, 1); if (!st.files.length) st.files.push({ name: kind === 'dsl' ? 'requete.json' : 'pipeline.conf', text: '' }); st.active = Math.min(st.active, st.files.length - 1); st.ed.value = st.files[st.active].text; run(kind); return; }
+    if (t.dataset.close !== undefined) { e.stopPropagation(); const i = +t.dataset.close; st.files.splice(i, 1); if (!st.files.length) st.files.push({ name: BENCH[kind].file, text: '' }); st.active = Math.min(st.active, st.files.length - 1); st.ed.value = st.files[st.active].text; run(kind); return; }
     if (t.dataset.tab) { st.tab = t.dataset.tab; render(kind); return; }
     if (t.dataset.file !== undefined) { st.active = +t.dataset.file; st.ed.value = st.files[st.active].text; run(kind, true); return; }
-    if (t.dataset.format) { cfg.vector.format = t.dataset.format; store.set(CFG_KEY, cfg); renderConfigPreview(); render('ls'); return; }
+    if (t.dataset.format) { cfg.vector.format = t.dataset.format; store.set(CFG_KEY, cfg); renderConfigPreview(); render(kind); return; }
     if (t.dataset.copyStmt !== undefined) { const s = st.res.statements[+t.dataset.copyStmt]; copyText(s.sql + ';', 'Requête'); return; }
     if (t.dataset.loadExample !== undefined) loadExample(+t.dataset.loadExample);
   });
@@ -541,7 +728,7 @@ function setupConfig() {
   fi.addEventListener('change', async () => { const [f] = await readFiles(fi.files); if (f) importConfig(f); fi.value = ''; });
   $('[data-act="cfg-export"]').addEventListener('click', () => saveFile('passerelle-config.zip', makeZip([{ name: 'passerelle.yaml', content: configToYAML(cfg) }])));
   $('[data-act="cfg-copy"]').addEventListener('click', () => copyText(configToYAML(cfg), 'Configuration'));
-  $('[data-act="cfg-reset"]').addEventListener('click', () => { cfg = mergeConfig(BASE_CFG, {}); store.set(CFG_KEY, cfg); renderConfigForm(); run('dsl'); run('ls'); toast('Configuration réinitialisée'); });
+  $('[data-act="cfg-reset"]').addEventListener('click', () => { cfg = mergeConfig(BASE_CFG, {}); store.set(CFG_KEY, cfg); renderConfigForm(); run('dsl'); run('ls'); run('ingest'); toast('Configuration réinitialisée'); });
 }
 function setupTheme() {
   const modes = ['auto', 'light', 'dark']; const labels = { auto: 'automatique', light: 'clair', dark: 'sombre' };
@@ -552,11 +739,11 @@ function setupTheme() {
 }
 document.addEventListener('click', e => { const c = e.target.closest('[data-copy-raw]'); if (c) copyText(c.getAttribute('data-copy-raw'), 'Code'); });
 $$('.nav-item').forEach(b => b.addEventListener('click', () => show(b.getAttribute('data-view'))));
-window.addEventListener('resize', () => { if (S.view === 'ls' && S.ls.tab === 'flow' && S.ls.res && S.ls.res.graph) drawEdges($('#view-ls [data-role="out"]'), S.ls.res.graph); });
+window.addEventListener('resize', () => { const k = S.view; if ((k === 'ls' || k === 'ingest') && S[k].tab === 'flow' && S[k].res && S[k].res.graph) drawEdges($(`#view-${k} [data-role="out"]`), S[k].res.graph); });
 
-setupTheme(); setupBench('dsl'); setupBench('ls'); setupConfig();
-run('dsl'); run('ls');
-show(['dsl', 'ls', 'config', 'api', 'arch'].includes(S.view) ? S.view : 'dsl');
+setupTheme(); setupBench('dsl'); setupBench('ls'); setupBench('ingest'); setupTools(); setupConfig();
+run('dsl'); run('ls'); run('ingest');
+show(['dsl', 'ls', 'ingest', 'tools', 'config', 'api', 'arch'].includes(S.view) ? S.view : 'dsl');
 // Téléchargement classique par le navigateur (page servie par le binaire ou ouverte en local)
 downloads = { save: async ({ filename, data }) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], { type: 'application/zip' })); a.download = filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); return { status: 'saved' }; } };
 $$('.dl').forEach(b => (b.hidden = false));

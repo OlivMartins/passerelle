@@ -1,0 +1,15 @@
+# Couverture : 4 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
+
+transforms:
+  condition_1:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      if (match(.a, r'(?m)^[\p{L}\p{M}]+$$') ?? false) {
+        # mutate
+        .tags = compact(flatten([.tags, "oui"]))
+      } else {
+        # mutate
+        .tags = compact(flatten([.tags, "non"]))
+      }

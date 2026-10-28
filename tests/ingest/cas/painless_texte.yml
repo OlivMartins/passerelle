@@ -1,0 +1,16 @@
+---
+description: scripts Painless qui assemblent du texte, des nombres et des valeurs de type inconnu
+processors:
+  - script:
+      lang: painless
+      source: |
+        String cle = ctx.type_key == null ? "" : ctx.type_key;
+        def n = ctx.compte;
+        def u = ctx.usage;
+        ctx.etiquette = cle + "type=" + "type=".length();
+        ctx.total = (ctx.heures * 3600) + (ctx.minutes * 60);
+        ctx.mixte = n + ctx.suffixe;
+        if (u != null) {
+          ctx.somme = u.entrees + u.sorties;
+        }
+        ctx.version = ctx.tls.substring(0, 1) + "." + ctx.tls.substring(1);

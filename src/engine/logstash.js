@@ -132,7 +132,12 @@ function fieldSegs(ref) {
   if (ref.startsWith('[')) { const segs = []; ref.replace(/\[([^\]]+)\]/g, (m, x) => segs.push(x.trim())); return segs; }
   return [ref];
 }
-const segName = x => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(x) ? x : JSON.stringify(x));
+/*
+ * Chaîne littérale VRL. Les guillemets doubles de VRL interpolent « {{ variable }} » : sans échappement, "a{{b" vaut
+ * silencieusement "a" (Vector 0.59). Chaque accolade ouvrante suivie d’une autre devient \{, ce que VRL lit comme « { ».
+ */
+const vq = s => JSON.stringify(String(s)).replace(/\\u([0-9a-fA-F]{4})/g, '\\u{$1}').replace(/\{(?=\{)/g, '\\{');
+const segName = x => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(x) ? x : vq(x));
 const KAFKA_META = { topic: 'topic', partition: 'partition', offset: 'offset', key: 'message_key', timestamp: 'timestamp', headers: 'headers', consumer_group: 'consumer_group' };
 function vPathOf(segs, ns) {
   if (segs[0] === '@metadata') {
@@ -146,8 +151,63 @@ function vPathOf(segs, ns) {
   }
   return '.' + segs.map(segName).join('.');
 }
-const vq = s => JSON.stringify(String(s)).replace(/\\u([0-9a-fA-F]{4})/g, '\\u{$1}');
-const vraw = (s, pre) => `${pre}'${String(s).replace(/\\'/g, "\\\\'").replace(/'/g, "\\'")}'`;
+// Une expression régulière (r'…') reçoit les caractères de contrôle sous la forme \xNN : bruts, ils font refuser le YAML
+const vraw = (s, pre) => `${pre}'${String(s).replace(/\\'/g, "\\\\'").replace(/'/g, "\\'")}'`.replace(pre === 'r' || pre === 's' ? /[\x00-\x1f\x7f]/g : /(?!)/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
+/*
+ * Expression régulière de Ruby (Onigmo, celle des conditions =~, de gsub et de prune) → moteur regex de VRL (Rust).
+ * - ^ et $ valent pour chaque ligne en Ruby : (?m) leur donne ce sens en Rust ;
+ * - le drapeau m de Ruby (le point prend le saut de ligne) s’écrit s en Rust ;
+ * - \w, \d, \s et \h ne prennent que des caractères ASCII en Ruby, tout Unicode en Rust : ils sont écrits en classes.
+ * Le reste (lookahead, \Z, quantificateurs possessifs) n’a pas d’équivalent : Vector refuse alors la configuration.
+ */
+const RUBY_CLASSES = { w: '0-9A-Za-z_', d: '0-9', s: '\\t\\n\\x0B\\x0C\\r ', h: '0-9a-fA-F' };
+// Classes POSIX : Unicode en Ruby, ASCII en Rust (graph et print restent celles de Rust)
+const RUBY_POSIX = {
+  alnum: '\\p{L}\\p{M}\\p{Nd}', alpha: '\\p{L}\\p{M}', blank: '\\p{Zs}\\t', cntrl: '\\p{Cc}\\p{Cf}\\p{Cn}\\p{Co}', digit: '\\p{Nd}',
+  lower: '\\p{Ll}', upper: '\\p{Lu}', punct: '\\p{P}\\x24+<=>\\^`|~', space: '\\p{Zs}\\p{Zl}\\p{Zp}\\t\\n\\x0B\\x0C\\r\\x{85}',
+  xdigit: '0-9A-Fa-f', word: '\\p{L}\\p{M}\\p{Nd}\\p{Pc}'
+};
+function rubyRe(re) {
+  re = String(re);
+  let out = ''; let depth = 0; let anchors = false;
+  for (let i = 0; i < re.length; i++) {
+    const c = re[i];
+    if (c === '\\') {
+      const n = re[i + 1]; i++;
+      if (n === undefined) { out += c; break; }
+      const k = n.toLowerCase();
+      if (RUBY_CLASSES[k]) {
+        const neg = n !== k;
+        out += depth ? (neg ? `[^${RUBY_CLASSES[k]}]` : RUBY_CLASSES[k]) : `[${neg ? '^' : ''}${RUBY_CLASSES[k]}]`;
+      } else out += c + n;
+      continue;
+    }
+    if (depth) {
+      const px = c === '[' && /^\[:(\^?)([a-z]+):\]/.exec(re.slice(i));
+      if (px && RUBY_POSIX[px[2]]) { out += px[1] ? `[^${RUBY_POSIX[px[2]]}]` : RUBY_POSIX[px[2]]; i += px[0].length - 1; continue; }
+      if (c === '[') depth++;
+      else if (c === ']') depth--;
+      out += c; continue;
+    }
+    if (c === '[') {
+      depth = 1; out += c;
+      if (re[i + 1] === '^') { out += '^'; i++; }
+      if (re[i + 1] === ']') { out += '\\]'; i++; }
+      continue;
+    }
+    if (c === '(' && re[i + 1] === '?') {
+      const m = /^\(\?([imx]*)(?:-([imx]*))?([:)])/.exec(re.slice(i));
+      if (m && (m[1] || m[2] !== undefined)) {
+        const sw = f => f.replace(/m/g, 's');
+        out += `(?${sw(m[1])}${m[2] !== undefined ? '-' + sw(m[2]) : ''}${m[3]}`;
+        i += m[0].length - 1; continue;
+      }
+    }
+    if (c === '^' || c === '$') anchors = true;
+    out += c;
+  }
+  return anchors ? '(?m)' + out : out;
+}
 function joda2strf(f) {
   let out = ''; let i = 0;
   const tok = (c, run) => {
@@ -214,14 +274,26 @@ class VrlGen {
   asStr(p) { const t = this.tget(p); if (t === 'str') return p; if (t === 'null') return '""'; if (t === 'arr') return `(join(${p}, ",") ?? "")`; return `(to_string(${p}) ?? join(${p}, ",") ?? encode_json(${p}))`; }
   sprintf(s) {
     s = String(s);
-    const parts = []; let last = 0; const re = /%\{([^}]+)\}/g; let m; let dyn = false;
+    const parts = []; let last = 0; const re = /%\{([^}]+)\}/g; let m;
     while ((m = re.exec(s))) {
       if (m.index > last) parts.push(vq(s.slice(last, m.index)));
-      const ref = m[1]; dyn = true;
+      const ref = m[1];
       if (ref.startsWith('+')) parts.push(`(format_timestamp(timestamp(."@timestamp") ?? parse_timestamp(."@timestamp", "%+") ?? now(), format: ${vq(joda2strf(ref.slice(1)))}) ?? "")`);
       else {
-        const p = this.path(ref); parts.push(this.asStr(p));
-        if (this.tget(p) !== 'str') this.v.note('warn', 'Référence %{champ}', 'Pour un champ absent ou nul, Logstash laisse « %{champ} » tel quel dans la valeur ; la traduction écrit une chaîne vide.');
+        // Champ absent ou nul : Logstash laisse « %{champ} » tel quel. Un tableau est joint par des virgules,
+        // ses éléments écrits en texte (StringInterpolation de Logstash).
+        const p = this.path(ref); const t = this.tget(p); const lit = vq(m[0]);
+        // KeyNode.join : les tableaux imbriqués sont aplatis, un élément nul compte pour une chaîne vide
+        const list = (x, known) => `(join(map_values(flatten(${known ? x : `array!(${x})`})) -> |item| { if item == null { "" } else { to_string(item) ?? encode_json(item) } }, ",") ?? "")`;
+        if (t === 'str') parts.push(p);
+        else if (t === 'null') parts.push(lit);
+        else if (t === 'arr') parts.push(list(p, true));
+        else {
+          // VRL n’accepte pas un if au milieu d’une expression : la valeur est calculée juste avant la ligne qui l’emploie
+          const v = `ref_${++this.v.refN}`;
+          this.emit(`${v} = if ${p} == null { ${lit} } else if is_array(${p}) { ${list(p)} } else { to_string(${p}) ?? encode_json(${p}) }`);
+          parts.push(v);
+        }
       }
       last = re.lastIndex;
     }
@@ -315,7 +387,7 @@ class VrlGen {
     if (x.t === 'num') return String(x.v);
     if (x.t === 'arr') return `[${x.v.map(i => (i.t === 'num' ? String(i.v) : vq(lsJs(i)))).join(', ')}]`;
     if (x.t === 'bare') return x.v === 'true' || x.v === 'false' || x.v === 'nil' ? (x.v === 'nil' ? 'null' : x.v) : vq(x.v);
-    if (x.t === 're') return vraw(x.v, 'r');
+    if (x.t === 're') return vraw(rubyRe(x.v), 'r');
     return 'null';
   }
   numOf(x) { if (x.t !== 'field') return this.rv(x); const p = this.rv(x); const t = this.tget(p); return t === 'null' ? '0.0' : `(to_float(${p}) ?? 0.0)`; }
@@ -348,7 +420,8 @@ class VrlGen {
         const re = c.r.t === 're' ? c.r.v : String(c.r.v);
         if (/\(\?<?[=!]/.test(re)) this.v.note('warn', 'Assertion regex', `L’expression /${re}/ utilise une assertion (lookahead/lookbehind) non prise en charge par le moteur regex de Vector.`);
         const p = this.rv(c.l); const t = this.tget(p);
-        const m = t === 'str' ? `match(${p}, ${vraw(re, 'r')})` : t === 'null' ? 'false' : `(match(${p}, ${vraw(re, 'r')}) ?? false)`;
+        const rx = vraw(rubyRe(re), 'r');
+        const m = t === 'str' ? `match(${p}, ${rx})` : t === 'null' ? 'false' : `(match(${p}, ${rx}) ?? false)`;
         return c.neg ? `!${m}` : m;
       }
       case 'in': {
@@ -514,7 +587,7 @@ class VrlGen {
           else if (!num) this.assignIf(`${x} != null`, x, expr);
           else { this.open(`if ${x} != null`); this.emit(numLine); this.assign(x, expr); this.close(); this.tset(x, 'any'); }
         }); break;
-        case 'gsub': { const a = lsList(v); for (let i = 0; i + 2 < a.length; i += 3) { const x = this.path(a[i]); const rep = String(a[i + 2]).replace(/\$/g, '$$$$').replace(/\\(\d)/g, '$${$1}'); onString(x, bang => `replace${bang}(${x}, ${vraw(a[i + 1], 'r')}, ${vq(rep)})`, 'str'); } break; }
+        case 'gsub': { const a = lsList(v); for (let i = 0; i + 2 < a.length; i += 3) { const x = this.path(a[i]); const rep = String(a[i + 2]).replace(/\$/g, '$$$$').replace(/\\(\d)/g, '$${$1}'); onString(x, bang => `replace${bang}(${x}, ${vraw(rubyRe(a[i + 1]), 'r')}, ${vq(rep)})`, 'str'); } break; }
         case 'uppercase': unary(v, 'upcase'); break;
         case 'lowercase': unary(v, 'downcase'); break;
         case 'strip': unary(v, 'strip_whitespace'); break;
@@ -765,6 +838,227 @@ class VrlGen {
     const c = addrs.flatMap(a => nets.map(nw => `(ip_cidr_contains(${vq(nw)}, ${a}) ?? false)`)).join(' || ');
     this.open(`if ${c}`); this.common(s); if (!(s.add_field || s.add_tag || s.remove_field || s.remove_tag)) this.emit('noop = true'); this.close(); this.ok();
   }
+  /*
+   * prune : clés de premier niveau de l’événement (event.to_hash, @metadata exclu, @timestamp compris) gardées
+   * ou retirées selon des expressions régulières non ancrées ; blacklist_names vaut par défaut %\{[^}]+\} (clés
+   * restées avec une référence non résolue). Les valeurs sont filtrées après les noms, sur l’événement d’origine.
+   */
+  f_prune(s, p) {
+    const pats = list => lsList(list).map(String);
+    const wl = pats(s.whitelist_names); const bl = s.blacklist_names === undefined ? ['%\\{[^}]+\\}'] : pats(s.blacklist_names);
+    const wv = lsPairs(s.whitelist_values); const bv = lsPairs(s.blacklist_values);
+    if (truthy(s.interpolate) && [...wl, ...bl, ...wv.flat(), ...bv.flat()].some(x => /%\{/.test(String(x)))) return this.ko(p, 'prune avec interpolate : les expressions régulières calculées pour chaque événement n’existent pas en VRL, qui compile ses expressions à l’avance.');
+    const union = list => vraw(rubyRe(list.map(x => `(?:${x})`).join('|')), 'r');
+    this.emit(`orig = ${this.root()}`);
+    const keep = [];
+    if (wl.length) keep.push(`match(key, ${union(wl)})`);
+    if (bl.length) keep.push(`!match(key, ${union(bl)})`);
+    if (keep.length) this.emit(`. = filter(orig) -> |key, _value| { ${keep.join(' && ')} }`);
+    const values = (pairs, white) => pairs.forEach(([k, re]) => {
+      const key = `[${vq(k)}]`; const dot = `.${vq(k)}`; const r = vraw(rubyRe(re), 'r');
+      const hit = x => (white ? `is_string(${x}) && match(string!(${x}), ${r})` : `!(is_string(${x}) && match(string!(${x}), ${r}))`);
+      this.emit(`v = get!(orig, ${key})`);
+      this.open('if v != null && v != false');
+      this.open('if is_array(v)');
+      this.emit(`kept = filter(array!(v)) -> |_index, x| { ${hit('x')} }`);
+      // Un tableau dont aucun élément n’est retiré reste tel quel, vide compris
+      this.emit(`if length(kept) != length(array!(v)) { if length(kept) == 0 { del(${dot}) } else { ${dot} = kept } }`);
+      this.close(`} else if is_string(v) {`); this.ind++;
+      this.emit(`if ${white ? '!' : ''}match(string!(v), ${r}) { del(${dot}) }`);
+      this.close();
+      this.close();
+    });
+    values(wv, true); values(bv, false);
+    this.treset(); this.types.set('.', 'obj');
+    this.common(s); this.ok();
+  }
+  /*
+   * de_dot : remplace les points des noms de champs. Sans fields, les clés de premier niveau ; avec recursive, celles
+   * des objets imbriqués aussi (pas celles des objets rangés dans des tableaux). nested range le champ sous un chemin
+   * ([a][b]) ; un parent qui n’est pas un objet fait échouer le filtre (_de_dot_error), comme dans Logstash.
+   */
+  f_de_dot(s, p) {
+    const nested = truthy(s.nested); const sep = nested ? '][' : String(s.separator === undefined ? '_' : s.separator);
+    if (!nested && sep.includes('.')) return this.ko(p, 'de_dot : le séparateur ne peut pas contenir de point (Logstash refuse la configuration).');
+    const recursive = truthy(s.recursive);
+    const failTag = s.tag_on_failure !== undefined ? String(s.tag_on_failure) : '_de_dot_error';
+    if (s.fields !== undefined) {
+      if (recursive) return this.ko(p, 'de_dot avec fields et recursive : à reprendre en VRL (map_keys sur les champs voulus).');
+      const plan = [];
+      for (const f of lsList(s.fields)) {
+        const segs = fieldSegs(f);
+        if (!String(f).includes('.')) continue;
+        if (segs.slice(0, -1).some(x => x.includes('.'))) return this.ko(p, `de_dot : le champ « ${f} » a un point dans un nom parent ; Logstash déplace alors tout le parent, à reprendre en VRL.`);
+        plan.push({ segs, f });
+      }
+      this.emit(`dd = ${this.root()}`);
+      for (const { segs, f } of plan) {
+        const parent = segs.slice(0, -1).map(vq); const last = segs[segs.length - 1];
+        const from = `[${parent.concat([vq(last)]).join(', ')}]`;
+        const to = nested ? `[${parent.concat(last.split('.').map(vq)).join(', ')}]` : `[${parent.concat([vq(last.split('.').join(sep))]).join(', ')}]`;
+        this.emit(`v = get!(dd, ${from})`);
+        this.open(`if exists(${this.path(f)})`);
+        this.emit(`dd = remove!(dd, ${from})`);
+        this.emit(`dd = set!(dd, ${to}, v)`);
+        this.close();
+      }
+      this.emit('. = dd');
+      if (nested) this.v.note('warn', 'de_dot nested sur des champs nommés', 'Un parent qui n’est pas un objet fait échouer le filtre dans Logstash (_de_dot_error) ; la traduction le remplace par un objet.');
+    } else if (!recursive && !nested) {
+      // Clé par clé, comme Logstash : la nouvelle clé remplace une clé existante du même nom
+      this.emit(`dd = ${this.root()}`);
+      this.open(`for_each(${this.root()}) -> |key, value|`);
+      this.emit(`if contains(key, ".") { dd = remove!(dd, [key]); dd = set!(dd, [replace(key, ".", ${vq(sep)})], value) }`);
+      this.close();
+      this.emit('. = dd');
+    } else if (!recursive && nested) {
+      // [a.b] → [a][b] ; un parent qui existe sans être un objet fait échouer le filtre et arrête le renommage
+      this.emit(`dd = ${this.root()}`);
+      this.emit('failed = false');
+      this.open(`for_each(${this.root()}) -> |key, value|`);
+      this.open('if !failed && contains(key, ".")');
+      this.emit('segs = split(key, ".")');
+      this.emit('parent = []');
+      this.emit('blocked = false');
+      this.emit('for_each(slice!(segs, 0, length(segs) - 1)) -> |_index, seg| { parent = push(parent, seg); x = get!(dd, parent); if x != null && !is_object(x) { blocked = true } }');
+      this.emit('if blocked { failed = true } else { dd = remove!(dd, [key]); dd = set!(dd, segs, value) }');
+      this.close();
+      this.close();
+      this.emit('. = dd');
+      this.open('if failed'); this.addTags([failTag]); this.close();
+      this.v.note('info', 'de_dot nested : ordre des clés', 'Logstash renomme les clés dans leur ordre d’arrivée et s’arrête au premier échec ; la traduction les parcourt dans l’ordre alphabétique. Le résultat ne diffère que si un renommage échoue.');
+    } else if (recursive && !nested) {
+      // Renommage à chaque niveau d’objet, jusqu’à 10 niveaux ; les objets rangés dans des tableaux ne sont pas visités
+      const DEPTH = 10;
+      const level = (x, d) => {
+        const renamed = `map_keys(${x}) -> |k${d}| { replace(k${d}, ".", ${vq(sep)}) }`;
+        return d + 1 < DEPTH ? `map_values(${renamed}) -> |v${d}| { if is_object(v${d}) { ${level(`object!(v${d})`, d + 1)} } else { v${d} } }` : renamed;
+      };
+      this.emit(`. = ${level(this.root(), 0)}`);
+      this.v.note('info', 'de_dot recursive', 'Les clés sont renommées jusqu’à 10 niveaux d’objets imbriqués ; au-delà, elles restent telles quelles. Si une clé renommée rencontre une clé du même nom (a.b et a_b), la valeur gardée peut différer de Logstash, qui suit l’ordre d’arrivée des clés.');
+    } else return this.ko(p, 'de_dot avec nested et recursive : à reprendre en VRL.');
+    this.treset(); this.types.set('.', 'obj');
+    this.common(s); this.ok();
+  }
+  /*
+   * syslog_pri : priorité (13 par défaut) → facility (priorité >> 3) et severity (priorité & 7), puis leurs noms.
+   * Champs ECS ([log][syslog][...]) ou historiques (syslog_*) selon ecs_compatibility. La priorité est lue comme le
+   * fait Ruby (to_i) : entier, flottant tronqué, chaîne lue jusqu’au premier caractère non numérique.
+   */
+  f_syslog_pri(s, p) {
+    const ecs = this.ecsOn(s);
+    const src = this.path(s.syslog_pri_field_name || (ecs ? '[log][syslog][priority]' : 'syslog_pri'));
+    const keys = ecs
+      ? { fc: '[log][syslog][facility][code]', sc: '[log][syslog][severity][code]', fl: '[log][syslog][facility][name]', sl: '[log][syslog][severity][name]' }
+      : { fc: 'syslog_facility_code', sc: 'syslog_severity_code', fl: 'syslog_facility', sl: 'syslog_severity' };
+    const FAC = ['kernel', 'user-level', 'mail', 'daemon', 'security/authorization', 'syslogd', 'line printer', 'network news', 'uucp', 'clock', 'security/authorization', 'ftp', 'ntp', 'log audit', 'log alert', 'clock', 'local0', 'local1', 'local2', 'local3', 'local4', 'local5', 'local6', 'local7'];
+    const SEV = ['emergency', 'alert', 'critical', 'error', 'warning', 'notice', 'informational', 'debug'];
+    const fac = s.facility_labels !== undefined ? lsList(s.facility_labels).map(String) : FAC;
+    const sev = s.severity_labels !== undefined ? lsList(s.severity_labels).map(String) : SEV;
+    this.emit('pri = 13');
+    this.emit(`raw = ${src}`);
+    this.open('if raw != null && raw != false');
+    this.emit('if is_array(raw) { raw = get!(raw, [0]) }');
+    this.emit('pri = 0');
+    this.open('if is_integer(raw)'); this.emit('pri = int!(raw)');
+    this.close('} else if is_float(raw) {'); this.ind++; this.emit('pri = to_int!(raw)');
+    this.close('} else if is_string(raw) {'); this.ind++;
+    // Ruby String#to_i : espaces en tête, signe, chiffres (soulignés permis entre chiffres), le reste ignoré
+    this.emit("m = parse_regex(string!(raw), r'^\\s*(?P<n>[+-]?\\d+(?:_\\d+)*)') ?? null");
+    this.emit('if m != null { pri = to_int(replace(string!(m.n), "_", "")) ?? 0 }');
+    this.close();
+    this.close();
+    // >> et & de Ruby sur un entier signé : division euclidienne par 8
+    this.emit('facility = to_int(floor(pri / 8))');
+    this.emit('severity = pri - facility * 8');
+    this.assign(this.path(keys.sc), 'severity'); this.assign(this.path(keys.fc), 'facility');
+    if (s.use_labels === undefined || truthy(s.use_labels)) {
+      this.open(`if facility > ${fac.length - 1}`);
+      this.addTags(['_syslogpriparsefailure']);
+      this.close('} else {'); this.ind++;
+      // Un indice négatif se lit depuis la fin, comme un tableau Ruby
+      this.emit(`labels = [${fac.map(vq).join(', ')}]`);
+      this.emit('i = if facility < 0 { length(labels) + facility } else { facility }');
+      this.emit(`name = get!(labels, [i])`);
+      this.emit(`if name != null { ${this.path(keys.fl)} = name }`);
+      this.emit(`sname = get!([${sev.map(vq).join(', ')}], [severity])`);
+      this.emit(`if sname != null { ${this.path(keys.sl)} = sname }`);
+      this.close();
+      this.tset(this.path(keys.fl), 'any'); this.tset(this.path(keys.sl), 'any');
+    }
+    this.common(s); this.ok();
+  }
+  /*
+   * clone : une copie de l’événement par type. En mode ECS, le type s’ajoute aux étiquettes (tags) ; sinon il devient
+   * le champ type. add_field, add_tag… ne valent que pour les copies. L’original et ses copies sortent ensemble, comme
+   * un split : la racine devient la liste des événements.
+   */
+  f_clone(s, p) {
+    const types = lsList(s.clones).map(String);
+    if (!types.length) { this.v.note('info', 'clone sans copie', 'clones est vide : Logstash ne crée aucune copie.'); this.ok(); return; }
+    const ecs = this.ecsOn(s);
+    this.emit(`orig = ${this.root()}`);
+    const names = [];
+    types.forEach((t, i) => {
+      this.emit('. = orig'); this.treset(); this.types.set('.', 'obj');
+      if (ecs) this.emit(`if is_array(.tags) { .tags = push(array!(.tags), ${vq(t)}) } else if .tags == null { .tags = [${vq(t)}] } else { .tags = [.tags, ${vq(t)}] }`);
+      else this.emit(`.type = ${vq(t)}`);
+      this.tset('.tags', 'any'); this.tset('.type', 'any');
+      this.common(s);
+      const n = `copie_${i + 1}`; this.emit(`${n} = .`); names.push(n);
+    });
+    this.emit(`. = [orig, ${names.join(', ')}]`);
+    this.treset(); this.types.delete('.'); this.splitDone = true;
+    if (this.depth > 0) this.v.note('warn', 'clone dans une condition', 'Après clone, la racine de l’événement devient une liste : placez les filtres suivants de la branche dans une étape séparée.');
+    this.v.note('info', 'clone → plusieurs événements', 'Le programme rend la liste [original, copies] : Vector émet un événement par élément, qui traverse la suite du pipeline.');
+    this.ok();
+  }
+  // environment : [@metadata][champ] = variable d’environnement (null si elle n’est pas définie)
+  f_environment(s) {
+    for (const [field, env] of lsPairs(s.add_metadata_from_env)) {
+      const name = String(env);
+      this.assign(vPathOf(['@metadata', String(field)], this.v.ns), `get_env_var(${vq(name)}) ?? null`);
+      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) this.v.env.add(name);
+    }
+    this.v.note('info', 'environment → get_env_var', 'Vector lit la variable dans son propre environnement, au moment du traitement : définissez-la dans le service Vector.');
+    this.common(s); this.ok();
+  }
+  /*
+   * bytes : « 10 MB », « 1,5 kB »… → nombre d’octets, arrondi. Puissances de 1024 (binary) ou de 1000 (metric) ;
+   * b et B comptent tous deux des octets, comme dans Logstash. Échec : tag_on_failure, la cible n’est pas écrite.
+   */
+  f_bytes(s, p) {
+    if (s.target === undefined) return this.ko(p, 'bytes sans target : Logstash n’a pas de champ cible par défaut et ne peut pas poser la valeur.');
+    const src = this.path(s.source || 'message'); const tgt = this.path(s.target);
+    const dec = String(s.decimal_separator || '.');
+    if (dec !== '.' && dec !== ',') return this.ko(p, `bytes : decimal_separator « ${dec} » invalide (Logstash n’accepte que . et ,).`);
+    const pow = String(s.conversion_method || 'binary') === 'metric' ? 1000 : 1024;
+    const mult = ['k', 'm', 'g', 't', 'p', 'e'].map((x, i) => `${vq(x)}: ${(pow ** (i + 1)).toLocaleString('en', { useGrouping: false })}.0`).join(', ');
+    const tags = s.tag_on_failure !== undefined ? lsList(s.tag_on_failure) : ['_bytesparsefailure'];
+    if (tags.length) this.emit('done = false');
+    this.open(`if is_string(${src})`);
+    // String#strip! modifie la chaîne lue sur place : Logstash rend le champ source sans ses espaces de bord,
+    // même quand la conversion échoue ensuite. Les ancres ^ et $ de Ruby valent pour chaque ligne.
+    this.emit(`bs = replace(string!(${src}), r'\\A[\\x00\\t\\n\\x0B\\x0C\\r ]+|[\\x00\\t\\n\\x0B\\x0C\\r ]+\\z', "")`);
+    this.emit(`${src} = bs`);
+    this.emit(`m = parse_regex(bs, r'(?m)^(?P<n>[0-9 _,.]*)[\\t\\n\\x0B\\x0C\\r ]*(?P<p>[kKmMgGtTpPeE]?)[bB]?$') ?? null`);
+    this.open(`if m != null && length(split(string!(m.n), ${vq(dec)})) <= 2`);
+    this.emit(`num = replace(replace(strip_whitespace(string!(m.n)), r'[^0-9${dec === '.' ? '.' : ','}]', ""), ${vq(dec)}, ".")`);
+    this.open('if num != ""');
+    // String#to_f de Ruby : « . » vaut 0
+    this.emit('f = to_float(num) ?? 0.0');
+    this.emit(`if m.p != "" { f = f * float!(get!({ ${mult} }, [downcase(string!(m.p))])) }`);
+    this.emit(`${tgt} = to_int(round(f))`);
+    this.common(s);
+    if (tags.length) this.emit('done = true');
+    this.close(); this.close(); this.close();
+    if (tags.length) { this.open('if !done'); this.failTags(tags); this.close(); }
+    this.tset(tgt, 'any'); this.ok();
+  }
+  // throttle dans une condition : le transform throttle de Vector ne se place pas sous une condition VRL
+  f_throttle(s, p) {
+    this.ko(p, 'throttle sous condition : le transform throttle de Vector s’applique à tout un flux. Sortez le filtre de la condition, ou routez d’abord les événements concernés (transform route).');
+  }
   f_xml(s) {
     this.approx('Forme de l’objet XML', 'parse_xml de Vector ne rend pas l’objet comme Logstash (attributs, texte des éléments, valeurs en tableaux) : vérifiez la forme attendue par la suite du traitement.');
     const src = this.path(s.source || 'message'); const t = this.tget(src);
@@ -780,16 +1074,11 @@ function moves_note(matches) { return matches.some(([, pats]) => lsList(pats).so
 const KO_HINTS = {
   ruby: 'Le code Ruby doit être réécrit en VRL (fonctions intégrées, closures for_each / map_values). Le code d’origine est recopié en commentaire.',
   aggregate: 'L’agrégation d’événements corrélés se fait avec le transform reduce de Vector (group_by, merge_strategies, ends_when).',
-  clone: 'Pour dupliquer un flux, branchez plusieurs transforms sur la même entrée dans la topologie Vector.',
-  throttle: 'Utilisez le transform throttle de Vector (threshold, window_secs, key_field).',
   metrics: 'Utilisez le transform log_to_metric de Vector.',
   elasticsearch: 'Les requêtes vers Elasticsearch pendant le traitement n’ont pas d’équivalent ; préférez une table d’enrichissement.',
   jdbc_streaming: 'Préférez une table d’enrichissement (fichier CSV mis à jour périodiquement) aux requêtes SQL par événement.',
   jdbc_static: 'Exportez la table de référence en CSV et déclarez-la comme table d’enrichissement.',
   http: 'Les appels HTTP par événement n’ont pas d’équivalent dans un transform Vector.',
-  prune: 'Utilisez filter/for_each sur l’objet racine en VRL pour ne garder que certaines clés.',
-  de_dot: 'Parcourez les clés avec map_keys(., recursive: true) pour remplacer les points.',
-  syslog_pri: 'Décodez la priorité avec parse_syslog ou un calcul facility = pri / 8, severity = pri % 8.',
   memcached: 'Pas d’équivalent : préférez une table d’enrichissement.',
   sleep: 'Pas d’équivalent : inutile dans Vector.'
 };
@@ -845,16 +1134,26 @@ function isoParse(x, tz) {
   return `${forms.join(' ?? ')} ?? parse_timestamp(${x} + "T00:00:00", "%Y-%m-%dT%H:%M:%S"${tz || ''}) ?? null`;
 }
 function codecOf(c) { if (!c) return null; if (typeof c === 'string') return c; if (isObj(c)) return c.__plugin; return null; }
-function buildSource(v, st, cfg, idx, used) {
+function buildSource(v, st, cfg, idx, used, opts) {
   const s = lsSettings(st); const name = uniq(used, compName(s.id || (st.name === 'kafka' ? 'kafka_in' : st.name + '_in')));
   let src;
+  // Entrée pipeline { address } : les événements viennent d’un autre pipeline du même pipelines.yml
+  if (st.name === 'pipeline') {
+    const address = s.address === undefined ? '' : String(s.address);
+    if (!opts || !opts.pipelineIO) { v.stats.ko++; v.note('err', `Entrée pipeline non traduite (ligne ${st.line})`, `Les événements de l’adresse « ${address} » viennent d’un autre pipeline : traduisez l’ensemble depuis pipelines.yml (passerelle ls2vector pipelines.yml), qui relie les pipelines entre eux.`); return null; }
+    if (!address) { v.stats.ko++; v.note('err', `Entrée pipeline sans adresse (ligne ${st.line})`, 'address est obligatoire : Logstash refuse la configuration.'); return null; }
+    v.stats.ok++;
+    return { name, src: { type: '__pipeline', address, __label: `pipeline ${address}`, __detail: 'liaison entre pipelines', __pipeline: true }, s };
+  }
   if (st.name === 'kafka') {
     src = { type: 'kafka' };
     src.bootstrap_servers = cfg.kafka.bootstrap_servers || s.bootstrap_servers || 'localhost:9092';
-    let group = cfg.kafka.consumer_group || s.group_id || 'logstash';
+    // Ensemble de pipelines : les réglages kafka.consumer_group et input_topics ne visent qu’une source Kafka unique
+    const own = !opts || opts.singleKafkaInput !== false;
+    let group = (own && cfg.kafka.consumer_group) || s.group_id || 'logstash';
     if (cfg.vector.shadow_mode) group += '-shadow';
     src.group_id = group;
-    const topics = cfg.kafka.input_topics && cfg.kafka.input_topics.length ? cfg.kafka.input_topics : s.topics_pattern ? ['^' + String(s.topics_pattern).replace(/^\^/, '')] : lsList(s.topics || 'logstash');
+    const topics = own && cfg.kafka.input_topics && cfg.kafka.input_topics.length ? cfg.kafka.input_topics : s.topics_pattern ? ['^' + String(s.topics_pattern).replace(/^\^/, '')] : lsList(s.topics || 'logstash');
     src.topics = topics;
     if (s.auto_offset_reset) src.auto_offset_reset = s.auto_offset_reset;
     if (s.session_timeout_ms) src.session_timeout_ms = +s.session_timeout_ms;
@@ -893,13 +1192,55 @@ function buildSource(v, st, cfg, idx, used) {
     if (src.__json && !v.ns) src.decoding = { codec: 'json' };
     // Le VRL de préparation suppose le namespace de logs, quelle que soit la source
     if (v.ns) src.log_namespace = true;
+    if (['beats', 'tcp', 'http'].includes(st.name)) listenTLS(v, s, src, st.name);
     v.stats.ok++;
     v.note('info', `Entrée ${st.name}`, `Traduite en source ${src.type}. Le sujet de la migration étant Kafka, vérifiez les options réseau.`);
   }
   return { name, src, s };
 }
+/*
+ * TLS d’une source qui écoute (beats, tcp, http) : options ssl_* de l’entrée Logstash → tls de la source Vector.
+ * Sans TLS, tout hôte qui atteint le port peut injecter des événements : c’est signalé « à vérifier ».
+ */
+function listenTLS(v, s, src, name) {
+  const on = truthy(s.ssl_enabled) || truthy(s.ssl);
+  const addr = src.address;
+  if (!on) {
+    v.stats.approx++;
+    v.note('warn', `Entrée ${name} sans TLS`, `Vector écoutera sur ${addr} en clair, comme le pipeline d’origine : tout hôte qui atteint ce port peut y envoyer des événements. Activez ssl_enabled (ssl_certificate, ssl_key) côté Logstash, ou limitez l’adresse d’écoute et le pare-feu.`);
+    return;
+  }
+  const tls = { enabled: true };
+  const keystore = s.ssl_keystore_path || s.keystore;
+  const pair = s.ssl_certificate && s.ssl_key;
+  if (pair) { tls.crt_file = String(s.ssl_certificate); tls.key_file = String(s.ssl_key); }
+  else {
+    // Vector ne lit que du PEM : sans certificat et clé PEM, des chemins à remplir sont posés plutôt qu’une source qui n’accepterait aucun client
+    tls.crt_file = '/etc/vector/certs/tls.crt'; tls.key_file = '/etc/vector/certs/tls.key';
+    v.stats.approx++;
+    v.note('warn', `TLS de l’entrée ${name} : certificat à fournir`, keystore
+      ? `${keystore} (JKS ou PKCS12) se convertit en PEM pour Vector (keytool -importkeystore puis openssl pkcs12 -nodes) ; renseignez ensuite tls.crt_file et tls.key_file, posés ici sur ${tls.crt_file} et ${tls.key_file}.`
+      : `ssl_certificate et ssl_key (PEM) sont nécessaires : tls.crt_file et tls.key_file sont posés sur ${tls.crt_file} et ${tls.key_file}.`);
+  }
+  if (s.ssl_key_passphrase !== undefined) tls.key_pass = secretRef(v, s.ssl_key_passphrase, 'LOGSTASH_SSL_KEY_PASS', 'Phrase secrète de la clé TLS');
+  const cas = lsList(s.ssl_certificate_authorities);
+  if (cas.length) tls.ca_file = String(cas[0]);
+  if (cas.length > 1) { v.stats.approx++; v.note('warn', 'Plusieurs autorités de certification', `Vector lit un seul fichier : concaténez ${cas.join(', ')} en un seul PEM.`); }
+  // Authentification des clients : ssl_client_authentication (none, optional, required) ou l’ancien ssl_verify_mode (none, peer, force_peer)
+  const mode = String(s.ssl_client_authentication || s.ssl_verify_mode || 'none').toLowerCase();
+  if (mode === 'required' || mode === 'force_peer') {
+    tls.verify_certificate = true;
+    if (!tls.ca_file) v.note('info', `Certificats clients de l’entrée ${name}`, 'Aucune ssl_certificate_authorities : Vector vérifiera les certificats clients avec les autorités du système.');
+  } else if (mode === 'optional' || mode === 'peer') {
+    tls.verify_certificate = true;
+    v.stats.approx++;
+    v.note('warn', `Certificat client de l’entrée ${name}`, 'Logstash acceptait aussi les clients sans certificat (optional) ; Vector n’a pas ce mode : le certificat client est exigé.');
+  }
+  if (s.ssl_cipher_suites || s.ssl_supported_protocols) v.note('info', `Suites et protocoles TLS de l’entrée ${name}`, 'ssl_cipher_suites et ssl_supported_protocols ne sont pas repris : Vector applique ses valeurs par défaut (TLS 1.2 et suivants).');
+  src.tls = tls;
+}
 function uniq(used, base) { let n = base, i = 2; while (used.has(n)) n = `${base}_${i++}`; used.add(n); return n; }
-function buildSink(v, st, cfg, used, singleKafka) {
+function buildSink(v, st, cfg, used, singleKafka, opts) {
   const s = lsSettings(st);
   const tplOf = t => String(t).replace(/%\{([^}]+)\}/g, (m, ref) => {
     if (ref.startsWith('+')) return joda2strf(ref.slice(1));
@@ -934,6 +1275,44 @@ function buildSink(v, st, cfg, used, singleKafka) {
     return { name, sink };
   }
   const name = uniq(used, compName(s.id || st.name + '_out'));
+  // Sortie pipeline { send_to } : reliée à l’entrée du pipeline destinataire, sans sink Vector
+  if (st.name === 'pipeline') {
+    const to = lsList(s.send_to).map(String).filter(Boolean);
+    if (!opts || !opts.pipelineIO) { v.stats.ko++; v.note('err', `Sortie pipeline non traduite (ligne ${st.line})`, `Les événements partent vers ${to.length ? to.map(x => `« ${x} »`).join(', ') : 'un autre pipeline'} : traduisez l’ensemble depuis pipelines.yml (passerelle ls2vector pipelines.yml), qui relie les pipelines entre eux.`); return null; }
+    if (!to.length) { v.stats.ko++; v.note('err', `Sortie pipeline sans send_to (ligne ${st.line})`, 'send_to est obligatoire : Logstash refuse la configuration.'); return null; }
+    v.stats.ok++;
+    return { name, sink: { type: '__pipeline', inputs: [], send_to: to, __label: `pipeline → ${to.join(', ')}` } };
+  }
+  // Sortie elasticsearch → ClickHouse (vector.elasticsearch_output: clickhouse) : mise en forme, puis sink clickhouse
+  if (st.name === 'elasticsearch' && cfg.vector.elasticsearch_output === 'clickhouse') {
+    const ds = s.data_stream === undefined ? '' : String(s.data_stream).toLowerCase();
+    let index;
+    if (ds === 'true') index = `${s.data_stream_type || 'logs'}-${s.data_stream_dataset || 'generic'}-${s.data_stream_namespace || 'default'}`;
+    else {
+      const raw = String(s.index || 'logstash-%{+yyyy.MM.dd}');
+      if (!/%\{/.test(raw)) index = raw;
+      else {
+        const pre = []; const parts = []; let last = 0; let n = 0; let ts = false; let m; const re = /%\{([^}]+)\}/g;
+        while ((m = re.exec(raw))) {
+          if (m.index > last) parts.push(vq(raw.slice(last, m.index)));
+          if (m[1].startsWith('+')) {
+            if (!ts) { pre.push('ts = now()', 'tv = ."@timestamp"', 'if is_timestamp(tv) {', '  ts = tv', '} else if is_string(tv) {', '  ts = parse_timestamp(string!(tv), "%+") ?? now()', '}'); ts = true; }
+            pre.push(`d${++n} = format_timestamp!(ts, format: ${vq(joda2strf(m[1].slice(1)))}, timezone: "UTC")`);
+          } else pre.push(`d${++n} = to_string(${vPathOf(fieldSegs(m[1]), v.ns)}) ?? ""`);
+          parts.push(`d${n}`); last = re.lastIndex;
+        }
+        if (last < raw.length) parts.push(vq(raw.slice(last)));
+        index = { pre, expr: parts.join(' + ') };
+      }
+    }
+    for (const o of ['action', 'document_id', 'pipeline', 'script', 'routing', 'parent', 'doc_as_upsert', 'upsert']) {
+      if (s[o] !== undefined && !(o === 'action' && String(s[o]) === 'index')) { v.stats.approx++; v.note('warn', `Option ${o} non reprise (sortie ClickHouse)`, `L’option ${o} de la sortie elasticsearch n’a pas d’équivalent dans l’écriture ClickHouse : chaque événement est ajouté à la table (INSERT), sans identifiant de document.`); }
+    }
+    const r = clickhouseOutput(v, cfg, index, 'Sortie elasticsearch');
+    for (const [lv, t, d] of r.notes) v.note(lv, t, d);
+    r.sink.__label = `ClickHouse ${r.tables.join(', ')}`; v.stats.ok++;
+    return { name, sink: r.sink, pre: { name: uniq(used, `${name}_lignes`), source: r.shape } };
+  }
   const others = {
     elasticsearch: () => elasticsearchSink(v, s, tplOf),
     stdout: () => ({ type: 'console', inputs: [], encoding: { codec: 'json' } }),
@@ -1094,18 +1473,55 @@ function flatOutputs(stmts, conds, out) {
   }
   return out;
 }
-function translateLogstash(src, cfg) {
-  try { return translatePipeline(src, cfg); }
+/*
+ * throttle de Logstash : compte les événements par clé et par tranche de « period » secondes (horodatage de
+ * l’événement), et applique add_tag, add_field… à ceux qui dépassent after_count. Le filtre ne supprime rien : un
+ * « if "étiquette" in [tags] { drop {} } » le suit d’ordinaire. Le transform throttle de Vector supprime directement
+ * ce qui dépasse le seuil, sur une fenêtre glissante de temps de traitement : il ne vaut que si l’étiquette sert à
+ * supprimer, ce qui est vérifié dans la suite du pipeline.
+ */
+function throttleTransform(v, st, rest) {
+  const s = lsSettings(st);
+  const ko = why => { v.stats.ko++; v.note('err', `Filtre throttle non traduit (ligne ${st.line})`, why); return { threshold: 1, window_secs: 1, __ko: true }; };
+  if (s.before_count !== undefined && +s.before_count !== -1) return ko('before_count marque les premiers événements de chaque tranche : le transform throttle de Vector ne sait que limiter ceux qui dépassent un seuil.');
+  if (s.after_count === undefined || +s.after_count === -1) return ko('throttle sans after_count : rien n’est marqué, aucun équivalent à produire.');
+  const period = String(s.period === undefined ? '60' : s.period);
+  if (/%\{/.test(period)) return ko('period calculée pour chaque événement : la fenêtre du transform throttle est fixe.');
+  const window = parseInt(period, 10) || 60;
+  const tags = lsList(s.add_tag).map(String);
+  // L’étiquette sert-elle à supprimer ? « if "x" in [tags] { drop {} } » dans la suite du pipeline
+  const drops = tag => rest.some(function walk(x) {
+    if (!x) return false;
+    if (x.k === 'if') return x.branches.some(b => (b.cond && JSON.stringify(b.cond).includes(JSON.stringify(tag)) && b.body.some(y => y.k === 'plugin' && y.name === 'drop')) || b.body.some(walk));
+    return false;
+  });
+  const dropped = tags.length && tags.every(drops);
+  const key = s.key === undefined ? null : String(s.key).replace(/%\{([^}]+)\}/g, (m, ref) => `{{ ${vPathOf(fieldSegs(ref), v.ns).replace(/^\./, '')} }}`);
+  const out = { threshold: Math.max(0, parseInt(s.after_count, 10)), window_secs: window };
+  if (key) out.key_field = key;
+  if (!dropped) {
+    v.stats.ko++;
+    v.note('err', `Filtre throttle non traduit (ligne ${st.line})`, `Logstash étiquette${tags.length ? ` (${tags.join(', ')})` : ''} les événements au-delà de ${s.after_count} par ${window} s sans les supprimer, et la suite du pipeline les garde. Le transform throttle de Vector les supprimerait : il est proposé ici, à n’activer que si ces événements doivent disparaître.`);
+  } else {
+    v.stats.approx++;
+    v.note('warn', 'throttle → transform throttle', `Les événements au-delà de ${out.threshold} par ${window} s${key ? ` et par ${key}` : ''} sont supprimés par Vector, comme le faisait le drop sur l’étiquette ${tags.join(', ')}. Différence : Vector compte sur une fenêtre glissante, à l’heure de traitement, là où Logstash découpe des tranches fixes selon l’horodatage des événements.`);
+  }
+  if (s.max_counters !== undefined || s.max_age !== undefined) v.note('info', 'throttle : max_age, max_counters', 'Vector gère seul la mémoire de ses compteurs : ces réglages n’ont pas d’équivalent.');
+  return out;
+}
+function translateLogstash(src, cfg, opts) {
+  try { return translatePipeline(src, cfg, opts || {}); }
   catch (e) {
     // Une construction hors de portée (pile épuisée) ne doit pas devenir une erreur interne du service
     if (e instanceof RangeError) return { error: 'Pipeline trop imbriqué pour être traduit.' };
     throw e;
   }
 }
-function translatePipeline(src, cfg) {
+function translatePipeline(src, cfg, opts) {
+  opts = opts || {};
   const notes = makeNotes();
   // Compatibilité ECS : celle de la configuration (v8 par défaut, comme Logstash 8 et suivants), sauf réglage du plugin
-  const v = { ns: cfg.vector.log_namespace !== false, compat: !!cfg.vector.logstash_compat, ecs: String(cfg.vector.ecs_compatibility || 'v8') !== 'disabled', stats: { ok: 0, approx: 0, ko: 0 }, enrich: {}, env: new Set(), note: (l, t, d, c) => notes.add(l, t, d, c) };
+  const v = { ns: cfg.vector.log_namespace !== false, compat: !!cfg.vector.logstash_compat, ecs: String(cfg.vector.ecs_compatibility || 'v8') !== 'disabled', stats: { ok: 0, approx: 0, ko: 0 }, enrich: {}, env: new Set(), refN: 0, note: (l, t, d, c) => notes.add(l, t, d, c) };
   let ast;
   try { ast = parseLogstash(src); }
   catch (e) { return { error: e.message }; }
@@ -1115,7 +1531,7 @@ function translatePipeline(src, cfg) {
   const srcList = [];
   ast.input.forEach((st, i) => {
     if (st.k !== 'plugin') { v.note('warn', 'Condition dans input', 'Les conditions de la section input sont ignorées.'); return; }
-    const r = buildSource(v, st, cfg, i, used); if (r) srcList.push(r);
+    const r = buildSource(v, st, cfg, i, used, opts); if (r) srcList.push(r);
   });
   if (!srcList.length) { const r = { name: uniq(used, 'kafka_in'), src: { type: 'kafka', bootstrap_servers: cfg.kafka.bootstrap_servers || 'localhost:9092', group_id: cfg.kafka.consumer_group || 'vector', topics: cfg.kafka.input_topics.length ? cfg.kafka.input_topics : ['logs'], decoding: { codec: 'json' }, __label: 'logs', __detail: 'source par défaut' }, s: {} }; if (v.ns) r.src.log_namespace = true; srcList.push(r); v.note('warn', 'Aucune entrée', 'Une source Kafka par défaut a été ajoutée.'); }
   let prev = [];
@@ -1127,7 +1543,14 @@ function translatePipeline(src, cfg) {
     const g = new VrlGen(v);
     // Mode ECS : les codecs de Logstash gardent la ligne reçue dans [event][original]
     const original = v.ns && g.ecsOn(r.s);
-    if (v.ns && r.src.__plain) {
+    if (r.src.__pipeline) {
+      // L’événement arrive déjà décodé ; la finalisation du pipeline expéditeur a écrit @timestamp en texte
+      if (cfg.vector.logstash_compat) {
+        g.comment('Événement reçu d’un autre pipeline : @timestamp redevient une date, comme dans Logstash');
+        g.open('if is_string(."@timestamp")'); g.emit('."@timestamp" = parse_timestamp(string!(."@timestamp"), "%+") ?? ."@timestamp"'); g.close();
+      }
+    }
+    else if (v.ns && r.src.__plain) {
       g.comment('Codec plain : le message brut devient le champ message, comme dans Logstash');
       g.emit(original ? '. = { "message": ., "event": { "original": . } }' : '. = { "message": . }');
     }
@@ -1159,6 +1582,20 @@ function translatePipeline(src, cfg) {
   // Filtres
   let pending = [];
   ast.filter.forEach((st, idx) => {
+    // throttle au premier niveau : le transform throttle de Vector, qui limite le flux par clé
+    if (st.k === 'plugin' && st.name === 'throttle') {
+      const t = throttleTransform(v, st, ast.filter.slice(idx + 1));
+      if (t) {
+        const s0 = lsSettings(st);
+        const tn = uniq(used, compName(s0.id || 'throttle'));
+        const { __ko, ...cfgT } = t;
+        transforms[tn] = Object.assign({ type: 'throttle', inputs: prev.slice() }, cfgT);
+        graph.nodes.push({ id: tn, kind: 'transform', type: 'throttle', label: 'throttle', detail: `${t.threshold} par ${t.window_secs} s${t.key_field ? `, par ${t.key_field}` : ''}` });
+        prev.forEach(x => graph.edges.push([x, tn]));
+        prev = [tn];
+        return;
+      }
+    }
     const g = new VrlGen(v);
     pending.forEach(l => g.lines.push(l)); pending = [];
     g.stmt(st);
@@ -1207,7 +1644,8 @@ function translatePipeline(src, cfg) {
   if (hasConds) routeName = uniq(used, 'routage');
   let ri = 0;
   for (const o of outs) {
-    const r = buildSink(v, o.plugin, cfg, used, kafkaOuts === 1);
+    // Ensemble de pipelines : kafka.output_topic ne remplace le topic que s’il n’y a qu’une sortie Kafka dans tout l’ensemble
+    const r = buildSink(v, o.plugin, cfg, used, opts.singleKafka !== undefined ? opts.singleKafka : kafkaOuts === 1, opts);
     if (!r) continue;
     let input = prev.slice();
     if (o.conds.length) {
@@ -1215,6 +1653,12 @@ function translatePipeline(src, cfg) {
       let rn = condCache.get(key);
       if (!rn) { rn = compName(r.sink.__label || `route_${++ri}`).slice(0, 40) || `route_${++ri}`; while (routes[rn]) rn += '_b'; routes[rn] = key; condCache.set(key, rn); }
       input = [`${routeName}.${rn}`];
+    }
+    if (r.pre) {
+      transforms[r.pre.name] = { type: 'remap', inputs: input, source: r.pre.source };
+      graph.nodes.push({ id: r.pre.name, kind: 'transform', type: 'remap', label: 'Mise en forme ClickHouse', detail: 'colonnes de la table' });
+      input.forEach(i => graph.edges.push([i.split('.')[0], r.pre.name]));
+      input = [r.pre.name];
     }
     r.sink.inputs = input;
     const label = r.sink.__label; delete r.sink.__label;
@@ -1229,6 +1673,26 @@ function translatePipeline(src, cfg) {
     v.note('info', 'Conditions de sortie → route', 'Les if/else de la section output deviennent un transform route ; chaque branche est une condition VRL exclusive.');
   }
   if (!Object.keys(sinks).length) v.note('err', 'Aucune sortie', 'Le pipeline n’a pas de sortie traduisible.');
+  // Pipeline d’un ensemble (pipelines.yml) : la configuration est assemblée avec les autres, puis écrite une fois
+  if (opts.pipelineIO) return { parts: { sources, transforms, sinks, enrich: v.enrich }, v, notes: notes.list, stats: v.stats, graph, env: [...v.env], srcList, prev };
+  const { config, yaml, toml } = vectorDocument(v, { sources, transforms, sinks, enrich: v.enrich }, cfg, 'depuis un pipeline Logstash');
+  const order = { err: 0, warn: 1, opt: 2, info: 3 };
+  notes.list.sort((a, b) => order[a.level] - order[b.level]);
+  const inTopics = srcList.map(r => r.src.__label).join(', ');
+  const outLabels = graph.nodes.filter(nd => nd.kind === 'sink').map(nd => nd.label);
+  const steps = graph.nodes.filter(nd => nd.kind === 'transform' && nd.type === 'remap' && !['Préparation', 'Finalisation'].includes(nd.label));
+  const group = srcList[0] && srcList[0].src.group_id;
+  const sentenceTxt = `Lit ${inTopics}${group ? ` (groupe ${group})` : ''}, applique ${steps.length} étape${steps.length > 1 ? 's' : ''}${steps.length ? ` (${[...new Set(steps.map(x => x.label))].join(', ')})` : ''}, puis écrit ${outLabels.length > 1 ? `selon des conditions vers ${outLabels.slice(0, -1).join(', ')} ou ${outLabels[outLabels.length - 1]}` : `vers ${outLabels[0] || '—'}`}.`;
+  const first = Object.keys(transforms)[0]; const last = prev[0];
+  return { config, yaml, toml, notes: notes.list, stats: v.stats, graph, sentence: sentenceTxt, env: [...v.env], firstTransform: first, lastTransform: last };
+}
+
+/*
+ * Configuration Vector complète, à partir des composants d’un pipeline ou d’un ensemble de pipelines : $ doublés,
+ * notes communes (API, accusés de réception, namespace), en-tête, YAML et TOML.
+ */
+function vectorDocument(v, parts, cfg, origin) {
+  const { sources, transforms, sinks } = parts;
   // Vector interpole ${VAR} et $VAR dans tout le fichier : les $ du code VRL sont doublés
   let dollar = false;
   const esc = x => { if (x.includes('$')) { dollar = true; return x.replace(/\$/g, '$$$$'); } return x; };
@@ -1243,26 +1707,29 @@ function translatePipeline(src, cfg) {
   // L’API de Vector n’a pas d’authentification : elle n’écoute que sur la boucle locale, ce qui suffit à « vector top »
   const config = { data_dir: '/var/lib/vector', api: { enabled: true, address: '127.0.0.1:8686' } };
   v.note('info', 'API Vector sur la boucle locale', 'L’API de Vector (vector top, santé) écoute sur 127.0.0.1:8686 : elle n’a pas d’authentification et ne doit pas être joignable du réseau. Dans un conteneur, pour l’atteindre depuis l’hôte, remplacez l’adresse par 0.0.0.0:8686 et ne publiez le port que sur une interface de confiance.');
-  if (Object.keys(v.enrich).length) config.enrichment_tables = v.enrich;
+  if (Object.keys(parts.enrich || {}).length) config.enrichment_tables = parts.enrich;
   config.sources = sources; config.transforms = transforms; config.sinks = sinks;
   if (!Object.keys(transforms).length) delete config.transforms;
-  if (cfg.vector.acknowledgements) v.note('opt', 'Accusés de réception de bout en bout', 'Les offsets Kafka ne sont validés qu’après l’écriture dans le topic de sortie : aucun message perdu en cas d’arrêt brutal.');
+  if (cfg.vector.acknowledgements) {
+    // Le texte suit les composants réels : seules certaines sources de Vector savent attendre l’écriture
+    const srcTypes = Object.values(sources).map(x => x.type); const sinkTypes = Object.values(sinks).map(x => x.type);
+    const where = sinkTypes.length && sinkTypes.every(t => t === 'kafka') ? 'l’écriture dans le topic de sortie' : 'l’écriture par les sorties';
+    const ACK = ['kafka', 'logstash', 'http_server', 'file', 'journald', 'opentelemetry', 'splunk_hec', 'fluent', 'vector', 'amqp', 'aws_s3', 'aws_sqs'];
+    const without = [...new Set(srcTypes.filter(t => !ACK.includes(t)))];
+    const text = srcTypes.length && srcTypes.every(t => t === 'kafka')
+      ? `Les offsets Kafka ne sont validés qu’après ${where} : aucun message perdu en cas d’arrêt brutal.`
+      : `Les sources n’accusent réception qu’après ${where}` + (without.length ? ` ; ${without.join(', ')} n’ont pas d’accusé de réception et peuvent perdre des événements en cas d’arrêt brutal.` : ' : aucun événement perdu en cas d’arrêt brutal.');
+    v.note('opt', 'Accusés de réception de bout en bout', text);
+  }
   if (cfg.vector.shadow_mode) v.note('info', 'Mode shadow', 'Le groupe de consommateurs et les topics de sortie sont suffixés par -shadow : Vector tourne en parallèle de Logstash sans lui prendre de partitions.');
   if (v.ns) v.note('info', 'Namespace de logs', 'log_namespace isole les métadonnées Kafka (topic, offset, clé) de la charge utile : les messages écrits restent identiques à ceux de Logstash.');
-  const header = `Configuration Vector générée par Passerelle depuis un pipeline Logstash\nVérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>${interpolation ? '\nVector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)' : ''}${v.env.size ? `\nVariables d’environnement attendues : ${[...v.env].join(', ')}` : ''}${v.enrich.geoip ? `\nBase geoip à fournir : ${v.enrich.geoip.path} (sans elle, Vector refuse le VRL : error[E401])` : ''}`;
+  // Les bases MaxMind lues au démarrage : sans elles, Vector refuse le VRL (error[E401])
+  const mmdb = Object.values(parts.enrich || {}).filter(t => t && t.type === 'geoip').map(t => t.path);
+  const header = `Configuration Vector générée par Passerelle ${origin}\nVérification complète (VRL compilé) : vector validate --skip-healthchecks <fichier>${interpolation ? '\nVector 0.57 et suivants : lancer avec --dangerously-allow-env-var-interpolation (variables d’environnement, symboles $ doublés)' : ''}${v.env.size ? `\nVariables d’environnement attendues : ${[...v.env].join(', ')}` : ''}${mmdb.length ? `\nBase${mmdb.length > 1 ? 's' : ''} geoip à fournir : ${mmdb.join(', ')} (sans ${mmdb.length > 1 ? 'elles' : 'elle'}, Vector refuse le VRL : error[E401])` : ''}`;
   const yaml = header.split('\n').map(l => '# ' + l).join('\n') + '\n\n' + toYAML(config) + '\n';
   const toml = header.split('\n').map(l => '# ' + l).join('\n') + '\n\n' + toTOML(config) + '\n';
-  const order = { err: 0, warn: 1, opt: 2, info: 3 };
-  notes.list.sort((a, b) => order[a.level] - order[b.level]);
-  const inTopics = srcList.map(r => r.src.__label).join(', ');
-  const outLabels = graph.nodes.filter(nd => nd.kind === 'sink').map(nd => nd.label);
-  const steps = graph.nodes.filter(nd => nd.kind === 'transform' && nd.type === 'remap' && !['Préparation', 'Finalisation'].includes(nd.label));
-  const group = srcList[0] && srcList[0].src.group_id;
-  const sentenceTxt = `Lit ${inTopics}${group ? ` (groupe ${group})` : ''}, applique ${steps.length} étape${steps.length > 1 ? 's' : ''}${steps.length ? ` (${[...new Set(steps.map(x => x.label))].join(', ')})` : ''}, puis écrit ${outLabels.length > 1 ? `selon des conditions vers ${outLabels.slice(0, -1).join(', ')} ou ${outLabels[outLabels.length - 1]}` : `vers ${outLabels[0] || '—'}`}.`;
-  const first = Object.keys(transforms)[0]; const last = prev[0];
-  return { config, yaml, toml, notes: notes.list, stats: v.stats, graph, sentence: sentenceTxt, env: [...v.env], firstTransform: first, lastTransform: last };
+  return { config, yaml, toml };
 }
-
 /* ---------- Sérialisation ---------- */
 function yq(s) { return "'" + String(s).replace(/'/g, "''") + "'"; }
 function yamlKey(k) { return /^[A-Za-z0-9_][A-Za-z0-9_.\-]*$/.test(k) ? k : yq(k); }
@@ -1320,6 +1787,16 @@ function parseYAMLConfig(text) {
     if (/^".*"$/.test(s)) return JSON.parse(s);
     if (/^\[.*\]$/.test(s)) { const inner = s.slice(1, -1).trim(); return inner ? inner.split(/,(?=(?:[^']*'[^']*')*[^']*$)/).map(scalar) : []; }
     if (s === '{}') return {};
+    // Table en ligne : { clé: valeur, 'autre clé': [a, b] }
+    if (/^\{.*\}$/.test(s)) {
+      const out = {};
+      for (const pair of splitTopArgs(s.slice(1, -1))) {
+        const kv = /^('[^']*'|"[^"]*"|[^:]+):\s*(.*)$/.exec(pair.trim());
+        if (!kv) throw new Error(`table en ligne illisible : ${s}`);
+        out[scalar(kv[1])] = scalar(kv[2]);
+      }
+      return out;
+    }
     if (/^(true|false)$/.test(s)) return s === 'true';
     if (/^-?\d+(\.\d+)?$/.test(s)) return Number(s);
     return s;

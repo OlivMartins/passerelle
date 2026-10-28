@@ -1,0 +1,13 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  de_dot:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # de_dot
+      dd = object!(.)
+      for_each(object!(.)) -> |key, value| {
+        if contains(key, ".") { dd = remove!(dd, [key]); dd = set!(dd, [replace(key, ".", "__")], value) }
+      }
+      . = dd

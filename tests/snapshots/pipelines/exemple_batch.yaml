@@ -1,6 +1,5 @@
 # Couverture : 8 directs, 0 à vérifier, 1 à reprendre
 # À reprendre : Filtre ruby non traduit (ligne 10)
-# À vérifier : Référence %{champ}
 # À vérifier : Tableaux dans mutate
 # À vérifier : Conversion impossible dans mutate
 # À vérifier : Vector 0.57 et suivants : interpolation à activer
@@ -26,7 +25,9 @@ transforms:
     inputs: [dissect]
     source: |
       # mutate
-      if exists(.date_time) { .date_time = push(array(.date_time) ?? [.date_time], (to_string(.date) ?? join(.date, ",") ?? encode_json(.date)) + " " + (to_string(.time) ?? join(.time, ",") ?? encode_json(.time))) } else { .date_time = (to_string(.date) ?? join(.date, ",") ?? encode_json(.date)) + " " + (to_string(.time) ?? join(.time, ",") ?? encode_json(.time)) }
+      ref_1 = if .date == null { "%{date}" } else if is_array(.date) { (join(map_values(flatten(array!(.date))) -> |item| { if item == null { "" } else { to_string(item) ?? encode_json(item) } }, ",") ?? "") } else { to_string(.date) ?? encode_json(.date) }
+      ref_2 = if .time == null { "%{time}" } else if is_array(.time) { (join(map_values(flatten(array!(.time))) -> |item| { if item == null { "" } else { to_string(item) ?? encode_json(item) } }, ",") ?? "") } else { to_string(.time) ?? encode_json(.time) }
+      if exists(.date_time) { .date_time = push(array(.date_time) ?? [.date_time], ref_1 + " " + ref_2) } else { .date_time = ref_1 + " " + ref_2 }
   date:
     type: remap
     inputs: [mutate]

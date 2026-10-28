@@ -1,0 +1,56 @@
+PUT catalogue
+{
+  "settings": {
+    "analysis": {
+      "char_filter": {
+        "sans_html": { "type": "html_strip" },
+        "normalise_sku": { "type": "pattern_replace", "pattern": "[-_ ]+", "replacement": "" }
+      },
+      "filter": {
+        "elision_fr": { "type": "elision", "articles": ["l", "d", "qu", "j", "n", "s", "c", "m", "t"] },
+        "mots_vides": { "type": "stop", "stopwords": ["le", "la", "les", "un", "une", "des", "de", "du", "et"] },
+        "debut_de_mot": { "type": "edge_ngram", "min_gram": 2, "max_gram": 8 },
+        "equivalences": { "type": "synonym", "synonyms": ["tv, télé, téléviseur", "pc => ordinateur"] }
+      },
+      "analyzer": {
+        "francais": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "elision_fr", "asciifolding", "mots_vides"]
+        },
+        "autocompletion": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "asciifolding", "debut_de_mot"]
+        },
+        "reference": {
+          "type": "custom",
+          "char_filter": ["normalise_sku"],
+          "tokenizer": "keyword",
+          "filter": ["uppercase"]
+        },
+        "equivalents": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "equivalences"]
+        },
+        "descriptions": {
+          "type": "custom",
+          "char_filter": ["sans_html"],
+          "tokenizer": "standard",
+          "filter": ["lowercase", "stemmer"]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "@timestamp": { "type": "date" },
+      "titre": { "type": "text", "analyzer": "francais", "fields": { "debut": { "type": "text", "analyzer": "autocompletion", "search_analyzer": "standard" } } },
+      "reference": { "type": "text", "analyzer": "reference" },
+      "tags": { "type": "text", "analyzer": "equivalents" },
+      "description": { "type": "text", "analyzer": "descriptions" },
+      "prix": { "type": "scaled_float", "scaling_factor": 100 }
+    }
+  }
+}

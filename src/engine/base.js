@@ -8,6 +8,9 @@ const DEFAULT_CONFIG = {
     database: 'logs',
     user: '${CLICKHOUSE_USER}',
     password: '${CLICKHOUSE_PASSWORD}',
+    // Compte d’écriture de la sortie Vector (vector.elasticsearch_output: clickhouse) ; vide : user et password
+    sink_user: '',
+    sink_password: '',
     cluster: '',
     default_table: 'logs.events',
     time_field: 'timestamp',
@@ -19,7 +22,9 @@ const DEFAULT_CONFIG = {
     empty_as_missing: false,
     composite_mode: 'page',
     lists: { threshold: 0, table: '', names: {} },
-    text_match: 'tokens'
+    text_match: 'tokens',
+    // Profils par table : schéma, renommages et réglages propres à une table (voir tableConfig)
+    tables: {}
   },
   kafka: {
     bootstrap_servers: '',
@@ -32,19 +37,91 @@ const DEFAULT_CONFIG = {
     input_topics: [],
     output_topic: ''
   },
-  vector: { format: 'yaml', log_namespace: true, logstash_compat: true, acknowledgements: true, shadow_mode: false, ecs_compatibility: 'v8' }
+  // elasticsearch_output : clickhouse fait écrire une sortie elasticsearch dans la table ClickHouse visée par index_mapping
+  vector: { format: 'yaml', log_namespace: true, logstash_compat: true, acknowledgements: true, shadow_mode: false, ecs_compatibility: 'v8', elasticsearch_output: 'elasticsearch',
+    // Source qui reçoit Elastic Agent et Beats pour les pipelines d’ingestion ; TLS vide : écoute en clair, signalée
+    ingest_source: { address: '0.0.0.0:5044', tls: { crt_file: '', key_file: '', ca_file: '', verify_client: false } } }
 };
+// Tables de correspondance : leurs clés sont libres, et une valeur donnée remplace la valeur par défaut en entier
+const FREE_MAPS = ['index_mapping', 'field_mapping', 'columns', 'names', 'tables', 'attributes', 'attribute_types', 'analyzers'];
 
 function mergeConfig(base, over) {
   const out = clone(base);
   (function walk(dst, src) {
     if (!isObj(src)) return;
     for (const [k, v] of Object.entries(src)) {
-      if (isObj(v) && isObj(dst[k]) && !['index_mapping', 'field_mapping', 'columns', 'names'].includes(k)) walk(dst[k], v);
+      if (isObj(v) && isObj(dst[k]) && !FREE_MAPS.includes(k)) walk(dst[k], v);
       else if (v !== undefined) dst[k] = clone(v);
     }
   })(out, over);
   return out;
+}
+
+/*
+ * Profils par table.
+ *
+ * Une migration réelle vise plusieurs tables, qui n’ont ni les mêmes colonnes ni les mêmes conventions : les logs
+ * nginx dans une table plate, ceux des applications dans le schéma OpenTelemetry de ClickStack. clickhouse.tables
+ * décrit chaque table par son nom :
+ *
+ *     tables:
+ *       logs.nginx_access:
+ *         time_field: ts
+ *         columns: { status: UInt16, … }
+ *       otel.otel_logs:
+ *         preset: otel
+ *
+ * Pour la table visée, chaque clé du profil remplace la clé du même nom de clickhouse. Un préréglage (preset) fournit
+ * les valeurs de départ d’un schéma connu, que le profil complète clé par clé dans ses tables de correspondance.
+ */
+const PROFILE_KEYS = ['preset', 'time_field', 'time_key', 'timezone', 'text_fields', 'text_match', 'field_mapping', 'columns', 'empty_as_missing', 'attributes', 'attribute_types', 'analyzers'];
+// Domaines de noms que la convention sémantique d’OpenTelemetry range dans les attributs de ressource
+const OTEL_RESOURCE = ['service.*', 'host.*', 'os.*', 'process.*', 'container.*', 'k8s.*', 'cloud.*', 'deployment.*', 'telemetry.*', 'faas.*', 'device.*'];
+const OTEL_COLUMNS = {
+  Timestamp: 'DateTime64(9)', TraceId: 'String', SpanId: 'String', TraceFlags: 'UInt8', SeverityText: 'LowCardinality(String)', SeverityNumber: 'UInt8',
+  ServiceName: 'LowCardinality(String)', Body: 'String', ResourceSchemaUrl: 'LowCardinality(String)', ScopeSchemaUrl: 'LowCardinality(String)',
+  ScopeName: 'String', ScopeVersion: 'LowCardinality(String)', EventName: 'String'
+};
+const OTEL_FIELDS = { '@timestamp': 'Timestamp', message: 'Body', 'log.level': 'SeverityText', 'service.name': 'ServiceName', 'trace.id': 'TraceId', 'span.id': 'SpanId', 'event.name': 'EventName' };
+const MAP_TYPE = 'Map(LowCardinality(String), String)';
+const PRESETS = {
+  // Schéma otel_logs de l’exportateur ClickHouse d’OpenTelemetry (ClickStack) : attributs en Map de chaînes
+  otel: {
+    time_field: 'Timestamp', text_fields: ['message', 'Body'], field_mapping: OTEL_FIELDS,
+    columns: Object.assign({}, OTEL_COLUMNS, { ResourceAttributes: MAP_TYPE, ScopeAttributes: MAP_TYPE, LogAttributes: MAP_TYPE }),
+    attributes: { ResourceAttributes: OTEL_RESOURCE, LogAttributes: ['*'] }
+  },
+  // Même schéma avec des colonnes JSON (option json de l’exportateur) et la liste des clés de chaque objet
+  'otel-json': {
+    time_field: 'Timestamp', text_fields: ['message', 'Body'], field_mapping: OTEL_FIELDS,
+    columns: Object.assign({}, OTEL_COLUMNS, { ResourceAttributes: 'JSON', ResourceAttributesKeys: 'Array(LowCardinality(String))', ScopeAttributes: 'JSON', ScopeAttributesKeys: 'Array(LowCardinality(String))', LogAttributes: 'JSON', LogAttributesKeys: 'Array(LowCardinality(String))' }),
+    attributes: { ResourceAttributes: OTEL_RESOURCE, LogAttributes: ['*'] }
+  }
+};
+function tableProfile(cfg, table) {
+  const tables = cfg.clickhouse.tables;
+  if (!isObj(tables) || !table) return null;
+  const t = String(table);
+  if (isObj(tables[t])) return tables[t];
+  // Une table écrite sans sa base se cherche aussi dans la base par défaut, et inversement
+  const db = cfg.clickhouse.database || 'default';
+  if (!t.includes('.') && isObj(tables[`${db}.${t}`])) return tables[`${db}.${t}`];
+  if (t.startsWith(`${db}.`) && isObj(tables[t.slice(db.length + 1)])) return tables[t.slice(db.length + 1)];
+  return null;
+}
+// Configuration effective pour une table : celle de clickhouse, complétée par le préréglage puis le profil
+function tableConfig(cfg, table) {
+  const profile = tableProfile(cfg, table);
+  if (!profile) return cfg;
+  const preset = profile.preset ? PRESETS[profile.preset] : null;
+  if (profile.preset && !preset) throw new Error(`préréglage inconnu pour ${table} : ${profile.preset} (${Object.keys(PRESETS).join(' ou ')})`);
+  const ch = Object.assign({}, cfg.clickhouse);
+  for (const [k, v] of Object.entries(preset || {})) ch[k] = clone(v);
+  for (const [k, v] of Object.entries(profile)) {
+    if (k === 'preset' || v === undefined) continue;
+    ch[k] = preset && isObj(preset[k]) && isObj(v) ? Object.assign({}, preset[k], clone(v)) : clone(v);
+  }
+  return Object.assign({}, cfg, { clickhouse: ch });
 }
 
 /*
@@ -83,6 +160,37 @@ function tzArg(cfg, tz) {
  * columnType renvoie { nullable, array, kind } ou null si le type n’est pas connu.
  *   kind : 'string' | 'int' | 'float' | 'date' | 'bool' | 'other' (celui des éléments pour un tableau)
  */
+// Arguments d’un type ou d’une expression, séparés par les virgules de premier niveau (hors parenthèses et guillemets)
+function splitTopArgs(s) {
+  const out = []; let depth = 0; let cur = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'" || c === '`' || c === '"') {
+      let j = i + 1; while (j < s.length && s[j] !== c) { if (s[j] === '\\') j++; j++; }
+      cur += s.slice(i, j + 1); i = j; continue;
+    }
+    if (c === '(' || c === '[') depth++;
+    else if (c === ')' || c === ']') depth--;
+    if (c === ',' && depth === 0) { out.push(cur.trim()); cur = ''; continue; }
+    cur += c;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+/*
+ * Colonnes d’attributs : Map(K, V) range des champs par leur nom, JSON aussi, avec des chemins éventuellement typés
+ * (JSON(`http.response.status_code` UInt16)). Un chemin typé non Nullable rend la valeur par défaut quand il est
+ * absent : son absence ne se voit plus, comme dans une colonne ordinaire non Nullable (vérifié sur ClickHouse 26.9).
+ */
+function jsonTypedPaths(args) {
+  const paths = {};
+  for (const a of args) {
+    if (/^(max_dynamic_paths|max_dynamic_types)\s*=/i.test(a) || /^SKIP\b/i.test(a)) continue;
+    const m = /^(`(?:[^`\\]|\\.)+`|[A-Za-z_@][\w.@-]*)\s+(.+)$/.exec(a);
+    if (m) paths[m[1].replace(/^`|`$/g, '')] = m[2].trim();
+  }
+  return paths;
+}
 function parseColumnType(raw) {
   let t = String(raw).trim();
   const unwrap = name => {
@@ -91,6 +199,14 @@ function parseColumnType(raw) {
     return true;
   };
   unwrap('LowCardinality');
+  if (/^Map\(/.test(t) && t.endsWith(')')) {
+    const [, value] = splitTopArgs(t.slice(4, -1));
+    return { array: false, nullable: false, kind: 'map', value: parseColumnType(value || 'String') };
+  }
+  if (/^JSON\b/.test(t) || /^Object\(\s*'json'\s*\)$/i.test(t)) {
+    const args = /^JSON\((.*)\)$/s.exec(t);
+    return { array: false, nullable: false, kind: 'json', paths: args ? jsonTypedPaths(splitTopArgs(args[1])) : {} };
+  }
   const array = unwrap('Array');
   if (array) unwrap('LowCardinality');
   const nullable = unwrap('Nullable');
@@ -309,14 +425,17 @@ function dissectRegex(pattern, target, named) {
     if (/^[+&*]/.test(k)) { warnings.push(`modificateur « ${k[0]} » de dissect ignoré (${k})`); k = ''; }
     const skip = k === '' || k.startsWith('?');
     if (skip) { out += `(?:${g})`; return; }
-    if (named) { const grp = reSafeName(k); fields.push({ group: grp, field: k }); out += `(?P<${grp}>${g})`; }
+    // Une clé répétée : un groupe par occurrence (Rust refuse deux groupes du même nom), la dernière valeur l’emporte
+    if (named) { let grp = reSafeName(k); for (let n = 2; fields.some(f => f.group === grp); n++) grp = `${reSafeName(k)}_${n}`; fields.push({ group: grp, field: k }); out += `(?P<${grp}>${g})`; }
     else out += k === target ? `(${g})` : `(?:${g})`;
   });
   return { regex: out + '$', fields, warnings };
 }
 
 /* ---------- Painless → expression ClickHouse ---------- */
-const P_OPS = ['==~', '===', '!==', '==', '!=', '<=', '>=', '&&', '||', '?.', '?:', '=~', '++', '--', '+=', '-=', '*=', '/=', '->', '::'];
+const P_OPS = ['==~', '===', '!==', '>>>', '==', '!=', '<=', '>=', '>>', '<<', '&&', '||', '?.', '?:', '=~', '++', '--', '+=', '-=', '*=', '/=', '->', '::'];
+// Fermeture de chevrons d’un type générique : « >> » et « >>> » en ferment deux ou trois
+const P_ANG = t => (t && t.t === 'op' ? { '>': 1, '>>': 2, '>>>': 3 }[t.v] || 0 : 0);
 function ptokens(src) {
   const t = []; let i = 0; const n = src.length;
   while (i < n) {
@@ -331,12 +450,16 @@ function ptokens(src) {
       }
       t.push({ t: 'str', v }); i = j + 1; continue;
     }
-    if (c === '/' && t.length && (t[t.length - 1].v === '=~' || t[t.length - 1].v === '==~')) {
+    // « / » ouvre une expression régulière après =~, un opérateur, « ( », « , », « = », « return » ou en tête ; ailleurs, c’est une division
+    const pv = t[t.length - 1];
+    if (c === '/' && (!pv || (pv.t === 'op' && ![')', ']', '}', '++', '--'].includes(pv.v)) || (pv.t === 'id' && pv.v === 'return'))) {
       let j = i + 1, v = '';
       while (j < n && src[j] !== '/') { if (src[j] === '\\' && src[j + 1] === '/') { v += '/'; j += 2; } else v += src[j++]; }
       j++; while (/[a-zA-Z]/.test(src[j] || '')) j++;
       t.push({ t: 're', v }); i = j; continue;
     }
+    const hx = /^0[xX]([0-9a-fA-F]+)[Ll]?/.exec(src.slice(i));
+    if (hx) { t.push({ t: 'num', v: BigInt('0x' + hx[1]).toString(), int: true }); i += hx[0].length; continue; }
     let m = /^(\d+\.\d+|\d+)([eE][+-]?\d+)?[LlFfDd]?/.exec(src.slice(i));
     // int : littéral entier (12, 12L), par opposition à 1.5, 1e3, 12f ou 12d ; la division en dépend
     if (m) { t.push({ t: 'num', v: m[0].replace(/[LlFfDd]$/, ''), int: !/[.eEFfDd]/.test(m[0]) }); i += m[0].length; continue; }
@@ -376,7 +499,7 @@ function pparse(src) {
     if (t.t === 'id' && ['for', 'while', 'do', 'try', 'throw', 'switch'].includes(t.v)) throw new Error(`instruction « ${t.v} » non prise en charge`);
     if (t.t === 'id' && P_TYPES.has(t.v)) {
       let k = 1;
-      if (is('<', 1)) { let d = 0; do { if (is('<', k)) d++; else if (is('>', k)) d--; k++; } while (d > 0 && p + k < toks.length); }
+      if (is('<', 1)) { let d = 0; do { if (is('<', k)) d++; else d -= P_ANG(peek(k)); k++; } while (d > 0 && p + k < toks.length); }
       while (is('[', k) && is(']', k + 1)) k += 2;
       const nt = peek(k);
       if (nt && nt.t === 'id') {
@@ -481,6 +604,8 @@ function pval(ctx, x) {
     const kind = rt ? { long: 'int', double: 'float' }[rt.type] : ctx.kindOf ? ctx.kindOf(name) : null;
     const v = { sql: ctx.mapField(x.field), ty: guessType(ctx, name) };
     if (kind === 'int') v.int = true; else if (kind === 'float') v.int = false;
+    // Attribut rangé en chaîne sans type déclaré : nombre ou texte selon l’usage qu’en fait le script (voir pbin)
+    if (ctx.untyped && ctx.untyped(name)) { v.ty = 'any'; v.untyped = true; }
     return v;
   }
   if (x.kind === 'dow') return pStr(`upper(dateName('weekday', ${x.sql}${x.zone}))`);
@@ -608,7 +733,12 @@ function pbin(ctx, n, env, o) {
     if (op === '==' || op === '<=') return pBool(absentSQL(ctx, L.field));
     if (op === '!=' || op === '>') return pBool(presentSQL(ctx, L.field));
   }
-  const l = pval(ctx, L), r = pval(ctx, R);
+  let l = pval(ctx, L), r = pval(ctx, R);
+  if ((l.untyped || r.untyped) && ctx.asNumber) {
+    // Comparé à un nombre ou pris dans un calcul, un attribut sans type est converti en nombre
+    const toNum = x => (x.untyped ? { sql: ctx.asNumber(x.sql), ty: 'num' } : x);
+    if (['<', '>', '<=', '>=', '-', '*', '/', '%'].includes(op) || (['==', '!=', '===', '!==', '+'].includes(op) && (l.ty === 'num' || r.ty === 'num'))) { l = toNum(l); r = toNum(r); }
+  }
   switch (op) {
     case '==': case '===':
       if (r.ty === 'null') return pBool(`isNull(${l.sql})`);

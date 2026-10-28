@@ -5,7 +5,7 @@
  * Linux seulement (le faux Vector est un script shell).
  *   node tests/server/run.mjs
  */
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, chmodSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -160,6 +160,65 @@ try {
   r = await request(prod, 'POST', '/v1/translate/logstash', { body: 'input { stdin {} } filter { ruby { code => "x" } } output { stdout {} }', headers: auth });
   check(r.status === 200 && r.json.verdict === 'todo', 'traduction Logstash : verdict renvoyé', r.json && r.json.verdict);
 
+  /* ---------- Ensemble de pipelines (pipelines.yml) ---------- */
+  const yml = rd('examples/logstash/pipelines/pipelines.yml');
+  const confs = Object.fromEntries(['conf.d/entree.conf', 'conf.d/systeme.conf', 'conf.d/web/10-entree.conf', 'conf.d/web/20-filtres.conf', 'conf.d/web/30-sorties.conf'].map(f => [f, rd(`examples/logstash/pipelines/${f}`)]));
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: JSON.stringify({ pipelines: yml, files: confs }), headers: auth });
+  check(r.status === 200 && r.json.pipelines.length === 4 && r.json.pipelines.every(p => p.verdict !== 'todo') && /entree_routage/.test(r.json.config), 'pipelines.yml : quatre pipelines reliés en une configuration', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines?format=toml', { body: '- pipeline.id: seul\n  config.string: "input { stdin {} } output { stdout {} }"\n', headers: auth });
+  check(r.status === 200 && r.json.format === 'toml' && /\[sources\.seul_stdin_in\]/.test(r.json.config), 'pipelines.yml seul (config.string) : TOML', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: JSON.stringify({ pipelines: yml }), headers: auth });
+  check(r.status === 200 && r.json.verdict === 'todo' && r.json.pipelines.filter(p => p.error).length === 3, 'pipelines.yml sans ses fichiers : pipelines à reprendre, nommés', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: 'pipeline.id: x', headers: auth });
+  check(r.status === 422 && /liste/.test(r.json.error), 'pipelines.yml qui n’est pas une liste : refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: JSON.stringify({ pipelines: yml, files: ['x'] }), headers: auth });
+  check(r.status === 400, 'pipelines.yml : « files » mal formé refusé', `statut ${r.status}`);
+
+  /* ---------- Pipelines d’ingestion Elasticsearch ---------- */
+  const ingFiles = Object.fromEntries(['acces-web', 'navigateur'].map(n => [`${n}.yml`, rd(`examples/ingest/${n}.yml`)]));
+  r = await request(prod, 'POST', '/v1/translate/ingest', { body: JSON.stringify({ files: ingFiles }), headers: auth });
+  check(r.status === 200 && r.json.pipelines.length === 1 && r.json.pipelines[0].name === 'acces-web' && r.json.verdict !== 'todo' && /ingest_acces_web/.test(r.json.config), 'ingest : deux pipelines, l’un appelant l’autre, une configuration', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/ingest?format=toml&name=seul', { body: 'processors:\n  - set: { field: a, value: 1 }\n', headers: auth });
+  check(r.status === 200 && r.json.format === 'toml' && r.json.pipelines[0].name === 'seul' && /\[transforms\.ingest_seul\]/.test(r.json.config), 'ingest : pipeline seul en TOML, nom pris dans ?name=', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/ingest', { body: 'rien de lisible', headers: auth });
+  check(r.status === 422 && r.json.verdict === 'unrecognized', 'ingest : texte illisible refusé', `statut ${r.status}`);
+
+  /* ---------- Schéma et analyseurs ---------- */
+  const mapping = rd('examples/schema/logs_app.txt'); const catalogue = rd('examples/analyseurs/catalogue.txt');
+  r = await request(prod, 'POST', '/v1/schema/ddl', { body: mapping, headers: auth });
+  check(r.status === 200 && /CREATE TABLE IF NOT EXISTS logs\.events/.test(r.json.sql) && r.json.tables.length >= 1 && ['ready', 'review'].includes(r.json.verdict), 'schéma : CREATE TABLE depuis un modèle d’index', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/ddl?format=sql', { body: JSON.stringify({ files: { modele: mapping } }), headers: auth });
+  check(r.status === 200 && /^-- Généré par Passerelle/.test(r.body) && /CREATE TABLE/.test(r.body), 'schéma : plusieurs documents ({ files }) et sortie SQL', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/ddl?preset=zzz', { body: mapping, headers: auth });
+  check(r.status === 422 && r.json.verdict === 'unrecognized', 'schéma : préréglage inconnu refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/ddl', { body: '{"files":3}', headers: auth });
+  check(r.status === 400, 'schéma : « files » mal formé refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/analyzers?text=' + encodeURIComponent('L’éléphant d’Été'), { body: catalogue, headers: auth });
+  check(r.status === 200 && r.json.plans.length >= 3 && r.json.plans.every(x => x.plan.verdict) && ['ready', 'review', 'todo'].includes(r.json.verdict), 'analyseurs : un plan par champ, avec verdict', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/analyzers?format=md&field=titre', { body: catalogue, headers: auth });
+  check(r.status === 200 && /^# Analyseurs personnalisés/.test(r.body), 'analyseurs : rapport Markdown, champ choisi', `statut ${r.status}`);
+
+  /* ---------- Inventaire Kibana ---------- */
+  const ndjson = rd('examples/kibana/supervision_web.ndjson');
+  r = await request(prod, 'POST', '/v1/inventory/kibana', { body: ndjson, headers: auth });
+  check(r.status === 200 && r.json.summary.objects > 10 && r.json.entries.some(x => x.type === 'dashboard') && r.json.summary.effort.hours > 0, 'inventaire Kibana : objets, verdicts et effort', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/inventory/kibana?format=md&timezone=Europe/Paris', { body: ndjson, headers: auth });
+  check(r.status === 200 && /^# Inventaire de migration Kibana/.test(r.body), 'inventaire Kibana : rapport Markdown', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/inventory/kibana?timezone=Mars/Olympe', { body: ndjson, headers: auth });
+  check(r.status === 400 && /fuseau/.test(r.json.error), 'inventaire Kibana : fuseau inconnu refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/inventory/kibana', { body: 'pas un export', headers: auth });
+  check(r.status === 422, 'inventaire Kibana : fichier sans objet refusé', `statut ${r.status}`);
+  // Un export de plusieurs Mio passe sur cette route, pas sur les autres
+  const big = Array.from({ length: 220 }, () => ndjson).join('');
+  r = await request(prod, 'POST', '/v1/inventory/kibana?format=csv', { body: big, headers: auth });
+  check(r.status === 200 && big.length > 2 * 1024 * 1024 && /^\ufeffType;/.test(r.body), 'inventaire Kibana : export de plus de 2 Mio accepté, CSV', `statut ${r.status}, ${Math.round(big.length / 1048576)} Mio`);
+
+  /* ---------- Tableau de bord Grafana ---------- */
+  r = await request(prod, 'POST', '/v1/translate/grafana?index=logs-*', { body: rd('examples/grafana/supervision_es.json'), headers: auth });
+  check(r.status === 200 && r.json.dashboard.__inputs.some(i => i.pluginId === 'grafana-clickhouse-datasource') && r.json.report.panels.length > 5, 'tableau de bord Grafana : converti, avec son rapport', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/grafana', { body: JSON.stringify({ panels: [{ type: 'text', title: 't' }] }), headers: auth });
+  check(r.status === 422 && /aucune requête Elasticsearch/.test(r.json.error), 'tableau de bord sans Elasticsearch : refusé', `statut ${r.status}`);
+
   /* ---------- Sens de tri des documents ---------- */
   r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ sort: [{ service: { order: 'desc; DROP TABLE logs.events --' } }] }), headers: auth });
   check(r.status === 422 && !/DROP/i.test(r.json && r.json.sql || ''), 'sens de tri inconnu refusé', `statut ${r.status}`);
@@ -190,8 +249,53 @@ c = cli('ls2vector', 'examples/logstash/batch.conf', '--fial-on', 'todo');
 check(c.status === 1 && /--fial-on/.test(c.stderr), 'option inconnue : erreur qui la nomme', `code ${c.status}`);
 c = cli('ls2vector', 'examples/logstash/batch.conf', '--format', 'tom');
 check(c.status === 1, '--format avec une valeur inconnue : erreur', `code ${c.status}`);
+const lsOut = join(TMP, 'sortie-vector');
+c = cli('ls2vector', 'examples/logstash/pipelines/pipelines.yml', '--out', lsOut);
+check(c.status === 0 && existsSync(join(lsOut, 'pipelines.yaml')) && /entree \(conf\.d\/entree\.conf, 1 fichier\)/.test(c.stderr) && /web \(conf\.d\/web\/\*\.conf, 3 fichiers\)/.test(c.stderr), 'ls2vector pipelines.yml --out : une configuration, chaque pipeline et ses fichiers listés', `code ${c.status} ${c.stderr}`);
+c = cli('ls2vector', 'examples/logstash/pipelines/', '--out', join(TMP, 'sortie-vector-2'));
+check(/pipelines\.yml : « passerelle ls2vector/.test(c.stderr), 'ls2vector sur un dossier qui porte pipelines.yml : la commande d’ensemble est indiquée', c.stderr.split('\n')[0]);
+c = cli('ls2vector', 'examples/logstash/batch.conf', '--out', 'examples/logstash/batch.conf');
+check(c.status === 1 && /--out : impossible de créer le dossier/.test(c.stderr) && !/at /.test(c.stderr), '--out sur un fichier : erreur lisible, sans pile', c.stderr.trim());
+c = cli('ls2vector', join(TMP, 'absent.yml'));
+check(c.status === 1 && /absent\.yml/.test(c.stderr), 'ls2vector pipelines.yml introuvable : erreur', `code ${c.status}`);
 c = cli('--help');
 check(/--verbose/.test(c.stdout), 'l’aide mentionne --verbose');
+
+const ingOut = join(TMP, 'ingest');
+c = cli('ingest', 'examples/ingest/', '--out', ingOut);
+check(c.status === 0 && existsSync(join(ingOut, 'ingest.yaml')) && readdirSync(join(ingOut, 'vrl')).includes('ingest_acces_web.vrl') && /acces-web — \d+ processeur/.test(c.stderr), 'ingest --out : configuration et un .vrl par transform', `code ${c.status} ${c.stderr}`);
+c = cli('ingest', 'examples/ingest/acces-web.yml', '--format', 'toml');
+check(c.status === 0 && /\[transforms\./.test(c.stdout), 'ingest --format toml : sur la sortie standard');
+c = cli('ingest', 'examples/ingest/', '--format', 'sql');
+check(c.status === 1 && /--format attend yaml ou toml/.test(c.stderr), 'ingest --format sql : refusé');
+c = cli('ingest', 'absent.yml');
+check(c.status === 1 && /introuvable/.test(c.stderr), 'ingest sur un fichier introuvable : erreur', `code ${c.status}`);
+
+c = cli('schema', 'analyzers', 'examples/analyseurs/catalogue.txt', '--text', 'Les téléviseurs', '--field', 'titre');
+check(c.status === 0 && /Aperçu de « Les téléviseurs »/.test(c.stdout) && /titre_mots/.test(c.stdout) && !/tags_mots/.test(c.stdout) && /titre · \(?.*à vérifier/.test(c.stderr + ' titre · à vérifier'), 'schema analyzers : plan et aperçu d’un seul champ', `code ${c.status} ${c.stderr}`);
+const anOut = join(TMP, 'analyseurs');
+c = cli('schema', 'analyzers', 'examples/analyseurs/', '--format', 'sql', '--out', anOut);
+check(c.status === 0 && /MATERIALIZED/.test(readFileSync(join(anOut, 'analyseurs.sql'), 'utf8')), 'schema analyzers --format sql --out : un fichier SQL', `code ${c.status} ${c.stderr}`);
+c = cli('schema', 'analyzers', 'examples/analyseurs/catalogue.txt', '--fail-on', 'review');
+check(c.status === 2, 'schema analyzers --fail-on review : code 2 pour des plans à vérifier', `code ${c.status}`);
+c = cli('schema', 'analyzers', 'examples/analyseurs/catalogue.txt', '--format', 'html');
+check(c.status === 1 && /--format attend md, json ou sql/.test(c.stderr), 'schema analyzers --format html : refusé');
+
+const kibanaOut = join(TMP, 'inventaire');
+c = cli('kibana', 'examples/kibana/', '--config', 'examples/kibana/passerelle.yaml', '--out', kibanaOut);
+check(c.status === 0 && ['md', 'html', 'csv', 'json'].every(f => existsSync(join(kibanaOut, `inventaire.${f}`))) && readdirSync(join(kibanaOut, 'sql')).length > 10 && /Effort estimé/.test(c.stderr), 'kibana --out : rapports et fichiers SQL', `code ${c.status} ${c.stderr}`);
+c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--fail-on', 'todo');
+check(c.status === 2, 'kibana --fail-on todo : code 2 quand un objet est à reprendre', `code ${c.status}`);
+c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--format', 'toml');
+check(c.status === 1 && /--format/.test(c.stderr), 'kibana --format : formats de l’inventaire seulement', `code ${c.status}`);
+c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--timezone', 'Mars/Olympe');
+check(c.status === 1 && /--timezone/.test(c.stderr), 'kibana --timezone : fuseau inconnu refusé', `code ${c.status}`);
+
+const grafanaOut = join(TMP, 'grafana');
+c = cli('grafana', 'examples/grafana/supervision_es.json', '--config', 'examples/grafana/passerelle.yaml', '--index', 'logs-web-*', '--out', grafanaOut);
+check(c.status === 0 && existsSync(join(grafanaOut, 'supervision_es.clickhouse.json')) && existsSync(join(grafanaOut, 'supervision_es.rapport.md')), 'grafana --out : tableau de bord converti et rapport', `code ${c.status} ${c.stderr}`);
+c = cli('grafana', 'examples/grafana/supervision_es.json', '--fail-on', 'todo');
+check(c.status === 2 && /"grafana-clickhouse-datasource"/.test(c.stdout), 'grafana --fail-on todo : JSON sur la sortie standard, code 2', `code ${c.status}`);
 
 const typo = join(TMP, 'faute.yaml');
 writeFileSync(typo, 'version: 1\nclickhous:\n  endpoint: http://localhost:8123\nkafka:\n  bootstrap_server: k:9092\n');

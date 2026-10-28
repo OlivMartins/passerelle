@@ -1,0 +1,38 @@
+description: Matcher en variable (find, group, start), Pattern.split, String.split à la Java, remove en expression, flux (stream), décalages
+processors:
+  - script:
+      lang: painless
+      source: |
+        def re = /T(\d{4})/;
+        def m = re.matcher(ctx.tags);
+        def ids = [];
+        while (m.find()) { ids.add(m.group(1)); }
+        ctx.ids = ids;
+        def m2 = /\d+/.matcher(ctx.ver);
+        if (m2.find()) { ctx.proto = ctx.ver.substring(0, m2.start()); ctx.num = ctx.ver.substring(m2.start(), m2.end()); }
+        def mac = /^[A-F0-9]{4}(-[A-F0-9]{4}){2}$/.matcher(ctx.mac);
+        ctx.mac_ok = mac.matches();
+        ctx.morceaux = /\|/.split(ctx.liste);
+        ctx.java_split = ctx.csv.split(',');
+        ctx.java_split_tout = ctx.csv.split(',', -1);
+        def res = ctx.res;
+        ctx.arn = res.remove('ARN');
+        def l = new ArrayList(ctx.nums);
+        ctx.dernier = l.remove(l.size() - 1);
+        ctx.reste = l;
+        ctx.pairs = ctx.nums.stream().filter(x -> x % 2 == 0).map(x -> x * 10).collect(Collectors.toList());
+        ctx.un_grand = ctx.nums.stream().anyMatch(x -> x > 4);
+        ctx.joints = ctx.mots.stream().map(w -> w.toUpperCase()).collect(Collectors.joining('-'));
+        ctx.premier = ctx.mots.stream().filter(w -> w.startsWith('p')).findFirst().orElse('aucun');
+        ctx.rate = ctx.metriques.keySet().stream().filter(k -> k.startsWith('1m_')).collect(Collectors.toList());
+  - script:
+      lang: painless
+      source: |
+        ctx.fmt = String.format("0x%08X", ctx.w) + ' ' + String.format("%d-%3s|%05d", 42, 'ab', 7);
+        ctx.inst = Instant.ofEpochSecond(1585742580).toString();
+        ctx.inst_ms = Instant.ofEpochMilli(1585742580500L).toString();
+        ctx.vrai = Boolean.parseBoolean('TRUE');
+        ctx.liste_fixe = Arrays.asList('a', 'b');
+        ctx.connu = Arrays.asList(ctx.mots).contains('kiwi');
+        ctx.u32 = Integer.parseUnsignedInt('4294967295');
+        ctx.vide = Collections.emptyList();

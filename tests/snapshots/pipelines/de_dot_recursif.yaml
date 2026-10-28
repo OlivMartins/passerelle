@@ -1,0 +1,9 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  de_dot:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # de_dot
+      . = map_values(map_keys(object!(.)) -> |k0| { replace(k0, ".", "_") }) -> |v0| { if is_object(v0) { map_values(map_keys(object!(v0)) -> |k1| { replace(k1, ".", "_") }) -> |v1| { if is_object(v1) { map_values(map_keys(object!(v1)) -> |k2| { replace(k2, ".", "_") }) -> |v2| { if is_object(v2) { map_values(map_keys(object!(v2)) -> |k3| { replace(k3, ".", "_") }) -> |v3| { if is_object(v3) { map_values(map_keys(object!(v3)) -> |k4| { replace(k4, ".", "_") }) -> |v4| { if is_object(v4) { map_values(map_keys(object!(v4)) -> |k5| { replace(k5, ".", "_") }) -> |v5| { if is_object(v5) { map_values(map_keys(object!(v5)) -> |k6| { replace(k6, ".", "_") }) -> |v6| { if is_object(v6) { map_values(map_keys(object!(v6)) -> |k7| { replace(k7, ".", "_") }) -> |v7| { if is_object(v7) { map_values(map_keys(object!(v7)) -> |k8| { replace(k8, ".", "_") }) -> |v8| { if is_object(v8) { map_keys(object!(v8)) -> |k9| { replace(k9, ".", "_") } } else { v8 } } } else { v7 } } } else { v6 } } } else { v5 } } } else { v4 } } } else { v3 } } } else { v2 } } } else { v1 } } } else { v0 } }

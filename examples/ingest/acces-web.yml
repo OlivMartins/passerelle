@@ -1,0 +1,81 @@
+---
+description: Journaux d’accès web (format combiné) vers ECS
+processors:
+  - set:
+      field: event.ingested
+      value: '{{_ingest.timestamp}}'
+  - set:
+      field: ecs.version
+      value: '8.11.0'
+  - rename:
+      field: message
+      target_field: event.original
+      ignore_missing: true
+      if: ctx.event?.original == null
+  - grok:
+      field: event.original
+      patterns:
+        - '%{IPORHOST:source.address} - (-|%{DATA:user.name}) \[%{HTTPDATE:acces.horodatage}\] "%{WORD:http.request.method} %{DATA:url.original} HTTP/%{NUMBER:http.version}" %{NUMBER:http.response.status_code:long} (?:-|%{NUMBER:http.response.body.bytes:long}) "(?:-|%{DATA:http.request.referrer})" "(?:-|%{DATA:user_agent.original})"'
+      on_failure:
+        - append:
+            field: error.message
+            value: 'ligne illisible : {{{_ingest.on_failure_message}}}'
+  - date:
+      field: acces.horodatage
+      target_field: '@timestamp'
+      formats:
+        - 'dd/MMM/yyyy:H:m:s Z'
+      if: ctx.acces?.horodatage != null
+  - remove:
+      field: acces.horodatage
+      ignore_missing: true
+  - uri_parts:
+      field: url.original
+      ignore_failure: true
+  - pipeline:
+      name: navigateur
+      if: ctx.user_agent?.original != null
+  - geoip:
+      field: source.address
+      target_field: source.geo
+      ignore_missing: true
+  - set:
+      field: event.outcome
+      value: success
+      if: ctx.http?.response?.status_code != null && ctx.http.response.status_code < 400
+  - set:
+      field: event.outcome
+      value: failure
+      if: ctx.http?.response?.status_code != null && ctx.http.response.status_code >= 400
+  - convert:
+      field: http.response.status_code
+      type: integer
+      ignore_missing: true
+  - script:
+      description: Retire les champs vides
+      lang: painless
+      source: |
+        void handleMap(Map map) {
+          for (def x : map.values()) {
+            if (x instanceof Map) {
+              handleMap(x);
+            } else if (x instanceof List) {
+              handleList(x);
+            }
+          }
+          map.values().removeIf(v -> v == null || v == "");
+        }
+        void handleList(List list) {
+          for (def x : list) {
+            if (x instanceof Map) {
+              handleMap(x);
+            } else if (x instanceof List) {
+              handleList(x);
+            }
+          }
+        }
+        handleMap(ctx);
+on_failure:
+  - set:
+      field: error.message
+      value: '{{{_ingest.on_failure_message}}}'

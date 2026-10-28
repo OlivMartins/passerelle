@@ -1,0 +1,23 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  de_dot:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # de_dot
+      dd = object!(.)
+      failed = false
+      for_each(object!(.)) -> |key, value| {
+        if !failed && contains(key, ".") {
+          segs = split(key, ".")
+          parent = []
+          blocked = false
+          for_each(slice!(segs, 0, length(segs) - 1)) -> |_index, seg| { parent = push(parent, seg); x = get!(dd, parent); if x != null && !is_object(x) { blocked = true } }
+          if blocked { failed = true } else { dd = remove!(dd, [key]); dd = set!(dd, segs, value) }
+        }
+      }
+      . = dd
+      if failed {
+        .tags = compact(flatten([.tags, "_de_dot_error"]))
+      }

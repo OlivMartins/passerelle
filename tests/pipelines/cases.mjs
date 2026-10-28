@@ -16,6 +16,10 @@
  *              'raison'            dans les deux modes de compatibilité ECS de Logstash
  *              { v8: 'raison' }    dans un seul mode (v8 ou disabled)
  *   exact    tolérance du banc à désactiver pour ce cas : 'horodatage' (voir run.mjs)
+ *   plugins  greffons Logstash absents de sa distribution, installés avant le banc : ['logstash-filter-bytes']
+ *   chain    plusieurs pipelines reliés par pipeline { send_to }, à la place de filter et output :
+ *              [{ id, filter, output: (o, to) => … }]   o(nom) : sortie du banc ; to(id, …) : vers ces pipelines
+ *            le premier reçoit l’entrée du banc, les suivants écoutent leur adresse
  *
  * Un cas ne porte qu’un comportement : quand une opération diverge sur un type d’entrée, ce type a son propre cas.
  */
@@ -62,6 +66,8 @@ export const CASES = [
 
   // mutate : chaînes
   { id: 'mutate_gsub', filter: 'mutate { gsub => ["a", "[0-9]+", "#"] }', events: [{ a: 'abc123def45' }, { a: 42 }] },
+  { id: 'mutate_gsub_lignes', filter: 'mutate { gsub => ["a", "^\\s+", ""] }', events: [{ a: '  un\n  deux' }] },
+  { id: 'mutate_gsub_ascii', filter: 'mutate { gsub => ["a", "\\W", "_"] }', events: [{ a: 'été à 9h' }] },
   { id: 'mutate_gsub_groupes', filter: 'mutate { gsub => ["a", "(\\w+)@(\\w+)", "\\2 at \\1"] }', events: [{ a: 'alice@example' }] },
   { id: 'mutate_majuscules', filter: 'mutate { uppercase => ["a"] }', events: [{ a: 'été Abc ß' }, { a: 42 }] },
   { id: 'mutate_minuscules', filter: 'mutate { lowercase => ["a"] }', events: [{ a: 'ÉTÉ Abc' }, { a: 42 }] },
@@ -104,7 +110,10 @@ export const CASES = [
 
   // %{champ} dans une valeur
   { id: 'sprintf_types', filter: 'mutate { add_field => { "k" => "%{n}" } }', events: [{ n: 'a' }, { n: 1 }, { n: 1.5 }, { n: true }] },
-  { id: 'sprintf_champ_absent', filter: 'mutate { add_field => { "k" => "v-%{n}" } }', events: [{ m: 1 }, { n: null }], known: 'pour un champ absent ou nul, Logstash laisse « %{n} » dans la valeur ; la traduction écrit une chaîne vide' },
+  // Champ absent ou nul : la référence reste écrite telle quelle
+  { id: 'sprintf_champ_absent', filter: 'mutate { add_field => { "k" => "v-%{n}" } }', events: [{ m: 1 }, { n: null }] },
+  // Tableau : éléments joints par des virgules, tableaux imbriqués aplatis, nul écrit vide
+  { id: 'sprintf_tableau_nombres', filter: 'mutate { add_field => { "k" => "%{n}" } }', events: [{ n: [1, 2.5, true] }, { n: [1, [2, null], 'b'] }, { n: [] }] },
   { id: 'sprintf_tableau_objet', filter: 'mutate { add_field => { "k" => "%{n}" } }', events: [{ n: ['a', 'b'] }, { n: { a: 1 } }] },
   { id: 'sprintf_nombres', filter: 'mutate { add_field => { "k" => "%{n}" } }', codec: 'json', lines: ['{"n":1.0}', '{"n":1e21}'], known: 'un flottant sans décimale s’écrit « 1.0 » et « 1.0E21 » pour Logstash, « 1 » et « 1000000000000000000000 » pour la traduction' },
   { id: 'sprintf_imbrique', filter: 'mutate { add_field => { "k" => "%{[a][b]}/%{[a][c]}" } }', events: [{ a: { b: 'x', c: 2 } }] },
@@ -125,6 +134,13 @@ export const CASES = [
   { id: 'condition_in_champ', filter: si('"x" in [a]'), events: [{ a: ['x', 'y'] }, { a: 'axb' }, { a: 'z' }, { b: 1 }] },
   { id: 'condition_not_in', filter: si('[a] not in ["x", "y"]'), events: [{ a: 'x' }, { a: 'z' }, { b: 1 }] },
   { id: 'condition_regex', filter: si('[a] =~ /^web-[0-9]+$/'), events: [{ a: 'web-12' }, { a: 'db-1' }, { a: 12 }, { b: 1 }] },
+  // Expressions régulières de Ruby : ^ et $ valent pour chaque ligne, \\w et \\d ne prennent que l’ASCII, (?m) fait prendre au point le saut de ligne
+  { id: 'condition_regex_lignes', filter: si('[a] =~ /^ERREUR/'), events: [{ a: 'début\nERREUR ici' }, { a: 'ERREUR' }, { a: 'pas ERREUR' }] },
+  { id: 'condition_regex_fin_de_ligne', filter: si('[a] =~ /fin$/'), events: [{ a: 'la fin\nsuite' }, { a: 'la fin\n' }, { a: 'fin de' }] },
+  { id: 'condition_regex_ascii', filter: si('[a] =~ /^\\w+$/'), events: [{ a: 'ete' }, { a: 'été' }, { a: 'x_1' }] },
+  { id: 'condition_regex_chiffres', filter: si('[a] =~ /\\d/'), events: [{ a: 'a1' }, { a: 'a\u0661' }] },
+  { id: 'condition_regex_point_multiligne', filter: si('[a] =~ /(?m)a.b/'), events: [{ a: 'a\nb' }, { a: 'axb' }, { a: 'ab' }] },
+  { id: 'condition_regex_posix', filter: si('[a] =~ /^[[:alpha:]]+$/'), events: [{ a: 'été' }, { a: 'e1' }] },
   { id: 'condition_regex_negation', filter: si('[a] !~ /^web/'), events: [{ a: 'web-1' }, { a: 'db' }, { b: 1 }] },
   { id: 'condition_logique', filter: si('[a] == "x" and ([n] > 5 or [b] != "y")'), events: [{ a: 'x', n: 6, b: 'y' }, { a: 'x', n: 1, b: 'y' }, { a: 'x', n: 1, b: 'z' }, { a: 'z', n: 9, b: 'z' }] },
   { id: 'condition_xor', filter: si('[a] == "x" xor [b] == "y"'), events: [{ a: 'x', b: 'y' }, { a: 'x', b: 'z' }, { a: 'z', b: 'y' }, { a: 'z', b: 'z' }] },
@@ -317,12 +333,57 @@ export const CASES = [
   { id: 'useragent_navigateur', filter: 'useragent { source => "ua" target => "navigateur" }', events: [{ ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }, { ua: 'curl/8.4.0' }], known: 'les champs produits n’ont ni les mêmes noms ni les mêmes valeurs : name, os, major… pour Logstash (ou leurs équivalents ECS), browser.family, os.family, device.category pour la traduction' },
   { id: 'useragent_source_absente', filter: 'useragent { source => "ua" target => "navigateur" }', events: [{ n: 1 }] },
 
+  // prune : clés de premier niveau, @timestamp compris ; valeurs filtrées après les noms
+  { id: 'prune_liste_blanche', filter: 'prune { whitelist_names => ["^msg$", "^host", "^tags$"] }', events: [{ msg: 'a', host: 'h', hostname: 'h2', x: 1, tags: ['t'] }, { y: { msg: 1 } }] },
+  { id: 'prune_garde_horodatage', filter: 'prune { whitelist_names => ["^msg$", "^@"] }', events: [{ msg: 'a', x: 1 }] },
+  { id: 'prune_reference_non_resolue', filter: 'mutate { add_field => { "%{absent}" => "v" } } prune { }', events: [{ a: 1 }] },
+  { id: 'prune_valeurs_lignes', filter: 'prune { blacklist_values => { "m" => "^mauvais" } }', events: [{ m: 'bon\nmauvais' }, { m: ['x\nmauvais', 'bon'] }] },
+  { id: 'prune_valeurs_tableau_vide', filter: 'prune { whitelist_values => { "m" => "^ok" } }', events: [{ m: [] }, { m: '' }, { m: false }] },
+  { id: 'prune_valeurs', filter: 'prune { blacklist_values => { "host" => "^bad" } whitelist_values => { "tags" => "^ok" } }', events: [{ host: 'bad1', tags: ['ok1', 'non', 'ok2'] }, { host: ['bad', 'fine'], tags: 'ok' }, { host: 'good', tags: ['non'] }, { n: 1 }] },
+  // de_dot : la clé renommée remplace une clé du même nom
+  { id: 'de_dot_premier_niveau', filter: 'de_dot { }', events: [{ 'a.b': 1, 'a_b': 2, c: { 'd.e': 3 } }, { 'x.y.z': 'v' }] },
+  { id: 'de_dot_separateur', filter: 'de_dot { separator => "__" }', events: [{ 'a.b': 1 }] },
+  { id: 'de_dot_imbrique', filter: 'de_dot { nested => true }', events: [{ 'a.b': 1, 'x.y.z': 2, c: { d: 1 }, 'c.e': 3 }] },
+  { id: 'de_dot_recursif', filter: 'de_dot { recursive => true }', events: [{ 'a.b': { 'c.d': 1, l: [{ 'g.h': 2 }] }, e: { 'f.g': { 'h.i': 3 } }, t: 's' }] },
+  { id: 'de_dot_champs_nommes', filter: 'de_dot { fields => ["[a][b.c]", "d.e"] }', events: [{ a: { 'b.c': 1, 'x.y': 2 }, 'd.e': 3, 'f.g': 4 }, { n: 1 }] },
+  // syslog_pri : priorité lue comme Ruby (to_i), 13 par défaut, facility hors table signalée
+  { id: 'syslog_pri_valeurs', filter: 'syslog_pri { }', events: [{ log: { syslog: { priority: '34' } }, syslog_pri: '34' }, { log: { syslog: { priority: 191 } }, syslog_pri: 191 }, { log: { syslog: { priority: [165, 1] } }, syslog_pri: [165, 1] }, { log: { syslog: { priority: ' 13abc' } }, syslog_pri: ' 13abc' }, { log: { syslog: { priority: 2.9 } }, syslog_pri: 2.9 }, { log: { syslog: { priority: 'x' } }, syslog_pri: 'x' }] },
+  { id: 'syslog_pri_par_defaut', filter: 'syslog_pri { }', events: [{ a: 1 }] },
+  { id: 'syslog_pri_hors_table', filter: 'syslog_pri { }', events: [{ log: { syslog: { priority: '200' } }, syslog_pri: '200' }] },
+  { id: 'syslog_pri_negative', filter: 'syslog_pri { }', events: [{ log: { syslog: { priority: -1 } }, syslog_pri: -1 }] },
+  // clone : les copies suivent l’original ; add_field et add_tag ne valent que pour elles
+  { id: 'clone_copies', filter: 'clone { clones => ["a", "b"] add_field => { "copie" => "oui" } }', events: [{ m: 1 }, { m: 2, tags: 't' }, { m: 3, tags: ['x'], type: 'avant' }] },
+  { id: 'clone_puis_filtre', filter: 'clone { clones => ["copie"] } mutate { add_field => { "vu" => "1" } }', events: [{ m: 1 }] },
+  // bytes : puissances de 1024 ou de 1000, séparateur décimal au choix, b et B comptent des octets
+  { id: 'bytes_binaire', plugins: ['logstash-filter-bytes'], filter: 'bytes { source => "s" target => "b" }', events: [{ s: '10 MB' }, { s: '1.5kb' }, { s: '1,024.5 KB' }, { s: '512' }, { s: ' 2 G ' }, { s: '2.5' }, { s: '1 024' }, { s: '.' }] },
+  { id: 'bytes_echecs', plugins: ['logstash-filter-bytes'], filter: 'bytes { source => "s" target => "b" }', events: [{ s: 'kb' }, { s: '1.2.3' }, { s: 5 }, { s: '10 XB' }, { n: 1 }] },
+  { id: 'bytes_metrique_virgule', plugins: ['logstash-filter-bytes'], filter: 'bytes { source => "s" target => "b" conversion_method => "metric" decimal_separator => "," }', events: [{ s: '1.000,5 kB' }, { s: '1,5 MB' }, { s: '1.2.3' }] },
+  // throttle suivi d’un drop sur son étiquette : le transform throttle de Vector supprime ce qui dépasse
+  { id: 'throttle_puis_drop', filter: 'throttle { key => "%{host}" after_count => 2 period => 3600 add_tag => ["throttled"] } if "throttled" in [tags] { drop {} }', events: [{ host: 'a', n: 1 }, { host: 'a', n: 2 }, { host: 'a', n: 3 }, { host: 'b', n: 4 }, { host: 'a', n: 5 }, { host: 'b', n: 6 }, { host: 'b', n: 7 }] },
+
   // Sorties : le routage par conditions
   { id: 'sortie_selon_condition', filter: '', output: o => `if [niveau] == "erreur" { ${o('erreurs')} } else { ${o('autres')} }`, events: [{ niveau: 'erreur', n: 1 }, { niveau: 'info', n: 2 }, { n: 3 }] },
   { id: 'sortie_sans_sinon', filter: '', output: o => `if [niveau] == "erreur" { ${o('erreurs')} }`, events: [{ niveau: 'erreur', n: 1 }, { niveau: 'info', n: 2 }] },
   { id: 'sortie_double', filter: '', output: o => `${o('une')}\n${o('deux')}`, events: [{ n: 1 }, { n: 2 }] },
   { id: 'sortie_en_cascade', filter: '', output: o => `if "alerte" in [tags] { ${o('alertes')} } else if [region] == "EMEA" { ${o('emea')} } else { ${o('autres')} }`, events: [{ tags: ['alerte'], region: 'EMEA' }, { region: 'EMEA' }, { region: 'APAC' }, { n: 1 }] },
   { id: 'sortie_commune_et_conditionnelle', filter: '', output: o => `${o('tout')}\nif [niveau] == "erreur" { ${o('erreurs')} }`, events: [{ niveau: 'erreur', n: 1 }, { niveau: 'info', n: 2 }] },
+
+  // Plusieurs pipelines reliés par pipeline { send_to } (pipelines.yml) : une seule configuration Vector pour l’ensemble
+  { id: 'liaison_distributeur', events: [{ type: 'web', n: 1 }, { type: 'base', n: 2 }, { n: 3 }], chain: [
+    { id: 'entree', filter: 'mutate { add_field => { "vu_par" => "entree" } }', output: (o, to) => `if [type] == "web" { ${to('web')} } else { ${o('autres')} }` },
+    { id: 'web', filter: 'mutate { add_tag => ["web"] add_field => { "vu_par" => "web" } }', output: o => o('web') }
+  ] },
+  { id: 'liaison_copie_et_collecteur', events: [{ n: 1 }, { n: 2, tags: ['t'] }], chain: [
+    { id: 'entree', output: (o, to) => to('a', 'b') },
+    { id: 'a', filter: 'mutate { add_field => { "branche" => "a" } }', output: (o, to) => `${o('a')}\n${to('fin')}` },
+    { id: 'b', filter: 'mutate { add_field => { "branche" => "b" } }', output: (o, to) => to('fin') },
+    { id: 'fin', filter: 'mutate { add_tag => ["fin"] }', output: o => o('fin') }
+  ] },
+  // @timestamp du document, lu par le premier pipeline, arrive au dernier sous la même date
+  { id: 'liaison_horodatage', codec: 'json', lines: ['{"@timestamp":"2026-03-10T09:15:30+01:00","n":1}', '{"@timestamp":"2026-03-10T08:15:30.123Z","n":2}'], chain: [
+    { id: 'entree', output: (o, to) => to('suite') },
+    { id: 'suite', filter: 'mutate { add_field => { "k" => "v" } }', output: o => o('') }
+  ] },
 
   // Les pipelines d’exemple du dépôt, à leur transport près (voir example dans transport.mjs).
   // nginx.conf n’est pas joué : son filtre geoip demande la même base de données des deux côtés.

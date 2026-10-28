@@ -1,0 +1,11 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+# À vérifier : Vector 0.57 et suivants : interpolation à activer
+
+transforms:
+  prune:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # prune
+      orig = object!(.)
+      . = filter(orig) -> |key, _value| { match(key, r'(?m)(?:^msg$$)|(?:^@)') && !match(key, r'(?:%\{[^}]+\})') }

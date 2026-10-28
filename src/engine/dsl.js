@@ -57,6 +57,7 @@ const epochMillisSQL = v => `fromUnixTimestamp64Milli(toInt64(${chNum(v, 'date e
 // Borne de date d’une agrégation (hard_bounds, date_range…) : epoch millis, date math ou date écrite en clair
 function dateBoundSQL(ctx, v, tz) {
   if (isEpoch(v)) return epochMillisSQL(v);
+  if (isParamMark(v) && ctx.opts && ctx.opts.grafana && grafanaTime(paramSource(ctx, v))) { consumeParam(ctx, v); return grafanaTime(paramSource(ctx, v)); }
   return dateMathSQL(ctx, parseDateMath(String(v)) || { abs: String(v), steps: [], ops: [], round: null }, tz);
 }
 // Valeur de curseur d’une clé de regroupement : la clé d’un date_histogram arrive d’Elasticsearch en epoch millis
@@ -92,32 +93,153 @@ function makeDslCtx(cfg) {
   };
   ctx.mapField = f => mapField(ctx, f);
   ctx.kindOf = f => { const t = fieldType(ctx, f); return t ? t.kind : null; };
+  // Scripts Painless : attribut sans type déclaré, converti en nombre quand le script le traite comme tel
+  ctx.untyped = f => { const t = fieldTarget(ctx, f); return t.kind === 'attr' && !t.declared; };
+  ctx.asNumber = sql => {
+    ctx.stats.approx++;
+    ctx.notes.add('warn', 'Attribut converti en nombre dans un script', 'Le script traite comme un nombre un attribut dont le type n’est pas déclaré : la valeur est convertie à la lecture (NULL si elle ne s’y prête pas). Déclarez-le dans clickhouse.attribute_types pour une conversion exacte, entière ou décimale.');
+    const conv = `accurateCastOrNull(${sql}, 'Float64')`;
+    ctx.nullableCols.add(bareSQL(conv));
+    return conv;
+  };
   return ctx;
 }
-// Colonne ClickHouse d’un champ Elasticsearch : sous-champ .keyword retiré, puis field_mapping
+/*
+ * Emplacement ClickHouse d’un champ Elasticsearch.
+ *
+ * Un champ devient une colonne (field_mapping, sinon son propre nom), ou la clé d’une colonne d’attributs, Map de
+ * chaînes ou JSON, comme dans le schéma OpenTelemetry de ClickStack : LogAttributes['http.request.method'].
+ * La clé vient de field_mapping (« LogAttributes['clé'] ») ou du motif le plus précis de clickhouse.attributes ;
+ * une colonne déclarée dans clickhouse.columns l’emporte sur un motif. Le type des valeurs vient d’un chemin typé
+ * de la colonne JSON, ou de clickhouse.attribute_types : il décide de la conversion, sans laquelle une Map de
+ * chaînes comparerait « 99 » et 500 comme des textes (ClickHouse refuse d’ailleurs String >= UInt16).
+ *
+ * Attribut : { kind: 'attr', column, key, store: 'map' | 'json', sql, type, presence, absence }
+ *   sql       valeur, convertie si son type est connu ; une conversion ratée ou une clé absente donnent NULL
+ *   presence  le document a le champ (mapContains, chemin non NULL, liste des clés) ; null si on ne peut le savoir
+ */
+const ATTR_REF = /^([A-Za-z_][A-Za-z0-9_]*)\[\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")\s*\]$/;
+function fieldTarget(ctx, field) {
+  const name = String(field).replace(/\.keyword$/, '');
+  if (!ctx.targets) ctx.targets = new Map();
+  if (ctx.targets.has(name)) return ctx.targets.get(name);
+  const ch = ctx.cfg.clickhouse; const fm = ch.field_mapping || {};
+  const mapped = Object.prototype.hasOwnProperty.call(fm, name) && fm[name] ? String(fm[name]) : null;
+  const ref = mapped ? ATTR_REF.exec(mapped) : null;
+  let target;
+  if (ref) target = attrTarget(ctx, ref[1], (ref[2] !== undefined ? ref[2] : ref[3]).replace(/\\(.)/g, '$1'), name);
+  else if (mapped) target = { kind: 'column', column: mapped };
+  else if (columnType(ctx.cfg, ctx.table, name)) target = { kind: 'column', column: name };
+  else {
+    // Motif le plus précis : la partie fixe la plus longue (host.* l’emporte sur *)
+    let best = null;
+    for (const [column, patterns] of Object.entries(isObj(ch.attributes) ? ch.attributes : {})) {
+      for (const p of [].concat(patterns || []).map(String)) {
+        if (p !== '*' && !new RegExp(globToRe(p)).test(name)) continue;
+        const weight = p.replace(/\*/g, '').length;
+        // labels: [labels.*] : la colonne porte le nom de l’objet, ses clés sont relatives (labels.env → labels['env'])
+        if (!best || weight > best.weight) best = { column, weight, key: p === `${column}.*` ? name.slice(column.length + 1) : name };
+      }
+    }
+    target = best ? attrTarget(ctx, best.column, best.key, name) : { kind: 'column', column: name };
+  }
+  ctx.targets.set(name, target);
+  return target;
+}
+// Chemin d’une colonne JSON : chaque segment est un identifiant (ClickHouse range « a.b » et { a: { b } } au même chemin)
+const jsonPath = (column, key) => `${chIdent(column)}.${String(key).split('.').map(s => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(s) && !CH_KW.has(s.toLowerCase()) ? s : '`' + s.replace(/`/g, '\\`') + '`')).join('.')}`;
+// Conversion d’une valeur lue comme chaîne vers le type déclaré : NULL quand elle ne s’y prête pas
+function convertSQL(expr, type) {
+  const t = parseColumnType(type);
+  if (t.kind === 'date') return `parseDateTime64BestEffortOrNull(${expr}, 3, 'UTC')`;
+  if (t.kind === 'int' || t.kind === 'float' || t.kind === 'bool') return `accurateCastOrNull(${expr}, ${chStr(String(type).replace(/^Nullable\((.*)\)$/, '$1'))})`;
+  return null;
+}
+function attrTarget(ctx, column, key, field) {
+  const ch = ctx.cfg.clickhouse; const ct = columnType(ctx.cfg, ctx.table, column);
+  const declared = isObj(ch.attribute_types) ? ch.attribute_types[field] || ch.attribute_types[key] : undefined;
+  const keysColumn = columnType(ctx.cfg, ctx.table, `${column}Keys`) ? `${column}Keys` : null;
+  const t = { kind: 'attr', column, key, field };
+  if (ct && ct.kind === 'json') {
+    t.store = 'json';
+    const raw = jsonPath(column, key);
+    const typed = ct.paths[key];
+    const hasKey = keysColumn ? `has(${chIdent(keysColumn)}, ${chStr(key)})` : null;
+    if (typed) {
+      // Chemin typé : son type fait foi ; non Nullable, il vaut la valeur par défaut quand il est absent
+      const pt = parseColumnType(typed);
+      Object.assign(t, { sql: raw, type: pt, presence: pt.nullable ? `isNotNull(${raw})` : hasKey });
+    } else {
+      // Chemin dynamique : NULL quand il est absent ; converti vers le type déclaré, ou lu comme une chaîne
+      const conv = declared ? convertSQL(`CAST(${raw} AS Nullable(String))`, declared) : null;
+      const pt = declared ? parseColumnType(declared) : { kind: 'string' };
+      Object.assign(t, { sql: conv || `CAST(${raw} AS Nullable(String))`, type: { array: false, nullable: true, kind: pt.kind }, presence: hasKey || `isNotNull(${raw})`, dynamic: true });
+    }
+  } else {
+    t.store = 'map';
+    const raw = `${chIdent(column)}[${chStr(key)}]`;
+    const vt = ct && ct.kind === 'map' ? ct.value : { kind: 'string' };
+    const conv = declared && vt.kind === 'string' ? convertSQL(raw, declared) : null;
+    const kind = conv ? parseColumnType(declared).kind : vt.kind;
+    // Une clé absente d’une Map rend la valeur par défaut (chaîne vide, 0) : seul mapContains dit si le champ existe
+    Object.assign(t, { sql: conv || raw, type: { array: false, nullable: !!conv, kind }, presence: `mapContains(${chIdent(column)}, ${chStr(key)})` });
+  }
+  t.absence = t.presence ? negateWith(t.presence, false) : null;
+  // declared : le type des valeurs est connu (chemin JSON typé, attribute_types, ou Map de nombres)
+  t.declared = !!declared || (t.store === 'json' && !t.dynamic) || t.type.kind !== 'string';
+  t.type.presence = t.presence; t.type.absence = t.absence; t.type.attr = true; t.type.store = t.store; t.type.declared = t.declared;
+  return t;
+}
+// Colonne ClickHouse d’un champ Elasticsearch : sous-champ .keyword retiré, puis field_mapping (attribut : sa colonne)
 function fieldColumn(ctx, field) {
-  const base = String(field).replace(/\.keyword$/, '');
-  const fm = ctx.cfg.clickhouse.field_mapping || {};
-  return Object.prototype.hasOwnProperty.call(fm, base) && fm[base] ? fm[base] : base;
+  const t = fieldTarget(ctx, field);
+  return t.column;
 }
 // Type de la colonne d’après clickhouse.columns ; null pour un champ runtime ou une colonne que le schéma ne décrit pas
 function fieldType(ctx, field) {
   if (ctx.runtime[String(field).replace(/\.keyword$/, '')]) return null;
-  return columnType(ctx.cfg, ctx.table, fieldColumn(ctx, field));
+  const t = fieldTarget(ctx, field);
+  return t.kind === 'attr' ? t.type : columnType(ctx.cfg, ctx.table, t.column);
 }
 const isArrayField = (ctx, field) => { const t = fieldType(ctx, field); return !!t && t.array; };
 /*
+ * Valeur d’un champ lue pour un usage précis : nombre (mesure, plage numérique, histogramme) ou date. Un attribut dont
+ * le type n’est pas déclaré est une chaîne : il est alors converti, avec une remarque, au lieu de laisser ClickHouse
+ * refuser la comparaison ou, pire, comparer des textes.
+ */
+function fieldAs(ctx, field, want) {
+  const f = mapField(ctx, field);
+  const t = fieldTarget(ctx, field);
+  if (ctx.runtime[String(field).replace(/\.keyword$/, '')] || t.kind !== 'attr' || t.type.kind !== 'string' || !want) return f;
+  const type = want === 'date' ? 'DateTime64(3)' : 'Float64';
+  ctx.notes.add('warn', `Attribut ${t.key} converti en ${want === 'date' ? 'date' : 'nombre'}`, `${t.column} range ses valeurs en chaînes et le type de « ${t.key} » n’est pas déclaré : la valeur est convertie à la lecture (NULL si elle ne s’y prête pas). Déclarez-le dans clickhouse.attribute_types pour une conversion exacte, ou typez le chemin de la colonne JSON.`);
+  ctx.stats.approx++;
+  const conv = convertSQL(t.store === 'json' && !t.dynamic ? `toString(${f})` : f, type);
+  ctx.nullableCols.add(bareSQL(conv));
+  return conv;
+}
+// Expression sans ses littéraux de chaîne, telle que mayBeNull la compare
+const bareSQL = s => String(s).replace(/'(?:[^'\\]|\\.)*'/g, "''");
+// Valeur littérale comparée à un attribut chaîne : Elasticsearch compare le texte de la valeur (500 et « 500 »)
+function valueFor(ctx, field, v) {
+  const t = fieldTarget(ctx, field);
+  if (t.kind === 'attr' && t.type.kind === 'string' && !ctx.runtime[String(field).replace(/\.keyword$/, '')] && (typeof v === 'number' || typeof v === 'boolean')) return chStr(String(v));
+  return chVal(v);
+}
+/*
  * « Le champ n’a pas de valeur » et son contraire, selon le type de la colonne :
- * tableau vide, chaîne vide quand elle représente l’absence (empty_as_missing), NULL sinon.
+ * tableau vide, chaîne vide quand elle représente l’absence (empty_as_missing), clé absente d’un attribut, NULL sinon.
  */
 function absentSQL(ctx, field) {
   const f = mapField(ctx, field); const t = fieldType(ctx, field);
   if (t && t.array) return `empty(${f})`;
+  if (t && t.absence) return t.absence;
   return emptyIsMissing(ctx, t) ? `${f} = ''` : `isNull(${f})`;
 }
 function presentSQL(ctx, field) {
   const f = mapField(ctx, field); const t = fieldType(ctx, field);
   if (t && t.array) return `notEmpty(${f})`;
+  if (t && t.presence) return t.presence;
   return emptyIsMissing(ctx, t) ? `${f} != ''` : `isNotNull(${f})`;
 }
 /*
@@ -129,7 +251,7 @@ function onValues(ctx, field, predicate) {
   return isArrayField(ctx, field) ? `arrayExists(x -> ${predicate('x')}, ${f})` : predicate(f);
 }
 // Une chaîne vide représente-t-elle un champ absent dans cette colonne ? (convention clickhouse.empty_as_missing)
-const emptyIsMissing = (ctx, t) => !!t && !t.nullable && !t.array && t.kind === 'string' && !!ctx.cfg.clickhouse.empty_as_missing;
+const emptyIsMissing = (ctx, t) => !!t && !t.attr && !t.nullable && !t.array && t.kind === 'string' && !!ctx.cfg.clickhouse.empty_as_missing;
 function H(ctx, kind, text) {
   if (ctx.humanOff) return;
   if (ctx.cap.length) { ctx.cap[ctx.cap.length - 1].push(text); return; }
@@ -149,12 +271,28 @@ function mapField(ctx, field) {
     if (ctx.filtering) ctx.runtime[name].filtered = true;
     return ctx.runtime[name].alias;
   }
-  const fm = ctx.cfg.clickhouse.field_mapping || {};
-  if (Object.prototype.hasOwnProperty.call(fm, name) && fm[name]) name = fm[name];
+  const target = fieldTarget(ctx, name);
+  if (target.kind === 'attr') {
+    ctx.columns.add(target.column);
+    if (!ctx.attrUsed) ctx.attrUsed = new Map();
+    ctx.attrUsed.set(target.key, target);
+    if (target.type.nullable) ctx.nullableCols.add(bareSQL(target.sql));
+    if (!ctx.attrSeen) ctx.attrSeen = new Set();
+    if (!ctx.attrSeen.has(target.column)) {
+      ctx.attrSeen.add(target.column);
+      ctx.notes.add('info', `Attributs lus dans ${target.column}`, target.store === 'map'
+        ? `Les champs sans colonne propre sont lus dans la Map ${target.column} : une clé absente y vaut la chaîne vide, l’existence se teste donc par mapContains(). Les valeurs y sont des chaînes ; celles dont le type est déclaré dans clickhouse.attribute_types sont converties à la lecture.`
+        : `Les champs sans colonne propre sont lus dans la colonne JSON ${target.column}. Un chemin typé y garde son type ; un chemin dynamique est lu comme une chaîne, ou converti vers le type déclaré dans clickhouse.attribute_types.`);
+    }
+    return target.sql;
+  }
+  name = target.column;
   if (name === '_id') ctx.notes.add('warn', 'Champ _id', 'Elasticsearch génère _id ; dans ClickHouse il faut une colonne équivalente (par ex. un UUID ou un identifiant métier).');
   ctx.columns.add(name);
   const type = columnType(ctx.cfg, ctx.table, name);
   if (type && type.nullable) ctx.nullableCols.add(chIdent(name));
+  // Schéma déclaré : une colonne qu’il ne connaît pas ferait échouer la requête (UNKNOWN_IDENTIFIER)
+  if (!type && ctx.schema && ctx.table) { if (!ctx.unknownCols) ctx.unknownCols = new Set(); ctx.unknownCols.add(name); }
   return chIdent(name);
 }
 function isTextField(ctx, field) {
@@ -164,6 +302,11 @@ function isTextField(ctx, field) {
 }
 function textIndexNote(ctx, col) {
   ctx.textCols.add(col);
+}
+// Colonne de regroupement, pour le conseil LowCardinality ; un attribut est plutôt à matérialiser (voir translateRequest)
+function groupColumn(ctx, field) {
+  const sql = mapField(ctx, field);
+  if (fieldTarget(ctx, field).kind !== 'attr') ctx.groupCols.add(sql);
 }
 // Le mot est cherché dans la colonne mise en minuscules : lowerUTF8() traite aussi les lettres accentuées, là où
 // hasTokenCaseInsensitive() et lower() ne connaissent que l’ASCII (« échec » ne trouverait pas « Échec »)
@@ -522,7 +665,6 @@ function rangeClause(ctx, field, spec0) {
     if (spec.from !== undefined && spec.from !== null) spec[spec.include_lower === false ? 'gt' : 'gte'] = spec.from;
     if (spec.to !== undefined && spec.to !== null) spec[spec.include_upper === false ? 'lt' : 'lte'] = spec.to;
   }
-  const f = mapField(ctx, field);
   const tz = spec.time_zone; const fmt = spec.format || '';
   // Champ multivalué : il suffit qu’une valeur soit dans la plage
   const multi = isArrayField(ctx, field);
@@ -530,6 +672,23 @@ function rangeClause(ctx, field, spec0) {
   const OPS = [['gte', '>=', '≥'], ['gt', '>', '>'], ['lte', '<=', '≤'], ['lt', '<', '<']];
   // Champ date : connu comme tel, ou comparé à une date. Un nombre y est alors un instant en epoch millis.
   const dateField = isDateField(ctx, field) || !!fmt || OPS.some(([op]) => typeof spec[op] === 'string' && parseDateMath(spec[op]) !== null);
+  // Attribut rangé en chaîne : converti en date ou en nombre selon les bornes, comme Elasticsearch compare selon le type du champ
+  const numeric = OPS.some(([op]) => typeof spec[op] === 'number' || (typeof spec[op] === 'string' && /^-?\d+(\.\d+)?$/.test(spec[op])));
+  const f = fieldAs(ctx, field, dateField ? 'date' : numeric ? 'num' : null);
+  // Tableau de bord Grafana : la période entière ($__from, $__to) devient la macro $__timeFilter du plugin ClickHouse,
+  // à la milliseconde sur une colonne DateTime64
+  const gt = v => isParamMark(v) && ctx.opts && ctx.opts.grafana ? grafanaTime(paramSource(ctx, v)) : null;
+  if (!multi && gt(spec.gte) === '$__fromTime_ms' && gt(spec.lte) === '$__toTime_ms' && spec.gt === undefined && spec.lt === undefined) {
+    consumeParam(ctx, spec.gte); consumeParam(ctx, spec.lte);
+    const col = fieldColumn(ctx, field); const cols = ctx.cfg.clickhouse.columns || {};
+    const raw = String(cols[`${ctx.table}.${col}`] || cols[col] || '');
+    const macro = /^(Nullable\()?DateTime64/.test(raw) ? '$__timeFilter_ms' : '$__timeFilter';
+    const parts2 = [`${macro}(${f})`];
+    const timeKey = ctx.cfg.clickhouse.time_key;
+    if (timeKey && col === ctx.cfg.clickhouse.time_field) parts2.push(`$__timeFilter(${chIdent(timeKey)})`);
+    ctx.dateFields.add(f); H(ctx, 'period', 'la période du tableau de bord'); ctx.stats.ok++;
+    return andJoin(parts2);
+  }
   for (const [op, sym, hs] of OPS) {
     const v = spec[op];
     if (v === undefined || v === null) continue;
@@ -557,6 +716,11 @@ function rangeClause(ctx, field, spec0) {
       if (upper2 && (dm.round || dayOnly)) s = op === 'gt' ? '>=' : '<';
       date = true;
       if (op[0] === 'g') lower = { dm, v }; else upper = { dm, v };
+    } else if (dateField && isParamMark(v) && ctx.opts && ctx.opts.grafana && grafanaTime(paramSource(ctx, v))) {
+      // Tableau de bord Grafana : début ou fin de la période, macro du plugin ClickHouse
+      consumeParam(ctx, v);
+      sql = grafanaTime(paramSource(ctx, v));
+      date = true;
     } else if (dateField && isParamMark(v)) {
       // Modèle (Watcher, Grafana) : la valeur arrive à l’exécution, lue selon le format de la requête
       const zone = zoneOf(ctx.cfg, tz);
@@ -573,6 +737,10 @@ function rangeClause(ctx, field, spec0) {
     } else sql = chVal(v);
     if (date) isDate = true;
     parts.push(`${multi ? 'x' : f} ${s} ${sql}`);
+    // time_key : colonne DateTime égale à toDateTime(time_field), placée dans la clé primaire (TimestampTime des anciens
+    // schémas OpenTelemetry). La borne s’y reporte, arrondie à la seconde, pour que ClickHouse écarte les blocs hors période.
+    const timeKey = ctx.cfg.clickhouse.time_key;
+    if (date && timeKey && !multi && fieldColumn(ctx, field) === ctx.cfg.clickhouse.time_field) parts.push(`${chIdent(timeKey)} ${s[0] === '>' ? '>=' : '<='} toDateTime(${sql})`);
     hum.push(`${hs} ${date ? humanDate(v) : v}`);
   }
   if (isDate) {
@@ -611,8 +779,8 @@ function customDateFormat(fmt) {
  * En mode « tokens » (par défaut), un mot simple n’est cherché que par hasToken : « user » trouve aussi
  * « user_id », ce qu’Elasticsearch ne fait pas. Le mode « strict » ajoute la vérification à chaque mot.
  */
-function esTokens(text) {
-  const chars = [...String(text).toLowerCase()];
+function esTokens(text, keepCase) {
+  const chars = [...(keepCase ? String(text) : String(text).toLowerCase())];
   const letter = c => /\p{L}/u.test(c); const digit = c => /\p{N}/u.test(c);
   const out = []; let cur = '';
   for (let i = 0; i < chars.length; i++) {
@@ -673,7 +841,7 @@ function matchClause(ctx, field, o, type) {
     ctx.stats.ok++;
     if (/prefix/.test(type)) { H(ctx, 'filters', `${field} commence par « ${q} »`); return `startsWith(${f}, ${chStr(q)})`; }
     H(ctx, 'filters', `${field} = ${q}`);
-    return `${f} = ${chVal(q)}`;
+    return `${f} = ${valueFor(ctx, field, q)}`;
   }
   textIndexNote(ctx, f);
   const words = esTokens(q);
@@ -737,7 +905,11 @@ function clauseSQL(ctx, q) {
       if (ci) return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(v))}`);
       // Date donnée en epoch millis, comme dans range
       if (typeof v === 'number' && isDateField(ctx, field)) return `${f} = ${epochMillisSQL(v)}`;
-      return isArrayField(ctx, field) ? `has(${f}, ${chVal(v)})` : `${f} = ${chVal(v)}`;
+      if (isArrayField(ctx, field)) return `has(${f}, ${chVal(v)})`;
+      // Attribut d’une Map : la chaîne vide est aussi la valeur d’une clé absente
+      const ft = fieldType(ctx, field);
+      if (v === '' && ft && ft.presence) return `${ft.presence} AND ${f} = ''`;
+      return `${f} = ${valueFor(ctx, field, v)}`;
     }
     case 'terms': {
       const [field, vals] = fieldEntry(body);
@@ -747,7 +919,10 @@ function clauseSQL(ctx, q) {
       if (sources !== undefined) { ctx.stats.ok++; return sources; }
       const f = mapField(ctx, field); ctx.stats.ok++;
       if (isArrayField(ctx, field)) return vals.length === 1 ? `has(${f}, ${chVal(vals[0])})` : `hasAny(${f}, [${vals.map(chVal).join(', ')}])`;
-      return inList(ctx, f, vals.map(v => (typeof v === 'number' && isDateField(ctx, field) ? epochMillisSQL(v) : chVal(v))));
+      const ft = fieldType(ctx, field);
+      const listed = inList(ctx, f, vals.map(v => (typeof v === 'number' && isDateField(ctx, field) ? epochMillisSQL(v) : valueFor(ctx, field, v))));
+      // Attribut d’une Map : la chaîne vide est aussi la valeur d’une clé absente
+      return vals.includes('') && ft && ft.presence ? `${ft.presence} AND ${paren(listed, 'AND')}` : listed;
     }
     case 'range': { const [field, spec] = fieldEntry(body); return rangeClause(ctx, field, spec); }
     case 'exists': {
@@ -755,6 +930,8 @@ function clauseSQL(ctx, q) {
       H(ctx, 'filters', `${body.field} renseigné`);
       // Un champ existe s’il a au moins une valeur : tableau non vide, colonne non NULL, ou chaîne non vide selon la convention
       if (type && type.array) { ctx.stats.ok++; return `notEmpty(${f})`; }
+      // Attribut : clé présente dans la Map, chemin JSON renseigné
+      if (type && type.presence) { ctx.stats.ok++; return type.presence; }
       if (type && !type.nullable && emptyIsMissing(ctx, type)) { ctx.stats.ok++; return `${f} != ''`; }
       if (type && !type.nullable) {
         ctx.stats.approx++;
@@ -779,19 +956,28 @@ function clauseSQL(ctx, q) {
       const v = String(isObj(raw) ? (raw.value !== undefined ? raw.value : raw.wildcard) : raw);
       const ci = isObj(raw) && raw.case_insensitive;
       const f = mapField(ctx, field);
-      if (v === '*') return tq(ctx, { exists: { field } });
+      // \x désigne le caractère x lui-même, joker compris (Kibana échappe ainsi les caractères réservés)
+      const toks = [];
+      for (let i = 0; i < v.length; i++) {
+        if (v[i] === '\\' && i + 1 < v.length) toks.push({ lit: v[++i] });
+        else if (v[i] === '*' || v[i] === '?') toks.push({ wild: v[i] });
+        else toks.push({ lit: v[i] });
+      }
+      const wild = toks.some(t => t.wild); const plain = toks.map(t => t.lit || '').join('');
+      if (toks.length === 1 && toks[0].wild === '*') return tq(ctx, { exists: { field } });
       H(ctx, 'filters', `${field} ~ ${v}`);
-      if (!/[*?]/.test(v) && ci) { ctx.stats.ok++; return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(v))}`); }
-      if (!/[*?]/.test(v)) { ctx.stats.ok++; return isArrayField(ctx, field) ? `has(${f}, ${chStr(v)})` : `${f} = ${chStr(v)}`; }
-      if (/^[^*?]+\*$/.test(v) && !ci && !isTextField(ctx, field)) { ctx.stats.ok++; return onValues(ctx, field, x => `startsWith(${x}, ${chStr(v.slice(0, -1))})`); }
-      let like = likeEscape(v).replace(/\*/g, '%').replace(/\?/g, '_');
-      if (/^[*?]/.test(v)) ctx.leadingWildcard = f;
+      if (!wild && ci) { ctx.stats.ok++; return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(plain))}`); }
+      if (!wild) { ctx.stats.ok++; return isArrayField(ctx, field) ? `has(${f}, ${chStr(plain)})` : `${f} = ${chStr(plain)}`; }
+      const prefixOnly = toks.length > 1 && toks[toks.length - 1].wild === '*' && toks.slice(0, -1).every(t => !t.wild);
+      if (prefixOnly && !ci && !isTextField(ctx, field)) { ctx.stats.ok++; return onValues(ctx, field, x => `startsWith(${x}, ${chStr(plain)})`); }
+      const like = toks.map(t => (t.wild ? (t.wild === '*' ? '%' : '_') : likeEscape(t.lit))).join('');
+      if (toks[0].wild) ctx.leadingWildcard = f;
       if (isTextField(ctx, field)) {
         // Elasticsearch confronte le motif à chaque mot du champ : * et ? ne débordent pas du mot
         ctx.stats.ok++;
         textIndexNote(ctx, f);
         const W = '[\\p{L}\\p{N}_]';
-        const pattern = v.toLowerCase().split(/([*?])/).map(p => (p === '*' ? `${W}*` : p === '?' ? W : escRe(p))).join('');
+        const pattern = toks.map(t => (t.wild === '*' ? `${W}*` : t.wild === '?' ? W : escRe(t.lit.toLowerCase()))).join('');
         return `match(${f}, ${chStr(`(?i)(?:^|[^\\p{L}\\p{N}_])${pattern}(?:$|[^\\p{L}\\p{N}_])`)})`;
       }
       ctx.stats.ok++;
@@ -868,6 +1054,8 @@ function clauseSQL(ctx, q) {
     case 'query_string': case 'simple_query_string': {
       const defFields = body.default_field ? (body.default_field === '*' ? textFieldsOr(ctx) : [body.default_field]) : body.fields ? body.fields.map(f => String(f).replace(/\^[\d.]+$/, '')) : textFieldsOr(ctx);
       const simple = type === 'simple_query_string';
+      // « * » seul, sur tous les champs (défaut d’Elasticsearch, index.query.default_field: *) : tous les documents
+      if (!body.fields && (!body.default_field || body.default_field === '*') && /^\s*\*\s*$/.test(String(body.query || ''))) { ctx.stats.ok++; return null; }
       let ast;
       try { ast = simple ? simpleQueryParse(body.query, body.default_operator) : luceneParse(body.query, body.default_operator); }
       catch (e) { return todo(ctx, 'query_string', `${e.message} — requête : ${body.query}`); }
@@ -906,6 +1094,9 @@ function clauseSQL(ctx, q) {
       if (Array.isArray(pt)) [lon, lat] = pt; else if (isObj(pt)) ({ lat, lon } = pt); else if (typeof pt === 'string') [lat, lon] = pt.split(',').map(Number);
       lat = chNum(lat, 'geo_distance (latitude)'); lon = chNum(lon, 'geo_distance (longitude)');
       const meters = geoMeters(body.distance);
+      const gt = fieldTarget(ctx, field);
+      // Un attribut (Map ou JSON) n'est pas un Point : .1 et .2 y échoueraient à l'exécution
+      if (gt.kind === 'attr') return todo(ctx, 'geo_distance', `« ${field} » est un attribut (${gt.column}) : une position n’y est pas un Point ClickHouse. Rangez-la dans une colonne Point (lon, lat) ou dans deux colonnes, et adaptez la requête.`);
       const f = mapField(ctx, field); ctx.stats.approx++;
       ctx.notes.add('warn', 'geo_distance', `Suppose une colonne Point (lon, lat) « ${field} ». Adaptez si la position est stockée en deux colonnes.`);
       H(ctx, 'filters', `${field} à moins de ${body.distance}`);
@@ -1021,12 +1212,15 @@ function aliasOf(name) {
   return chIdent(`${raw}_agg`);
 }
 
-function valueExpr(ctx, body) {
+// want : 'num' pour une mesure numérique (un attribut rangé en chaîne est alors converti)
+function valueExpr(ctx, body, want) {
   let e;
   if (body.script) {
     const sc = body.script; const src = typeof sc === 'string' ? sc : sc.source;
-    e = painlessToSQL(ctx, src, { mode: 'expr', params: sc.params || {} }).sql;
-  } else e = mapField(ctx, body.field);
+    // Script de valeur (champ et script) : _value est la valeur du champ, que le script transforme
+    const valueSQL = typeof body.field === 'string' ? (want ? fieldAs(ctx, body.field, want) : mapField(ctx, body.field)) : undefined;
+    e = painlessToSQL(ctx, src, Object.assign({ mode: 'expr', params: sc.params || {} }, valueSQL ? { valueSQL } : {})).sql;
+  } else e = want ? fieldAs(ctx, body.field, want) : mapField(ctx, body.field);
   if (body.missing !== undefined) e = `ifNull(${e}, ${chVal(body.missing)})`;
   return e;
 }
@@ -1042,7 +1236,7 @@ function aggCall(fn, args, cond, mayBeEmpty) {
   return cond ? `${fn}If${orNull}(${args}, ${cond})` : `${fn}${orNull}(${args})`;
 }
 /* Renvoie [{alias, render(cond, mayBeEmpty)}] */
-function metricDef(ctx, name, type, body) {
+function metricDef(ctx, name, type, body, parent) {
   const A = aliasOf(name);
   const colType = typeof body.field === 'string' && !body.script && body.missing === undefined ? fieldType(ctx, body.field) : null;
   // Sur un champ multivalué, avg, sum, min et max portent sur toutes les valeurs : combinateur -Array
@@ -1050,12 +1244,18 @@ function metricDef(ctx, name, type, body) {
   const fieldName = body.field || (body.script ? 'script' : '?');
   if (HM[type]) H(ctx, 'metrics', `${HM[type]} de ${fieldName}`);
   switch (type) {
-    case 'avg': case 'sum': case 'min': case 'max': ctx.stats.ok++; return simple(type, valueExpr(ctx, body));
+    case 'avg': case 'sum': case 'min': case 'max': {
+      ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
+      // Une somme sans valeur vaut 0 pour Elasticsearch ; sum() d’une expression Nullable rend NULL
+      return simple(type, type === 'sum' && !(colType && colType.array) && mayBeNull(ctx, x) ? `ifNull(${x}, 0)` : x);
+    }
     case 'value_count': {
       // Nombre de valeurs : chaque élément d’un tableau compte, un champ absent ne compte pas
       ctx.stats.ok++; const x = valueExpr(ctx, body);
       if (colType && colType.array) return [{ alias: A, render: c => aggCall('sum', `length(${x})`, c) }];
       if (emptyIsMissing(ctx, colType)) return [{ alias: A, render: c => `countIf(${x} != ''${c ? ` AND ${c}` : ''})` }];
+      // Attribut : une clé absente ne compte pas, même si la Map rend une chaîne vide
+      if (colType && colType.presence && !colType.nullable) return [{ alias: A, render: c => `countIf(${colType.presence}${c ? ` AND ${c}` : ''})` }];
       return simple('count', x);
     }
     case 'cardinality':
@@ -1063,21 +1263,23 @@ function metricDef(ctx, name, type, body) {
       ctx.notes.add('info', 'cardinality → uniq()', 'uniq() est approximatif comme HyperLogLog d’Elasticsearch (erreur < 2 %). Utilisez uniqExact() pour un compte exact, plus coûteux en mémoire.');
       if (colType && colType.array) return simple('uniqArray', valueExpr(ctx, body));
       if (emptyIsMissing(ctx, colType)) { const x = valueExpr(ctx, body); return [{ alias: A, render: c => `uniqIf(${x}, ${x} != ''${c ? ` AND ${c}` : ''})` }]; }
+      if (colType && colType.presence && !colType.nullable) { const x = valueExpr(ctx, body); return [{ alias: A, render: c => `uniqIf(${x}, ${colType.presence}${c ? ` AND ${c}` : ''})` }]; }
       return simple('uniq', valueExpr(ctx, body));
     case 'stats': case 'extended_stats': {
-      ctx.stats.ok++; const x = valueExpr(ctx, body);
+      ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
       // Champ multivalué : chaque valeur compte (combinateur -Array), count est le nombre de valeurs
       const arr = !!(colType && colType.array);
       const cols = [['count', 'count'], ['min', 'min'], ['max', 'max'], ['avg', 'avg'], ['sum', 'sum']];
       if (type === 'extended_stats') cols.push(['varPop', 'variance'], ['stddevPop', 'std_deviation']);
-      const out = cols.map(([fn, suf]) => ({ alias: aliasOf(`${name}_${suf}`), render: (c, e) => (arr && fn === 'count' ? aggCall('sum', `length(${x})`, c) : aggCall(arr ? `${fn}Array` : fn, x, c, e)) }));
+      const sumArg = !arr && mayBeNull(ctx, x) ? `ifNull(${x}, 0)` : x;
+      const out = cols.map(([fn, suf]) => ({ alias: aliasOf(`${name}_${suf}`), render: (c, e) => (arr && fn === 'count' ? aggCall('sum', `length(${x})`, c) : aggCall(arr ? `${fn}Array` : fn, fn === 'sum' ? sumArg : x, c, e)) }));
       // Sans document, Elasticsearch renvoie 0 pour sum mais null pour sum_of_squares
       const square = arr ? `arrayMap(v -> v * v, ${x})` : `${pArg(x)} * ${pArg(x)}`;
       if (type === 'extended_stats') out.push({ alias: aliasOf(`${name}_sum_of_squares`), render: (c, e) => aggCall(`${arr ? 'sumArray' : 'sum'}${e ? 'OrNull' : ''}`, square, c, false) });
       return out;
     }
     case 'percentiles': {
-      ctx.stats.ok++; const x = valueExpr(ctx, body);
+      ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
       const ps = (body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => +(chNum(p, 'percentiles.percents') / 100).toFixed(4));
       ctx.notes.add('info', 'percentiles → quantilesTDigest()', 'Même algorithme (t-digest) qu’Elasticsearch : résultats comparables. Le résultat est un tableau dans l’ordre des percentiles demandés.');
       const fnq = colType && colType.array ? 'quantilesTDigestArray' : 'quantilesTDigest';
@@ -1085,23 +1287,30 @@ function metricDef(ctx, name, type, body) {
       return [{ alias: A, render: (c, e) => { const q = c ? `${fnq}If(${ps.join(', ')})(${x}, ${c})` : `${fnq}(${ps.join(', ')})(${x})`; return e ? `arrayMap(v -> if(isNaN(v), NULL, v), ${q})` : q; } }];
     }
     case 'percentile_ranks': {
-      ctx.stats.ok++; const x = valueExpr(ctx, body);
+      ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
       return (body.values || []).map(v => chNum(v, 'percentile_ranks.values')).map(v => ({ alias: aliasOf(`${name}_${String(v).replace(/\W/g, '_')}`), render: c => (c ? `round(100 * countIf(${pArg(x)} <= ${v} AND ${c}) / countIf(${x}, ${c}), 3)` : `round(100 * countIf(${pArg(x)} <= ${v}) / count(${x}), 3)`) }));
     }
     case 'weighted_avg': {
-      ctx.stats.ok++; const v = valueExpr(ctx, body.value || {}); const w = valueExpr(ctx, body.weight || {});
+      ctx.stats.ok++; const v = valueExpr(ctx, body.value || {}, 'num'); const w = valueExpr(ctx, body.weight || {}, 'num');
       return [{ alias: A, render: (c, e) => aggCall('avgWeighted', `${v}, ${w}`, c, e) }];
     }
     case 'top_metrics': {
       ctx.stats.ok++;
-      const ms = [].concat(body.metrics || []); const sort = body.sort || {};
+      const ms = [].concat(body.metrics || []);
+      // Tri écrit en objet ou en liste d’un seul tri, comme dans une recherche (Grafana envoie une liste)
+      if (Array.isArray(body.sort) && body.sort.length !== 1) throw new Error(`top_metrics : un seul tri attendu, ${body.sort.length} reçus (Elasticsearch le refuse aussi)`);
+      const sort = (Array.isArray(body.sort) ? body.sort[0] : body.sort) || {};
       const sf = isObj(sort) ? Object.keys(sort)[0] : String(sort);
       const dir = isObj(sort) ? String(isObj(sort[sf]) ? sort[sf].order : sort[sf]).toLowerCase() : 'asc';
-      const s = mapField(ctx, sf); const fn = dir === 'desc' ? 'argMax' : 'argMin';
+      const fn = dir === 'desc' ? 'argMax' : 'argMin';
       const n = body.size !== undefined ? chInt(body.size, 'top_metrics.size') : 1;
       // size > 1 : les n valeurs, dans l’ordre du tri. groupArraySorted garde les n plus petites clés sans charger
       // le groupe ; pour un tri décroissant, la clé (nombre ou date) change de signe. Clé de type inconnu : groupArray trié.
-      const st = fieldType(ctx, sf); const kind = isDateField(ctx, sf) ? 'date' : st && (st.kind === 'int' || st.kind === 'float') ? 'num' : null;
+      const st0 = fieldType(ctx, sf);
+      // Attribut sans type déclaré : un tri de top_metrics porte forcément sur un nombre ou une date, il est converti
+      const st = st0 && st0.attr && st0.kind === 'string' && !st0.declared ? Object.assign({}, st0, { kind: 'float' }) : st0;
+      const s = st !== st0 ? fieldAs(ctx, sf, 'num') : mapField(ctx, sf);
+      const kind = isDateField(ctx, sf) ? 'date' : st && (st.kind === 'int' || st.kind === 'float') ? 'num' : null;
       if (st && !kind) throw new Error(`top_metrics : tri sur ${sf}, qui n’est ni un nombre ni une date (Elasticsearch le refuse aussi)`);
       const key = kind === 'date' ? `toUnixTimestamp64Milli(toDateTime64(${s}, 3))` : s;
       const topN = (f, c) => {
@@ -1111,8 +1320,47 @@ function metricDef(ctx, name, type, body) {
       };
       return ms.map(m => { const f = mapField(ctx, m.field); return { alias: aliasOf(ms.length > 1 ? `${name}_${m.field}` : name), render: c => (n > 1 ? topN(f, c) : c ? `${fn}If(${f}, ${s}, ${c})` : `${fn}(${f}, ${s})`) }; });
     }
+    case 'rate': {
+      // rate : valeur par unité de temps, dans les tranches d’un date_histogram parent. Elasticsearch divise la somme (ou le
+      // nombre de valeurs, ou de documents sans champ) par la durée de la tranche exprimée dans l’unité demandée ;
+      // une tranche calendaire (mois) n’a pas toujours la même durée, d’où dateDiff. Le date_histogram peut être un
+      // ancêtre plus lointain (date_histogram › terms › rate) : Elasticsearch retient le plus proche.
+      const anc = parent && parent.rateInfo ? parent : (ctx.levelAncestors || []).slice().reverse().find(l => l.rateInfo);
+      const B = anc && anc.rateInfo;
+      if (!B) throw new Error('rate ne se calcule que sous un date_histogram (Elasticsearch le refuse ailleurs)');
+      const SEC = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800 }; const MONTHS = { month: 1, quarter: 3, year: 12 };
+      const CAL_SEC = { MINUTE: 60, HOUR: 3600, DAY: 86400, WEEK: 604800 }; const CAL_MONTHS = { MONTH: 1, QUARTER: 3, YEAR: 12 };
+      const unit = body.unit === undefined ? null : String(body.unit);
+      if (unit !== null && !SEC[unit] && !MONTHS[unit]) throw new Error(`rate : unité inconnue « ${unit} » (second, minute, hour, day, week, month, quarter, year)`);
+      const bucketMonths = B.kind === 'calendar' ? CAL_MONTHS[B.unit] : undefined;
+      let divisor = null;
+      if (unit && MONTHS[unit]) {
+        if (!bucketMonths) throw new Error(`rate : l’unité ${unit} demande un date_histogram au mois, au trimestre ou à l’année (Elasticsearch le refuse sinon)`);
+        divisor = bucketMonths / MONTHS[unit];
+      } else if (unit) {
+        if (bucketMonths) divisor = `(dateDiff('second', ${B.key}, ${B.key} + ${B.step}) / ${SEC[unit]})`;
+        else if (B.kind === 'calendar') divisor = CAL_SEC[B.unit] / SEC[unit];
+        else if (B.kind === 'fixed') divisor = B.seconds / SEC[unit];
+        else divisor = `($__interval_s / ${SEC[unit]})`;
+      }
+      const mode = String(body.mode || 'sum');
+      if (mode !== 'sum' && mode !== 'value_count') throw new Error(`rate : mode inconnu « ${mode} » (sum ou value_count)`);
+      const counted = !body.field && !body.script;
+      const x = counted ? null : valueExpr(ctx, body, mode === 'sum' ? 'num' : undefined);
+      const base = c => (counted ? (c ? `countIf(${c})` : 'count()') : mode === 'value_count' ? aggCall('count', x, c) : aggCall('sum', mayBeNull(ctx, x) ? `ifNull(${x}, 0)` : x, c));
+      ctx.stats.ok++;
+      H(ctx, 'metrics', `taux${body.field ? ` de ${body.field}` : ' de documents'}${unit ? ` par ${{ second: 'seconde', minute: 'minute', hour: 'heure', day: 'jour', week: 'semaine', month: 'mois', quarter: 'trimestre', year: 'année' }[unit]}` : ''}`);
+      // Une fraction de tranche (taux par an d’une tranche mensuelle) s’écrit en multiplication : × 12 plutôt que / 0,0833…
+      const scaled = c => {
+        if (divisor === null || divisor === 1) return `toFloat64(${base(c)})`;
+        if (typeof divisor !== 'number') return `${base(c)} / ${divisor}`;
+        if (divisor < 1 && Number.isInteger(+(1 / divisor).toFixed(9))) return `${base(c)} * ${+(1 / divisor).toFixed(9)}`;
+        return `${base(c)} / ${Number.isInteger(divisor) ? divisor : +divisor.toFixed(12)}`;
+      };
+      return [{ alias: A, render: c => scaled(c) }];
+    }
     case 'boxplot': {
-      ctx.stats.ok++; const x = valueExpr(ctx, body);
+      ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
       return [{ alias: A, render: c => (c ? `quantilesTDigestIf(0, 0.25, 0.5, 0.75, 1)(${x}, ${c})` : `quantilesTDigest(0, 0.25, 0.5, 0.75, 1)(${x})`) }];
     }
     default:
@@ -1126,6 +1374,8 @@ function resolveBucketsPath(level, path) {
   if (p === '_key') return level.keys.length ? level.keys[level.keys.length - 1].alias : 'NULL';
   const [head, sub] = p.split(/[.\[]/);
   const clean = head.replace(/>.*/, '');
+  // filtre._count : le nombre de documents du sous-filtre (colonne <filtre>_doc_count)
+  if (sub === '_count') { const c = level.metrics.find(x => x.alias === aliasOf(`${clean}_doc_count`)); if (c) return c.alias; }
   const m = level.metrics.find(x => x.alias === aliasOf(`${clean}_${sub}`)) || level.metrics.find(x => x.alias === aliasOf(clean));
   return m ? m.alias : aliasOf(clean);
 }
@@ -1185,14 +1435,17 @@ function buildLevel(ctx, name, def) {
   switch (type) {
     case 'terms': case 'significant_terms': case 'rare_terms': case 'significant_text': {
       let k = body.script ? painlessToSQL(ctx, body.script.source || body.script, { mode: 'expr', params: (body.script && body.script.params) || {} }).sql : mapField(ctx, body.field);
-      if (body.field && !ctx.runtime[String(body.field).replace(/\.keyword$/, '')]) ctx.groupCols.add(mapField(ctx, body.field));
+      if (body.field && !ctx.runtime[String(body.field).replace(/\.keyword$/, '')]) groupColumn(ctx, body.field);
       const computed = !!body.script || !!ctx.runtime[String(body.field || '').replace(/\.keyword$/, '')];
       const colType = computed ? null : fieldType(ctx, body.field);
-      const absent = emptyIsMissing(ctx, colType) ? `${k} = ''` : null;
+      // Absence qui ne se lit pas comme un NULL : chaîne vide (empty_as_missing), clé absente d’un attribut
+      const attrAbsent = colType && colType.absence && !colType.nullable ? colType.absence : null;
+      const absent = emptyIsMissing(ctx, colType) ? `${k} = ''` : attrAbsent;
       if (colType && colType.array) {
         // Champ multivalué : un document compte dans le groupe de chacune de ses valeurs ; un tableau vide ne compte nulle part
         k = body.missing !== undefined ? `arrayJoin(if(empty(${k}), [${chVal(body.missing)}], ${k}))` : `arrayJoin(${k})`;
-      } else if (body.missing !== undefined) k = absent ? `if(${absent}, ${chVal(body.missing)}, ${k})` : `ifNull(${k}, ${chVal(body.missing)})`;
+      } else if (body.missing !== undefined) k = absent ? `if(${absent}, ${valueFor(ctx, body.field, body.missing)}, ${k})` : `ifNull(${k}, ${chVal(body.missing)})`;
+      else if (body.missing_bucket && attrAbsent) k = `if(${attrAbsent}, NULL, ${k})`;
       else if (body.missing_bucket && absent) k = `nullIf(${k}, '')`;
       L.keys.push({ sql: k, alias: A });
       // Elasticsearch ne crée pas de groupe pour les documents qui n’ont pas le champ,
@@ -1201,6 +1454,7 @@ function buildLevel(ctx, name, def) {
         // Un champ runtime qui émet toujours une valeur n’a pas besoin de ce filtre
         const rtField = body.script ? null : ctx.runtime[String(body.field || '').replace(/\.keyword$/, '')];
         if (body.script || (rtField && rtField.nullable !== false) || (colType && colType.nullable)) L.where.push(`isNotNull(${k})`);
+        else if (attrAbsent) L.where.push(colType.presence);
         else if (absent) L.where.push(`${k} != ''`);
       }
       incl(k, body.include, false); incl(k, body.exclude, true);
@@ -1219,9 +1473,10 @@ function buildLevel(ctx, name, def) {
     }
     case 'multi_terms': {
       (body.terms || []).forEach(t => {
-        const k = mapField(ctx, t.field); const ct = fieldType(ctx, t.field); ctx.groupCols.add(k); L.keys.push({ sql: k, alias: aliasOf(`${name}_${t.field}`) });
+        const k = mapField(ctx, t.field); const ct = fieldType(ctx, t.field); groupColumn(ctx, t.field); L.keys.push({ sql: k, alias: aliasOf(`${name}_${t.field}`) });
         // Comme terms : un document sans l’un des champs ne forme pas de groupe
         if (ct && ct.nullable) L.where.push(`isNotNull(${k})`);
+        else if (ct && ct.presence) L.where.push(ct.presence);
         else if (emptyIsMissing(ctx, ct)) L.where.push(`${k} != ''`);
       });
       L.size = body.size !== undefined ? chInt(body.size, 'multi_terms.size') : 10; L.limitable = true; L.order = withKeyTiebreak(parseOrder(body.order, L.order));
@@ -1229,7 +1484,7 @@ function buildLevel(ctx, name, def) {
       break;
     }
     case 'date_histogram': case 'auto_date_histogram': {
-      const f = mapField(ctx, body.field); const tz = body.time_zone; const tzA = tzArg(ctx.cfg, tz);
+      const f = fieldAs(ctx, body.field, 'date'); const tz = body.time_zone; const tzA = tzArg(ctx.cfg, tz);
       let ci = body.calendar_interval || (body.interval && CAL[body.interval] ? body.interval : null);
       let fi = body.fixed_interval || (!ci && body.interval) || null;
       if (type === 'auto_date_histogram') { ci = 'hour'; ctx.stats.approx++; ctx.notes.add('warn', 'auto_date_histogram', `L’intervalle automatique (${body.buckets || 10} tranches) est fixé à l’heure : ajustez selon la période.`); } else ctx.stats.ok++;
@@ -1237,7 +1492,13 @@ function buildLevel(ctx, name, def) {
       let bucket, step, hum;
       // Un intervalle qu’Elasticsearch refuse ne devient pas une tranche d’une heure en silence
       if (body.calendar_interval && !CAL[ci]) throw new Error(`intervalle calendaire inconnu : ${JSON.stringify(body.calendar_interval)} (minute, hour, day, week, month, quarter, year ou 1m, 1h, 1d, 1w, 1M, 1q, 1y)`);
-      if (ci && CAL[ci]) { const [fn, unit, fr] = CAL[ci]; bucket = x => `${fn}(${x}${tzA})`; step = `INTERVAL 1 ${unit}`; hum = `par ${fr}`; }
+      // Tableau de bord Grafana : l’intervalle vient du tableau de bord ($__interval), rendu en secondes par le plugin ClickHouse
+      const dashboardIv = !!(ctx.opts && ctx.opts.grafana) && [body.fixed_interval, body.interval, body.calendar_interval].some(x => isParamMark(x) && /^\$__interval(_ms)?$/.test(paramSource(ctx, x)));
+      if (dashboardIv) {
+        [body.fixed_interval, body.interval, body.calendar_interval].filter(isParamMark).forEach(x => consumeParam(ctx, x));
+        bucket = x => `toStartOfInterval(${x}, INTERVAL $__interval_s SECOND${tzA})`; step = 'INTERVAL $__interval_s SECOND'; hum = 'par intervalle du tableau de bord';
+        L.rateInfo = { kind: 'dashboard' };
+      } else if (ci && CAL[ci]) { const [fn, unit, fr] = CAL[ci]; bucket = x => `${fn}(${x}${tzA})`; step = `INTERVAL 1 ${unit}`; hum = `par ${fr}`; L.rateInfo = { kind: 'calendar', unit }; }
       else {
         const m = /^(\d+)(ms|s|m|h|d)$/.exec(String(fi || '1h'));
         if (!m) throw new Error(`intervalle fixe inconnu : ${JSON.stringify(fi)} (unités ms, s, m, h, d)`);
@@ -1247,6 +1508,7 @@ function buildLevel(ctx, name, def) {
         // Un nombre d’heures qui ne divise pas 24 s’écrit donc en minutes, alignées sur l’epoch.
         if (u === 'h' && 24 % n !== 0) { n *= 60; u = 'm'; }
         bucket = x => `toStartOfInterval(${x}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`; step = `INTERVAL ${n} ${FIXED_UNIT[u]}`;
+        L.rateInfo = { kind: 'fixed', seconds: n * { ms: 0.001, s: 1, m: 60, h: 3600, d: 86400 }[u] };
       }
       // offset : les tranches commencent plus tard (ou plus tôt) ; la clé est le début décalé de la tranche
       const off = body.offset ? /^([+-]?)(\d+)(ms|s|m|h|d)$/.exec(String(body.offset)) : null;
@@ -1261,7 +1523,8 @@ function buildLevel(ctx, name, def) {
         if (body.hard_bounds.max !== undefined) L.where.push(`${f} <= ${dateBoundSQL(ctx, body.hard_bounds.max, tz)}`);
       }
       // Semaine, mois, trimestre et année donnent une clé de type Date ; les autres intervalles, un DateTime
-      L.keys.push({ sql: key, alias: A, date: { asDate: !off && !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
+      L.keys.push({ sql: key, alias: A, date: { asDate: !dashboardIv && !off && !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
+      Object.assign(L.rateInfo, { key: A, step });
       L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) {
         L.fill = step;
@@ -1274,7 +1537,7 @@ function buildLevel(ctx, name, def) {
       break;
     }
     case 'histogram': {
-      const f = mapField(ctx, body.field); const iv = chNum(body.interval || 1, 'histogram.interval'); const off = chNum(body.offset || 0, 'histogram.offset');
+      const f = fieldAs(ctx, body.field, 'num'); const iv = chNum(body.interval || 1, 'histogram.interval'); const off = chNum(body.offset || 0, 'histogram.offset');
       const bucket = x => (off ? `floor((${x} - ${off}) / ${iv}) * ${iv} + ${off}` : `floor(${x} / ${iv}) * ${iv}`);
       // Champ multivalué : le document compte une fois dans chaque tranche où tombe au moins une de ses valeurs
       const ft = typeof body.field === 'string' && !body.script ? fieldType(ctx, body.field) : null;
@@ -1290,7 +1553,7 @@ function buildLevel(ctx, name, def) {
       break;
     }
     case 'range': case 'date_range': case 'ip_range': {
-      const f = mapField(ctx, body.field); const tz = body.time_zone;
+      const f = type === 'ip_range' ? mapField(ctx, body.field) : fieldAs(ctx, body.field, type === 'range' ? 'num' : 'date'); const tz = body.time_zone;
       const bound = v => { if (type !== 'date_range') return type === 'ip_range' ? `toIPv4(${chStr(v)})` : chVal(v); return dateBoundSQL(ctx, v, tz); };
       const lhs = type === 'ip_range' ? `toIPv4(${f})` : f;
       // Clé par défaut d’une plage numérique : Elasticsearch écrit ses bornes comme des doubles (« *-100.0 »)
@@ -1326,9 +1589,10 @@ function buildLevel(ctx, name, def) {
       const f = mapField(ctx, body.field); const colType = fieldType(ctx, body.field);
       // « Sans le champ » : tableau vide, chaîne vide selon la convention, ou NULL
       if (colType && colType.array) L.where.push(`empty(${f})`);
+      else if (colType && colType.absence) L.where.push(colType.absence);
       else if (emptyIsMissing(ctx, colType)) L.where.push(`${f} = ''`);
       else L.where.push(`isNull(${f})`);
-      if (colType && !colType.array && !colType.nullable && !emptyIsMissing(ctx, colType)) {
+      if (colType && !colType.array && !colType.nullable && !colType.absence && !emptyIsMissing(ctx, colType)) {
         ctx.stats.approx++;
         ctx.notes.add('warn', `missing sur ${body.field}`, 'La colonne n’est pas Nullable : un champ absent y prend la valeur par défaut, isNull() n’est donc jamais vrai. Si la chaîne vide représente l’absence, activez clickhouse.empty_as_missing.');
       } else ctx.stats.ok++;
@@ -1378,7 +1642,7 @@ function buildLevel(ctx, name, def) {
   L.children = [];
   for (const [cn, cdef] of Object.entries(kids)) {
     const ct = aggType(cdef); const cb = cdef[ct] || {};
-    if (METRIC_TYPES.has(ct)) L.metrics.push(...metricDef(ctx, cn, ct, cb).map(m => Object.assign(m, { cond: null })));
+    if (METRIC_TYPES.has(ct)) L.metrics.push(...metricDef(ctx, cn, ct, cb, L).map(m => Object.assign(m, { cond: null })));
     else if (PIPE_TYPES.has(ct)) L.pipes.push({ name: cn, type: ct, body: cb });
     else if (ct === 'top_hits') L.topHits = L.topHits || [], L.topHits.push({ name: cn, body: cb });
     else if (ct === 'filter' && Object.values(aggChildren(cdef)).every(d => METRIC_TYPES.has(aggType(d)))) {
@@ -1386,7 +1650,7 @@ function buildLevel(ctx, name, def) {
       // « outer » : condition du groupe quand le niveau est calculé par agrégation conditionnelle (bucketsQuery)
       const within = outer => (outer ? andJoin([c, outer]) : c);
       L.metrics.push({ alias: aliasOf(`${cn}_doc_count`), render: outer => `countIf(${within(outer)})` });
-      for (const [mn, md] of Object.entries(aggChildren(cdef))) { const mt = aggType(md); metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}).forEach(m => L.metrics.push({ alias: m.alias, render: outer => m.render(within(outer), true) })); }
+      for (const [mn, md] of Object.entries(aggChildren(cdef))) { const mt = aggType(md); metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}, L).forEach(m => L.metrics.push({ alias: m.alias, render: outer => m.render(within(outer), true) })); }
       ctx.stats.ok++;
       ctx.notes.add('opt', `Filtre « ${cn} » fusionné`, 'Plutôt qu’une requête de plus, le sous-filtre est calculé dans la même passe grâce aux combinateurs -If (countIf, avgIf…).');
     } else L.children.push({ name: cn, def: cdef });
@@ -1648,6 +1912,8 @@ function walkAggs(ctx, env, aggs, parentPath, out) {
     // Elasticsearch refuse une agrégation global ailleurs qu’au premier niveau
     if (t === 'global' && parentPath.length) { todo(ctx, `agrégation ${name}`, 'Une agrégation global ne peut être définie qu’au premier niveau des agrégations.'); continue; }
     let L;
+    // Niveaux englobants : rate cherche son date_histogram parmi eux, comme Elasticsearch
+    ctx.levelAncestors = parentPath;
     try { L = buildLevel(ctx, name, def); }
     catch (e) { todo(ctx, `agrégation ${name}`, e.message); continue; }
     const path = parentPath.concat([L]);
@@ -1771,7 +2037,10 @@ function sortList(ctx, sort) {
       if (!mode) throw new Error(`mode de tri inconnu pour ${f} : ${JSON.stringify(o.mode)}`);
       e = `if(empty(${e}), NULL, ${mode}(${e}))`;
     }
-    if (o.missing !== undefined && o.missing !== '_last' && o.missing !== '_first') e = `ifNull(${e}, ${chVal(o.missing)})`;
+    // Attribut d’une Map : une clé absente vaut la chaîne vide, qui passerait en tête ; NULL la renvoie à la fin, comme Elasticsearch
+    if (ft && ft.presence && !ft.nullable) e = `if(${ft.presence}, ${e}, NULL)`;
+    if (ft && ft.attr && ft.kind === 'string' && !ft.declared) ctx.notes.add('warn', `Tri sur l’attribut ${f}`, 'Son type n’est pas déclaré : les valeurs sont triées comme des chaînes (« 100 » avant « 99 »). Déclarez-le dans clickhouse.attribute_types si c’est un nombre ou une date.');
+    if (o.missing !== undefined && o.missing !== '_last' && o.missing !== '_first') e = `ifNull(${e}, ${valueFor(ctx, f, o.missing)})`;
     out.push(`${e} ${dir.toUpperCase()}${o.missing === '_first' ? ' NULLS FIRST' : ''}`);
     // Clé de tri et position de sa valeur dans search_after (_score, _doc et _shard_doc n’ont pas de colonne)
     out.keys.push({ expr: e, desc: dir === 'desc', index: arr.indexOf(s), field: f });
@@ -1889,7 +2158,7 @@ function translateDSL(input, cfg, opts) {
 function translateRequest(input, cfg, opts, columns) {
   opts = opts || {};
   const ctx = makeDslCtx(cfg);
-  ctx.columns = columns;
+  ctx.columns = columns; ctx.opts = opts;
   let text = String(input || '').trim(); let index = opts.index || ''; let endpoint = '_search';
   if (!text) return { empty: true };
   const m = /^(GET|POST)\s+(\S+)[^\n]*\n?/i.exec(text);
@@ -1918,6 +2187,9 @@ function translateRequest(input, cfg, opts, columns) {
   const guards = applyStrictIssues(ctx, check.issues.concat(tpl.issues, lost));
   const { table, matched } = resolveTable(ctx, index);
   ctx.table = table;
+  // Profil de la table visée (clickhouse.tables) : schéma, renommages, attributs
+  try { ctx.cfg = tableConfig(cfg, table); } catch (e) { return fail(e.message); }
+  ctx.schema = hasSchema(ctx.cfg); ctx.targets = new Map();
   const env = { table, baseWhere: [] };
   // Champs runtime
   const rtm = dsl.runtime_mappings || {};
@@ -1983,15 +2255,28 @@ function translateRequest(input, cfg, opts, columns) {
     const base = col.replace(/[`.]/g, '_');
     ctx.notes.add('opt', `Index plein texte sur ${col}`, `hasToken(lowerUTF8(${col}), …) exploite un index text construit sur la même expression : les blocs sans le mot sont sautés sans être lus. Le découpage splitByNonAlpha est celui de hasToken(). La taille de l’index dépend du nombre de mots distincts (identifiants, adresses IP) : mesurez-la dans system.data_skipping_indices. Un index tokenbf_v1 sur la même expression, de taille fixe par bloc, reste possible.`, `ALTER TABLE ${table}\n    ADD INDEX idx_${base}_text lowerUTF8(${col}) TYPE text(tokenizer = splitByNonAlpha);\nALTER TABLE ${table} MATERIALIZE INDEX idx_${base}_text;`);
   }
-  if (ctx.leadingWildcard) ctx.notes.add('opt', 'Joker en tête de motif', `Un motif qui commence par * impose de lire toute la colonne ${ctx.leadingWildcard}. Un index ngrambf_v1 permet d’éviter une partie des lectures.`, `ALTER TABLE ${table}\n    ADD INDEX idx_ngram ${ctx.leadingWildcard} TYPE ngrambf_v1(3, 65536, 3, 0) GRANULARITY 1;`);
+  if (ctx.leadingWildcard) ctx.notes.add('opt', 'Joker en tête de motif', `Un motif qui commence par * impose de lire toute la colonne ${ctx.leadingWildcard}. Un index text à trigrammes sert LIKE '%motif%' dès 4 caractères (vérifié sur ClickHouse 26.9) : les blocs sans les trigrammes du motif sont sautés.`, `ALTER TABLE ${table}\n    ADD INDEX idx_${String(ctx.leadingWildcard).replace(/[^A-Za-z0-9_]/g, '_')}_ngram ${ctx.leadingWildcard} TYPE text(tokenizer = ngrams(3));\nALTER TABLE ${table} MATERIALIZE INDEX idx_${String(ctx.leadingWildcard).replace(/[^A-Za-z0-9_]/g, '_')}_ngram;`);
+  if (ctx.attrUsed && ctx.attrUsed.size) {
+    // Un attribut lu par la requête se lit dans toute la Map ou la colonne JSON : une colonne matérialisée se lit seule,
+    // se compresse mieux et peut entrer dans la clé de tri. L’absence y reste un NULL, comme dans Elasticsearch.
+    const attrs = [...ctx.attrUsed.values()].slice(0, 8);
+    const colName = a => rawAlias(a.key).replace(/^_+/, '') || 'attribut';
+    const typeOf = a => (a.type.kind === 'string' ? 'LowCardinality(Nullable(String))' : `Nullable(${a.type.kind === 'int' ? 'Int64' : a.type.kind === 'float' ? 'Float64' : a.type.kind === 'date' ? 'DateTime64(3)' : a.type.kind === 'bool' ? 'Bool' : 'String'})`);
+    const expr = a => (a.presence && !a.type.nullable ? `if(${a.presence}, ${a.sql}, NULL)` : a.sql);
+    const ddl = attrs.map(a => `ALTER TABLE ${table}\n    ADD COLUMN ${chIdent(colName(a))} ${typeOf(a)} MATERIALIZED ${expr(a)};\nALTER TABLE ${table} MATERIALIZE COLUMN ${chIdent(colName(a))};`).join('\n');
+    const yaml = attrs.map(a => `--   ${a.field}: ${colName(a)}`).join('\n');
+    ctx.notes.add('opt', 'Matérialiser les attributs les plus lus', `${attrs.map(a => a.key).join(', ')} : chaque lecture d’un attribut parcourt toute la colonne ${[...new Set(attrs.map(a => a.column))].join(' et ')}. Une colonne MATERIALIZED se lit seule, se compresse mieux et peut entrer dans la clé de tri. La clé absente y devient NULL : exists et les exclusions gardent le sens d’Elasticsearch. Déclarez ensuite la colonne dans field_mapping, pour que la traduction la lise.`, `${ddl}\n-- puis, dans le profil de la table (clickhouse.tables, field_mapping) :\n${yaml}`);
+  }
   if (ctx.groupCols.size) ctx.notes.add('opt', 'LowCardinality pour les regroupements', `${[...ctx.groupCols].join(', ')} : si le nombre de valeurs distinctes reste sous ~10 000, le type LowCardinality(String) accélère nettement GROUP BY et réduit le stockage.`);
   if (statements.some(s => /\btop_\w+ AS \(\n/.test(s.sql))) ctx.notes.add('info', 'Top N imbriqués', 'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits en deux temps : une CTE top_<nom> retient les N premiers groupes du parent, puis la requête principale s’y limite, avec des comptes exacts là où Elasticsearch les estime par shard. Le filtre commun est nommé une fois (CTE base). ClickHouse recopie une CTE à chaque emploi : la table est lue une fois par CTE top_ et une fois par la requête principale.');
   // Modèles : marqueurs des littéraux → {nom:String} ; un marqueur hors littéral redevient lisible
-  const finish = s => restoreTemplates(bindParams(s, ctx.params), ctx.params);
+  const grafana = !!opts.grafana;
+  const finish = s => restoreTemplates(grafana ? bindGrafana(s, ctx.params, opts.variables) : bindParams(s, ctx.params), ctx.params);
   const statementsOut = statements.map(s => ({ title: s.title, sql: finish(withClause(ctx, s.sql)) }));
   const sql = statementsOut.map(s => `-- ${s.title}\n${s.sql};`).join('\n\n');
-  const params = paramsInSQL(statementsOut.map(s => s.sql), ctx.params);
-  if (params.found.length) {
+  const params = (grafana ? grafanaParamsInSQL : paramsInSQL)(statementsOut.map(s => s.sql), ctx.params);
+  if (params.found.length && grafana) ctx.notes.add('info', 'Variables Grafana', `${params.found.map(p => p.source).join(', ')} : interpolées par Grafana (\${variable:singlequote}), une liste quand plusieurs valeurs sont choisies.`);
+  else if (params.found.length) {
     const first = params.found[0].name;
     ctx.notes.add('info', 'Paramètres de requête', `${params.found.map(p => `${p.source} → {${p.name}:${p.types.join(' | ')}}`).join(', ')}. La valeur est fournie à l’exécution : param_${first}=… dans l’URL de l’interface HTTP, --param_${first}=… avec clickhouse-client.`);
   }
@@ -2017,6 +2302,11 @@ function translateRequest(input, cfg, opts, columns) {
   // Au-delà de max_query_size (256 Kio par défaut), ClickHouse refuse la requête
   const longest = statementsOut.reduce((n, s) => Math.max(n, s.sql.length), 0);
   if (longest > 262144) ctx.notes.add('warn', 'Requête trop longue pour ClickHouse', `Une requête fait ${Math.round(longest / 1024)} Kio. Au-delà de 256 Kio, ClickHouse la refuse par défaut (max_query_size). Si une longue liste de valeurs en est la cause, clickhouse.lists.threshold la sort du SQL pour une table nommée.`);
+  if (ctx.unknownCols && ctx.unknownCols.size) {
+    ctx.stats.approx++;
+    const list = [...ctx.unknownCols];
+    ctx.notes.add('warn', `Colonne${list.length > 1 ? 's' : ''} absente${list.length > 1 ? 's' : ''} du schéma`, `${list.join(', ')} : le schéma déclaré de ${table} (clickhouse.columns, profil de la table) ne ${list.length > 1 ? 'les' : 'la'} connaît pas. ClickHouse refusera la requête si la table ne ${list.length > 1 ? 'les a' : 'l’a'} pas : ajoutez ${list.length > 1 ? 'ces colonnes' : 'la colonne'} au schéma, ou une correspondance dans field_mapping.`);
+  }
   if (!ctx.schema && ctx.schemaGaps.size) {
     const labels = { must_not: 'une exclusion (must_not, NOT)', exists: 'exists' };
     ctx.notes.add('warn', 'Schéma des colonnes non fourni', `La requête contient ${[...ctx.schemaGaps].map(g => labels[g]).join(' et ')}, dont le résultat dépend du type des colonnes. Sur une colonne Nullable, une exclusion écarte les lignes NULL qu’Elasticsearch garde ; sur une colonne non Nullable, exists est toujours vrai. Renseignez clickhouse.columns pour que la traduction en tienne compte.`);
@@ -2026,6 +2316,6 @@ function translateRequest(input, cfg, opts, columns) {
   ctx.notes.list.sort((a, b) => order[a.level] - order[b.level]);
   // Textes affichés : le marqueur d’un modèle redevient le modèle d’origine
   const human = restoreDeep(ctx.human, ctx.params);
-  return { sql, statements: statementsOut, lists, notes: restoreDeep(ctx.notes.list, ctx.params), stats: ctx.stats, table, index, matched, human, sentence: sentence(human), parameters: params.found, lostParams: params.lost };
+  return { sql, statements: statementsOut, lists, notes: restoreDeep(ctx.notes.list, ctx.params), stats: ctx.stats, table, index, matched, human, sentence: sentence(human), parameters: params.found, lostParams: params.lost.filter(p => !p.consumed) };
 }
 

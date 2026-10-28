@@ -1,0 +1,36 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  syslog_pri:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # syslog_pri
+      pri = 13
+      raw = .log.syslog.priority
+      if raw != null && raw != false {
+        if is_array(raw) { raw = get!(raw, [0]) }
+        pri = 0
+        if is_integer(raw) {
+          pri = int!(raw)
+        } else if is_float(raw) {
+          pri = to_int!(raw)
+        } else if is_string(raw) {
+          m = parse_regex(string!(raw), r'^\s*(?P<n>[+-]?\d+(?:_\d+)*)') ?? null
+          if m != null { pri = to_int(replace(string!(m.n), "_", "")) ?? 0 }
+        }
+      }
+      facility = to_int(floor(pri / 8))
+      severity = pri - facility * 8
+      .log.syslog.severity.code = severity
+      .log.syslog.facility.code = facility
+      if facility > 23 {
+        .tags = compact(flatten([.tags, "_syslogpriparsefailure"]))
+      } else {
+        labels = ["kernel", "user-level", "mail", "daemon", "security/authorization", "syslogd", "line printer", "network news", "uucp", "clock", "security/authorization", "ftp", "ntp", "log audit", "log alert", "clock", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7"]
+        i = if facility < 0 { length(labels) + facility } else { facility }
+        name = get!(labels, [i])
+        if name != null { .log.syslog.facility.name = name }
+        sname = get!(["emergency", "alert", "critical", "error", "warning", "notice", "informational", "debug"], [severity])
+        if sname != null { .log.syslog.severity.name = sname }
+      }

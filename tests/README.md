@@ -129,3 +129,48 @@ La raison d’un écart est suivie de « non signalé par la traduction » quand
 ### Ajouter un cas
 
 Ajoutez une entrée dans `tests/pipelines/cases.mjs`, lancez `npm run test:pipelines -- --only=<id> --verbose`, puis `npm run test:update` pour créer son instantané. Un instantané ne garde que les transforms propres au cas : le transport du banc est le même partout.
+
+## Bancs d’ingestion Elasticsearch
+
+La traduction des ingest pipelines vers VRL se vérifie contre le comportement d’Elasticsearch, sans cluster : les attendus viennent du code d’`IngestDocument` ou des fichiers `*-expected.json` des intégrations Elastic, produits par Elasticsearch lui-même.
+
+```sh
+VECTOR_BIN=vector node tests/ingest/chemins.mjs                     # accès aux champs : messages d’erreur, index de liste
+node tests/ingest/jouer.mjs pipeline.yml documents.json --yaml      # traduire un pipeline et y jouer des documents
+
+export ELASTIC_INTEGRATIONS=~/src/integrations                      # clone de github.com/elastic/integrations
+export MAXMIND_TEST_DATA=~/src/MaxMind-DB/test-data                 # bases GeoLite2-*-Test.mmdb
+node tests/ingest/integration.mjs packages/nginx/data_stream/access # tests de pipeline d’un data stream, champ par champ
+node tests/ingest/corpus.mjs                                        # tous les data streams : verdicts et causes
+VECTOR_BIN=vector node tests/ingest/painless.mjs                    # scripts Painless : documents rejoués, résultat attendu écrit à la main
+```
+
+`painless.mjs` rejoue dans Vector les cas de `tests/ingest/cas/` (expressions régulières, lambdas, ensembles, dates, bits, `throw`, fonction récursive) et compare chaque champ à ce que Java donnerait. La CI le joue dans le job `ingest`.
+
+Couverture sur les 1 154 data streams des intégrations Elastic (clone épinglé de la CI, pipelines partagés `.yml.link` compris), mesurée par `corpus.mjs` : **225 prêts, 801 à vérifier, 128 à reprendre**. Avant l’extension du traducteur Painless : 224 prêts, 447 à vérifier, 481 à reprendre (sans les pipelines partagés). Un flux « à vérifier » est traduit avec des écarts signalés (`corpus.mjs` en donne les causes) ; seul « prêt » promet des documents identiques. Sur les flux qui ont des tests de pipeline, `integration.mjs` mesure la part de documents identiques à ceux d’Elasticsearch.
+
+`PASSERELLE_INGEST_WORK` choisit le dossier de travail (par défaut, un dossier temporaire).
+
+Pour lancer à la suite tous les data streams qui ont des tests de pipeline : `node tests/ingest/tout.mjs [--only=regex] [--jobs=2]` (résumé dans `tout.tsv`, une ligne par data stream).
+
+### Compilation du VRL : `npm run test:ingest`
+
+Vector refuse la configuration entière si un seul VRL ne compile pas, quel que soit le verdict de Passerelle. `tests/ingest/valider.mjs` traduit puis passe `vector validate` sur :
+
+- les exemples de `examples/ingest/` et les cas de `tests/ingest/cas/` (une construction par fichier, ajoutés chaque fois qu’une compilation a échoué : `dot_expander`, conversions Painless) ;
+- avec `ELASTIC_INTEGRATIONS`, les data streams de `tests/ingest/integrations.txt` (ou ceux que sélectionne `--only=regex`, sur « paquet/flux »).
+
+`--clickhouse` rejoue le tout avec la sortie ClickHouse. Le banc a besoin de `VECTOR_BIN` et, pour les bases geoip, de `MAXMIND_TEST_DATA`. Il ne dit rien de l’exactitude des documents produits : c’est le rôle de `integration.mjs`.
+
+La CI joue ce banc dans le job `ingest`, avec Vector 0.59.0 et des clones épinglés des intégrations Elastic et de MaxMind-DB.
+
+## Interface : `npm run test:ui`
+
+Ouvre `dist/passerelle.html` dans Chromium avec Playwright : les sections requête, Logstash, ingestion et « Autres sources » (Kibana, Grafana, schéma, analyseurs) traduisent leur exemple et affichent un verdict, leurs onglets s’ouvrent, et la page ne produit aucune erreur. Playwright n’est pas une dépendance du projet : `npm run build:ui`, puis `npm install --no-save playwright` et `npx playwright install chromium` (ou `PLAYWRIGHT_FROM=<dossier où playwright se résout>`). La CI joue ce test dans le job `interface`.
+
+## Bancs ClickHouse : `npm run test:attributes` et `npm run test:clickhouse`
+
+Sans Elasticsearch, avec le binaire `clickhouse local` (`CLICKHOUSE_LOCAL`, extrait par `tests/differential/clickhouse.sh`).
+
+- `test:attributes` : les attributs OpenTelemetry (`Map`, `JSON`) donnent le résultat de la table plate.
+- `test:clickhouse` : ce que Passerelle génère pour ses exemples (schéma, inventaire Kibana) s’exécute avec les valeurs attendues ; `tests/clickhouse/analyseurs.mjs` rejoue la chaîne des analyseurs (table créée depuis un mapping, lignes insérées, plan appliqué, recherches vérifiées), et `tests/clickhouse/grafana.mjs` les requêtes des tableaux Grafana.

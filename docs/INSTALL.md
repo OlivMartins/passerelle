@@ -1,4 +1,4 @@
-# Passerelle 1.3.0 — Linux x86_64
+# Passerelle 1.4.0 — Linux x86_64
 
 Passerelle traduit les requêtes DSL Elasticsearch en SQL ClickHouse et les pipelines Logstash (Kafka vers Kafka) en configurations Vector. Un seul binaire fournit l’interface web, l’API REST et la ligne de commande. Le moteur Node.js 24 LTS est embarqué : rien d’autre à installer.
 
@@ -34,13 +34,13 @@ SHA256SUMS                     sommes de contrôle
 ## Installation
 
 ```bash
-sha256sum -c passerelle-1.3.0-linux-x86_64.tar.gz.sha256
-tar xzf passerelle-1.3.0-linux-x86_64.tar.gz
-cd passerelle-1.3.0-linux-x86_64
+sha256sum -c passerelle-1.4.0-linux-x86_64.tar.gz.sha256
+tar xzf passerelle-1.4.0-linux-x86_64.tar.gz
+cd passerelle-1.4.0-linux-x86_64
 sudo ./install.sh
 ```
 
-La somme de contrôle détecte un fichier abîmé. Pour vérifier aussi que l’archive a été construite par la CI du dépôt, à partir de l’étiquette de la release : `gh attestation verify passerelle-1.3.0-linux-x86_64.tar.gz -R OlivMartins/passerelle`.
+La somme de contrôle détecte un fichier abîmé. Pour vérifier aussi que l’archive a été construite par la CI du dépôt, à partir de l’étiquette de la release : `gh attestation verify passerelle-1.4.0-linux-x86_64.tar.gz -R OlivMartins/passerelle`.
 
 Le script vérifie l’architecture, la glibc et l’intégrité des fichiers. Il crée ensuite l’utilisateur système `passerelle` et installe `/usr/local/bin/passerelle`, `/etc/passerelle/` et l’unité systemd. Un jeton d’API aléatoire est écrit dans `/etc/passerelle/passerelle.env`, puis le service est démarré.
 
@@ -58,6 +58,23 @@ passerelle check-config --config /etc/passerelle/passerelle.yaml
 sudo systemctl reload passerelle      # rechargement à chaud (SIGHUP), sans coupure
 ```
 
+### TLS de la source qui reçoit les agents
+
+Les pipelines d’ingestion traduits écoutent Elastic Agent et Beats sur `0.0.0.0:5044`. Sans TLS, tout hôte qui atteint ce port peut envoyer des documents : la traduction le signale « à vérifier ». Pour chiffrer et authentifier la liaison :
+
+```yaml
+vector:
+  ingest_source:
+    address: 10.0.0.5:5044          # restreindre l’adresse d’écoute
+    tls:
+      crt_file: /etc/vector/certs/tls.crt
+      key_file: /etc/vector/certs/tls.key
+      ca_file: /etc/vector/certs/ca.pem   # autorité des certificats clients
+      verify_client: true                 # exige un certificat de chaque agent
+```
+
+Côté Elastic Agent, la sortie Logstash active `ssl.certificate_authorities` (et `ssl.certificate`, `ssl.key` avec `verify_client`). Une entrée `beats`, `tcp` ou `http` d’un pipeline Logstash reprend ses options `ssl_*` de la même façon ; un magasin Java (JKS, PKCS12) doit être converti en PEM.
+
 ### Compte ClickHouse de validation
 
 `/v1/validate/sql` soumet le SQL à `EXPLAIN indexes = 1`. Or ClickHouse évalue alors les sous-requêtes scalaires et imprime leur valeur dans le plan : une requête de validation peut donc lire des données. Deux barrières s’en chargent.
@@ -74,6 +91,25 @@ CREATE SETTINGS PROFILE passerelle_validation SETTINGS max_execution_time = 15 M
 ```
 
 Une table par entrée de `index_mapping`. Aucun autre droit : sans `CREATE TEMPORARY TABLE` ni droit sur les sources (`URL`, `REMOTE`, `FILE`), les fonctions de table sont refusées par ClickHouse lui-même. Le compte se déclare dans `passerelle.env` (`CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`).
+
+### Compte ClickHouse de la sortie Vector
+
+Avec `vector.elasticsearch_output: clickhouse`, la configuration Vector générée écrit dans les tables ClickHouse. Le compte de validation ci-dessus n’a que `SELECT` : donnez à Vector son propre compte, avec `INSERT` sur les tables de `index_mapping`.
+
+```yaml
+clickhouse:
+  user: ${CLICKHOUSE_USER}                    # lecture seule, pour la validation
+  password: ${CLICKHOUSE_PASSWORD}
+  sink_user: ${CLICKHOUSE_SINK_USER}          # écriture, pour Vector
+  sink_password: ${CLICKHOUSE_SINK_PASSWORD}
+```
+
+```sql
+CREATE USER vector_ecriture IDENTIFIED WITH sha256_password BY '…';
+GRANT INSERT ON logs.events TO vector_ecriture;
+```
+
+Sans `sink_user` ni `sink_password`, le puits reprend `clickhouse.user` et la traduction le signale « à vérifier ». Les deux restent des références à des variables d’environnement, listées dans le résultat de la traduction : Vector les lit au démarrage.
 
 ## Accès à l’interface
 
@@ -109,6 +145,12 @@ Toutes les routes `/v1/*` exigent l’en-tête `Authorization: Bearer <PASSERELL
 | GET | `/v1/config` | Configuration active, secrets masqués |
 | POST | `/v1/translate/dsl?index=logs-*` | DSL (JSON ou format console Kibana) vers SQL, avec verdict, paramètres et remarques |
 | POST | `/v1/translate/logstash?format=yaml` | Pipeline `.conf` vers configuration Vector (`yaml` ou `toml`), avec verdict |
+| POST | `/v1/translate/logstash/pipelines?format=yaml` | `pipelines.yml` (ou JSON `{ "pipelines": "…", "files": { "chemin": "contenu" } }`) vers une configuration Vector reliant les pipelines |
+| POST | `/v1/translate/ingest?format=yaml` | Pipeline d’ingestion Elasticsearch (YAML, JSON ou requête `PUT _ingest/pipeline` de la console Kibana ; ou JSON `{ "files": { "nom": "contenu" } }`) vers Vector, VRL compris |
+| POST | `/v1/inventory/kibana?format=json` | Export d’objets sauvegardés Kibana (NDJSON) vers un inventaire (`json`, `md`, `html`, `csv`) ; `timezone=` fixe le fuseau des dates relatives |
+| POST | `/v1/translate/grafana?index=logs-*` | Tableau de bord Grafana (JSON) vers un rapport par panneau et le tableau réécrit (`format=md` pour le rapport seul) |
+| POST | `/v1/schema/ddl?preset=otel&format=sql` | Mapping, modèle d’index ou réponse d’API Elasticsearch (ou JSON `{ "files": { "nom": "contenu" } }`) vers le `CREATE TABLE` ClickHouse. `preset` (`otel`, `otel-json`), `compact`, `json`, `table` comme en ligne de commande ; sans `format=sql`, JSON avec verdict, profils par table et remarques |
+| POST | `/v1/schema/analyzers?text=…&field=…` | Plan ClickHouse des analyseurs personnalisés d’un mapping, avec l’aperçu des mots du texte donné ; `format=md` pour le rapport |
 | POST | `/v1/validate/sql?param_nom=…` | Tables vérifiées par `EXPLAIN AST`, puis `EXPLAIN indexes = 1` sur le ClickHouse configuré (SELECT seul, `readonly=1`). Les `param_*` renseignent les paramètres `{nom:Type}` |
 | POST | `/v1/validate/vector?format=yaml` | Compilation complète de la configuration et du VRL par `vector validate` |
 
@@ -120,7 +162,7 @@ curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
 
 Chaque traduction porte un `verdict` : `ready` (prête), `review` (à vérifier), `todo` (à reprendre : le SQL s’arrête sur `throwIf`). Une entrée que Passerelle refuse, comme Elasticsearch la refuserait, répond 422 avec `verdict: "unrecognized"`.
 
-Les corps de requête sont limités à 2 Mio. Au plus deux validations, Vector et SQL confondues, tournent en parallèle.
+Les corps de requête sont limités à 2 Mio, et à 32 Mio pour `/v1/inventory/kibana`, `/v1/translate/grafana`, `/v1/translate/ingest`, `/v1/translate/logstash/pipelines`, `/v1/schema/ddl` et `/v1/schema/analyzers`. Au plus deux validations, Vector et SQL confondues, tournent en parallèle.
 
 Un navigateur ne peut pas appeler l’API depuis un autre site : `/v1/*` refuse les requêtes intersites. Sans jeton, cas d’un `passerelle serve` lancé sur un poste, l’API ne répond qu’aux requêtes adressées à `localhost`, `127.0.0.1` ou `[::1]`.
 
@@ -129,6 +171,11 @@ Un navigateur ne peut pas appeler l’API depuis un autre site : `/v1/*` refuse 
 ```bash
 passerelle dsl2sql requetes/ --config passerelle.yaml --out build/sql --fail-on todo
 passerelle ls2vector pipelines/ --config passerelle.yaml --format yaml --out build/vector --fail-on review
+passerelle ingest ingest/ --config passerelle.yaml --out build/vector --fail-on review
+passerelle kibana export.ndjson --format md --out build/kibana
+passerelle grafana tableaux/ --index 'logs-*' --out build/grafana
+passerelle schema ddl mappings/ --preset otel --out build/ddl
+passerelle schema analyzers mappings/ --text "texte d’essai" --format md
 ```
 
 Chaque fichier reçoit un verdict : prête, à vérifier, à reprendre ou non reconnue. Codes de sortie : `0` succès, `1` erreur ou fichier non reconnu, `2` fichier à reprendre (`--fail-on todo`), ou à vérifier ou à reprendre (`--fail-on review`). `--verbose` affiche les remarques de chaque fichier.

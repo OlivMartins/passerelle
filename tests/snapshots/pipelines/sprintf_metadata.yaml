@@ -1,5 +1,4 @@
 # Couverture : 4 directs, 0 à vérifier, 0 à reprendre
-# À vérifier : Référence %{champ}
 
 transforms:
   mutate:
@@ -13,4 +12,5 @@ transforms:
     inputs: [mutate]
     source: |
       # mutate
-      if exists(.k) { .k = push(array(.k) ?? [.k], (to_string(%cle) ?? join(%cle, ",") ?? encode_json(%cle))) } else { .k = (to_string(%cle) ?? join(%cle, ",") ?? encode_json(%cle)) }
+      ref_1 = if %cle == null { "%{[@metadata][cle]}" } else if is_array(%cle) { (join(map_values(flatten(array!(%cle))) -> |item| { if item == null { "" } else { to_string(item) ?? encode_json(item) } }, ",") ?? "") } else { to_string(%cle) ?? encode_json(%cle) }
+      if exists(.k) { .k = push(array(.k) ?? [.k], ref_1) } else { .k = ref_1 }

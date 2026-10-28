@@ -2,7 +2,42 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
-## [Non publié]
+## [1.4.0] - 2026-10-28
+
+### Ajouté
+
+- **TLS des sources qui écoutent** : une entrée Logstash `beats`, `tcp` ou `http` reprend `ssl_enabled`, `ssl_certificate`, `ssl_key`, `ssl_certificate_authorities`, `ssl_client_authentication` (ou `ssl_verify_mode`) et `ssl_key_passphrase` (lue dans une variable d’environnement) dans le `tls` de la source Vector ; un magasin Java (JKS, PKCS12) est signalé, avec des chemins PEM à remplir. Sans TLS, la source est signalée « à vérifier » : tout hôte qui atteint le port peut y envoyer des événements. La source Elastic Agent des pipelines d’ingestion se règle par `vector.ingest_source` (`address`, `tls.crt_file`, `tls.key_file`, `tls.ca_file`, `tls.verify_client`), et elle est signalée de la même façon quand TLS est absent. Un banc (`tests/ingest/tls.mjs`) vérifie avec Vector que la configuration est acceptée, que le handshake répond avec le certificat donné et qu’une connexion en clair est refusée.
+
+Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit désormais ce qui entoure Elasticsearch. Chaque sortie garde les verdicts prête, à vérifier, à reprendre ou non reconnue.
+
+- **Inventaire Kibana** (`passerelle kibana`, `POST /v1/inventory/kibana`) : lit un export d’objets sauvegardés (NDJSON) et dresse le catalogue de ce qui se traduit (index patterns, recherches, visualisations, Lens, cartes, tableaux de bord, alertes, règles de sécurité, connecteurs, canvas, graphes), objet par objet, en `md`, `html`, `csv` ou `json`. Les requêtes DSL, KQL et Lucene qu’ils portent sont traduites en SQL.
+- **Tableaux de bord Grafana** (`passerelle grafana`, `POST /v1/translate/grafana`) : les panneaux à source Elasticsearch deviennent des requêtes SQL ClickHouse, avec un rapport par panneau et le tableau de bord réécrit.
+- **Schéma** (`passerelle schema ddl`, `schema pull`) : `CREATE TABLE` ClickHouse déduit d’un mapping Elasticsearch, avec les préréglages OpenTelemetry `otel` (Map) et `otel-json` (colonnes JSON typées) ; `schema pull` lit les tables déjà présentes pour que les traductions s’y adaptent.
+- **Pipelines d’ingestion Elasticsearch** (`passerelle ingest`, `POST /v1/translate/ingest`) : les pipelines d’ingestion deviennent des étapes VRL. Processeurs pris en charge : `append`, `bytes`, `community_id`, `convert`, `csv`, `date`, `dissect`, `dot_expander`, `drop`, `fail`, `fingerprint`, `foreach`, `geoip`, `grok`, `gsub`, `html_strip`, `join`, `json`, `kv`, `lowercase`, `pipeline`, `registered_domain`, `remove`, `rename`, `reroute`, `script` (Painless), `set`, `sort`, `split`, `terminate`, `trim`, `uppercase`, `uri_parts`, `urldecode`, `user_agent`. Un pipeline appelé par un autre est résolu parmi les fichiers donnés.
+- **Sortie ClickHouse** : avec `vector.elasticsearch_output: clickhouse`, la sortie `elasticsearch` d’un pipeline Logstash devient un puits ClickHouse (table, colonnes inconnues ignorées signalées).
+- **Plusieurs pipelines** : `pipelines.yml` est lu (`passerelle ls2vector pipelines.yml`, `POST /v1/translate/logstash/pipelines`), les pipelines qui s’appellent entre eux sont reliés.
+- **Analyseurs personnalisés** (`passerelle schema analyzers`) : un analyseur Elasticsearch (char_filters, tokenizers, filtres) devient une colonne `MATERIALIZED` et un index plein texte ClickHouse, avec l’aperçu des termes produits et la requête de recherche correspondante. Voir [docs/ANALYSEURS.md](docs/ANALYSEURS.md).
+- Sortie ClickHouse : `clickhouse.sink_user` et `clickhouse.sink_password` donnent à Vector un compte d’écriture distinct du compte de validation (lecture seule) ; sans eux, le puits reprend `clickhouse.user` et la traduction le signale « à vérifier ».
+- API : `POST /v1/schema/ddl` et `POST /v1/schema/analyzers`, comme `passerelle schema ddl` et `schema analyzers`.
+- Filtres Logstash : `prune`, `de_dot`, `syslog_pri`, `clone`, `throttle`, `environment`, `bytes`.
+- **Interface** : deux nouvelles sections, « Ingestion » et « Autres sources » (Kibana, Grafana, schéma, analyseurs), avec dépôt de fichiers par type ; l’API et la ligne de commande y sont listées.
+- **CI** : le job `ingest` compile avec `vector validate` (0.59.0) le VRL de la traduction des exemples, des cas de `tests/ingest/cas/` et d’une sélection de data streams des intégrations Elastic, pour les sorties console et ClickHouse (`npm run test:ingest`). Le banc ClickHouse exécute aussi la chaîne complète des analyseurs, et le job `interface` ouvre la page assemblée dans Chromium (`npm run test:ui`) : chaque section traduit son exemple, sans erreur de page.
+
+- **Scripts Painless d’ingestion** : le traducteur reprend la plupart des constructions des intégrations Elastic. Sur les 1 154 data streams, les « à reprendre » passent de 481 à 128 (voir `tests/README.md`) :
+  - **références** : une variable qui désigne un objet de `ctx` (`def x = ctx.a`, `x.get('b')`, l’élément d’une boucle, une entrée de `entrySet()`, un argument de fonction) le modifie comme en Java ; un rattachement qui dépend de la branche suivie est suivi par un indicateur, un rattachement qui change au fil d’une boucle est à reprendre avec la raison ;
+  - expressions régulières : littéraux `/…/` partout, `Pattern.compile`, `matcher(…).replaceAll`, `replaceFirst`, `matches`, `find` ; Matcher gardé dans une variable (`while (m.find())`, `group(n|nom)`, `start()`/`end()` de la première correspondance) ; `Pattern.split` ;
+  - lambdas de `forEach` (liste ou table) et de `removeIf` (liste, `values()`, `entrySet()`), à une expression ou à plusieurs instructions ; `stream()` avec `filter`, `map`, `anyMatch`/`allMatch`/`noneMatch`, `collect(toList | toSet | joining)`, `distinct`, `count`, `limit`, `skip`, `findFirst().orElse()`, `sorted` ;
+  - collections : `HashSet` (sans doublons), `StringBuilder`, `subList`, `toArray`, `new T[n]`, `new T[] { … }`, `Arrays.asList`, `List.of`, `Collections.emptyList`/`singletonList`, `list.set(i, v)`, `entry.setValue(v)`, `m.remove(k)` et `l.remove(i)` en expression, `put`/`remove` à clé calculée, `ctx.a[clé] = v` ;
+  - tri : `Collections.sort`, `list.sort(null)`, comparateur `(a, b) -> clé(a).compareTo(clé(b))` et ordre inverse (tri par insertion stable ; valeurs non comparables : le processeur échoue) ;
+  - boucles : `for` à trois clauses (nombre de tours calculé à l’entrée quand c’est possible), `while`, `x++`/`--x` ; une boucle qui tournerait plus de 1 024 fois fait échouer le processeur ;
+  - fonctions : récursion, y compris croisée (`handleMap` ↔ `handleList`), recopiée sur un nombre borné de niveaux (5, ou 4 quand la fonction s’appelle plusieurs fois, moins si la copie devient trop lourde à compiler pour Vector, jamais moins de 3) ; au-delà, le processeur échoue au lieu de traiter de travers un document plus profond ; signalé « à vérifier ». Une fonction qui ne tient pas sur 3 niveaux reste à reprendre ;
+  - texte et nombres : `String.format` (`%s`, `%d`, `%x`, `%X`, largeur, zéros), `String.split` selon Java (éléments vides de fin retirés, limite), `String.join`, `Json.dump`, `Long.decode`, `Integer.toOctalString`/`toHexString`, `Integer.parseUnsignedInt`, `Boolean.parseBoolean`, `sha1()`, `decodeBase64()`, `Character.isUpperCase`/`isLowerCase`/`isDigit`/`toLowerCase`… ; conversions vers une classe Java (`(Number) x`) ;
+  - bits : `&` avec un masque constant, `>>`, `>>>`, `<<` avec un décalage constant, littéraux hexadécimaux ;
+  - dates : `ZonedDateTime.parse`, `Instant.parse`, `ofEpochMilli`, `ofEpochSecond`, `toInstant`, `toEpochSecond`/`toEpochMilli`, `plusDays`…, `isAfter`/`isBefore`, `ChronoUnit.X.between`, `Instant.toString` au format ISO ;
+  - `throw` : le processeur échoue avec le message de l’exception.
+- Processeur `sort` (`order`, `target_field`) ; `kv` et `split` acceptent un séparateur `X(?=Y)` (quand aucun `X` ne peut commencer dans `Y`) ou `(?<!\\)c` ; `gsub` de `(..)(?!$)` (adresses MAC).
+- `passerelle ingest` et les bancs lisent les fichiers `.yml.link` d’elastic-package (pipelines partagés).
+- Un banc (`tests/ingest/painless.mjs`, job `ingest`) rejoue ces cas dans Vector et compare chaque champ à ce que Java donnerait.
 
 ### Sécurité
 
@@ -11,10 +46,34 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ### Corrigé
 
+- Pipelines d’ingestion :
+  - Painless : une variable qui désignait un objet de `ctx` en était une copie : `def x = ctx.a; x.put('b', 1)` ne modifiait pas le document, sans aucun signalement. Les modifications sont maintenant recopiées vers l’origine.
+  - `rename` ou `remove` de `_ingest._value` dans un `foreach` échouaient (« cannot remove ») ; `_ingest._key` dans un `foreach` sur une liste rendait le processeur intraduisible (Elasticsearch le rend vide).
+  - grok : un nom de groupe `(?'nom'…)` et un `%{` sans accolade fermante faisaient refuser la configuration par Vector.
+  - Painless : `String.split` gardait les éléments vides de fin, que Java retire.
+  - `dissect` dont une clé apparaît deux fois produisait deux groupes du même nom, que Vector refuse ; la dernière valeur l’emporte, comme dans Elasticsearch.
+  - Painless : le reste de la division (`%`) produisait un VRL invalide (VRL n’a pas cet opérateur) ; il utilise `mod()`.
+  - Painless : `for (int i = 0; i < texte.length(); i++)` parcourait un texte comme une liste vide ; il parcourt maintenant ses caractères.
+  - `dot_expander` concaténait des tableaux avec `+`, que VRL refuse (E110) ; il utilise `append()`.
+  - Un motif `gsub` qui contient des caractères de contrôle (`\u0000-\u001F`) s’écrit `\xNN` dans le VRL : bruts, ils faisaient refuser le YAML par Vector.
+  - `keySet`, `values` et les boucles sur `params` ne portent plus de fusion d’erreur inutile (E651).
+  - Une addition, soustraction ou multiplication Painless sur des valeurs de type inconnu n’utilise plus `?? null` (E651 quand VRL connaît déjà les types) : entiers entre eux, sinon flottants, sinon `null`.
+  - Une variable Painless réaffectée avec une valeur d’un autre type perd son type (`String s = …; s = s.substring(1)` laissait croire à une chaîne, d'où E103 sur `split`).
+  - Les comparaisons Painless entre valeurs de type inconnu suivent la même forme (entiers, flottants, sinon faux).
+  - Une conversion Painless `(int)` ou `(double)` d’une valeur de type inconnu se fait par `int!` / `to_float!` après contrôle du type, sans fusion d’erreur.
+  - Une conversion Painless d’un nombre de type connu (`(int) 2.5`, `(long) 1e18`) n’utilise plus `?? null`.
+  - Un littéral flottant à exposant (`1e18`, `1.5e-3`) s’écrit en décimal : VRL ne lit pas cette notation et refusait la configuration (« undefined variable »).
+  - `kv` : `trim_key` et `trim_value` qui contiennent une apostrophe donnent une expression régulière valide.
+  - Les conversions en chaîne des scripts Painless ne produisent plus d’erreur E651 (« fusion d’erreur inutile ») sur un type déjà connu.
+- Analyseurs :
+  - `elision` : `articles_case` n’était pas appliqué dans le bon sens (faux : sensible à la casse, vrai : insensible), et le filtre prédéfini cherchait toujours sans tenir compte de la casse ; un filtre défini sans `articles` ni `articles_path` est refusé, comme par Elasticsearch.
+  - `stemmer` : `name` est lu comme synonyme de `language` ; sans l’un ni l’autre, le défaut d’Elasticsearch (Porter) est appliqué, et `light_*`, `minimal_*`, sans équivalent dans ClickHouse, sont signalés « à reprendre ».
+  - `synonym` : la requête générée cherche le terme canonique, comme l’index, au lieu des mots développés qui ne trouvaient rien.
 - `ids` : la requête lit la colonne de `field_mapping._id`, comme `term` sur `_id`, au lieu d’une colonne `_id` écrite en dur.
 - `_source.excludes` : les exclusions sont gardées quand `includes` est présent ; un champ exclut aussi ses sous-champs (`http` retire `http.method`) et un motif (`http.*`) s’applique. Elles s’écrivent `EXCEPT ('expression régulière')` : une liste de noms n’excluait rien en silence pour un motif ou un nom absent.
 - `fuzzy` : `prefix_length` est appliqué (les premiers caractères doivent être identiques) au lieu d’être signalé « à vérifier » ; `fuzziness: AUTO:bas,haut` respecte ses bornes ; la longueur du mot se compte en caractères.
 - `query_string` : `mot~1` garde sa distance (elle était remplacée par `AUTO`), `mot~` prend l’option `fuzziness` de la requête ; `fuzzy_prefix_length` et `fuzzy_transpositions` sont appliqués, dans `simple_query_string` aussi.
+- `geo_distance` sur un champ rangé dans une Map ou une colonne JSON d’attributs (`otel`, `otel-json`) : la requête est « à reprendre » avec la raison, au lieu d’un SQL qui échouait à l’exécution (une position n’y est pas un Point).
 - `geo_distance` :
   - toutes les unités d’Elasticsearch sont lues (`nmi`, `NM`, `cm`, `mm`, `in`, noms longs comme `miles`, notation `2.5e3m`) ; une unité inconnue faisait chercher à 0 m, elle fait maintenant refuser la requête, comme Elasticsearch ;
   - la distance n’est plus arrondie au mètre (`1.5ft` donnait 0) ;
@@ -261,7 +320,7 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
-[Non publié]: https://github.com/OlivMartins/passerelle/compare/v1.3.0...HEAD
+[1.4.0]: https://github.com/OlivMartins/passerelle/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/OlivMartins/passerelle/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/OlivMartins/passerelle/compare/v1.1.1...v1.2.0
 [1.1.1]: https://github.com/OlivMartins/passerelle/compare/v1.1.0...v1.1.1

@@ -4,7 +4,7 @@
 SELECT
     service AS svc,
     count() AS doc_count,
-    arrayMap(t -> t.2, groupArraySorted(2)((latency_ms, bytes))) AS t
+    arrayMap(t -> t.2, groupArraySorted(2)((timestamp, bytes))) AS t
 FROM logs.events
 GROUP BY svc
 ORDER BY doc_count DESC, svc ASC

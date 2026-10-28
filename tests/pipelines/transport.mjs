@@ -28,7 +28,9 @@ const fileOutput = name => `file { path => "/work/out/${name}.ndjson" codec => j
 export const outputFile = (prefix, name) => `${prefix}${name ? `.${name}` : ''}`;
 export function outputsOf(c) {
   const names = [];
-  if (c.output) c.output(name => { names.push(name); return ''; });
+  const collect = output => output && output(name => { names.push(name); return ''; }, () => '');
+  if (c.chain) c.chain.forEach(m => collect(m.output));
+  else collect(c.output);
   return names.length ? [...new Set(names)] : [''];
 }
 const outputBlock = (c, prefix) => `output {\n${c.output ? c.output(name => fileOutput(outputFile(prefix, name))) : fileOutput(prefix)}\n}\n`;
@@ -36,6 +38,25 @@ const outputBlock = (c, prefix) => `output {\n${c.output ? c.output(name => file
 // Pipeline que traduit Passerelle et que joue Vector ; avec un mode ECS, ses sorties portent ce mode dans leur nom
 export function translatedPipeline(c, mode) {
   return `input { stdin {${isJson(c) ? ' codec => json_lines' : ''}${inputOptions(c)} } }\n` + filterBlock(c) + outputBlock(c, mode ? `${c.id}.${mode}` : c.id);
+}
+
+/*
+ * Cas en plusieurs pipelines reliés par pipeline { send_to } (chain) : le premier reçoit l’entrée du banc, les autres
+ * écoutent chacun une adresse. Les adresses portent le cas et le mode, un même Logstash jouant tous les cas.
+ *   chain: [{ id, filter, output: (o, to) => … }]   o(nom) : sortie fichier du banc ; to(id, …) : vers d’autres pipelines
+ */
+const addressOf = (c, mode, id) => `${c.id}_${mode || 'v'}_${id}`;
+function chainMember(c, mode, m, prefix) {
+  const to = (...ids) => `pipeline { send_to => [${ids.map(id => `"${addressOf(c, mode, id)}"`).join(', ')}] }`;
+  return `filter {\n${m.filter || ''}\n}\noutput {\n${m.output ? m.output(name => fileOutput(outputFile(prefix, name)), to) : ''}\n}\n`;
+}
+// Ensemble traduit par Passerelle (translatePipelines) et joué par Vector
+export function translatedChain(c, mode) {
+  const prefix = `${c.id}.${mode}`;
+  return c.chain.map((m, k) => ({
+    id: m.id,
+    config: (k === 0 ? `input { stdin {${isJson(c) ? ' codec => json_lines' : ''}${inputOptions(c)} } }\n` : `input { pipeline { address => "${addressOf(c, mode, m.id)}" } }\n`) + chainMember(c, mode, m, prefix)
+  }));
 }
 
 /*
@@ -66,6 +87,18 @@ export function logstashPipeline(c, mode) {
   return `input { file { ${file} codec => ${isJson(c) ? 'json' : 'plain'}${inputOptions(c)} } }\n`
     + `filter {\n  ruby { code => '${UNDECORATE[mode]}\n  ' }\n}\n`
     + filterBlock(c) + outputBlock(c, `${c.id}.${mode}`);
+}
+
+// Ensemble joué par Logstash : le premier pipeline lit le fichier du cas, comme un cas simple
+export function logstashChain(c, mode) {
+  const prefix = `${c.id}.${mode}`;
+  const file = `path => "/work/in/${c.id}.ndjson" mode => "read" exit_after_read => true sincedb_path => "/dev/null" file_completed_action => "log" file_completed_log_path => "/work/out/.lus"`;
+  return c.chain.map((m, k) => ({
+    id: m.id,
+    text: k === 0
+      ? `input { file { ${file} codec => ${isJson(c) ? 'json' : 'plain'}${inputOptions(c)} } }\nfilter {\n  ruby { code => '${UNDECORATE[mode]}\n  ' }\n}\n` + chainMember(c, mode, m, prefix)
+      : `input { pipeline { address => "${addressOf(c, mode, m.id)}" } }\n` + chainMember(c, mode, m, prefix)
+  }));
 }
 
 /*

@@ -108,6 +108,7 @@ const AGG_SPECS = {
   weighted_avg: { params: ['value', 'weight', 'format', 'value_type'] },
   top_metrics: { params: ['metrics', 'sort', 'size'] },
   boxplot: { params: ['field', 'script', 'missing', 'compression', 'execution_hint'] },
+  rate: { params: ['field', 'script', 'unit', 'mode', 'format'] },
   top_hits: { params: ['from', 'size', 'sort', '_source', 'fields', 'docvalue_fields', 'stored_fields', 'script_fields', 'highlight', 'explain', 'version', 'seq_no_primary_term', 'track_scores'] },
   terms: { params: ['field', 'script', 'size', 'shard_size', 'order', 'min_doc_count', 'shard_min_doc_count', 'include', 'exclude', 'missing', 'value_type', 'execution_hint', 'collect_mode', 'show_term_doc_count_error', 'format'] },
   multi_terms: { params: ['terms', 'size', 'shard_size', 'order', 'min_doc_count', 'shard_min_doc_count', 'show_term_doc_count_error', 'collect_mode'] },
@@ -234,11 +235,11 @@ function checkDSL(dsl) {
   if (!isObj(dsl)) return out;
   // Formes qui ne sont pas une requête de recherche : le message dit quoi en extraire
   if (isObj(dsl.attributes) && typeof dsl.type === 'string') {
-    error(`objet sauvegardé Kibana (${dsl.type}), pas une requête de recherche. Copiez la requête depuis Inspect > Request dans Kibana`);
+    error(`objet sauvegardé Kibana (${dsl.type}), pas une requête de recherche. Importez l’export .ndjson dans l’inventaire Kibana (passerelle kibana), ou copiez la requête depuis Inspect > Request dans Kibana`);
     return out;
   }
   if (isObj(dsl.query) && typeof dsl.query.query === 'string' && typeof dsl.query.language === 'string') {
-    error(`requête Kibana en ${dsl.query.language === 'kuery' ? 'KQL' : dsl.query.language} (searchSource), pas une requête DSL. Copiez la requête depuis Inspect > Request dans Kibana`);
+    error(`requête Kibana en ${dsl.query.language === 'kuery' ? 'KQL' : dsl.query.language} (searchSource), pas une requête DSL. Importez l’export .ndjson dans l’inventaire Kibana (passerelle kibana), ou copiez la requête depuis Inspect > Request dans Kibana`);
     return out;
   }
   const noEffect = [];

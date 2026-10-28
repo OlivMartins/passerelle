@@ -1,0 +1,19 @@
+# Couverture : 4 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  clone:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # clone
+      orig = object!(.)
+      . = orig
+      if is_array(.tags) { .tags = push(array!(.tags), "copie") } else if .tags == null { .tags = ["copie"] } else { .tags = [.tags, "copie"] }
+      copie_1 = .
+      . = [orig, copie_1]
+  mutate:
+    type: remap
+    inputs: [clone]
+    source: |
+      # mutate
+      if exists(.vu) { .vu = push(array(.vu) ?? [.vu], "1") } else { .vu = "1" }

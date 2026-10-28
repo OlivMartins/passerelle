@@ -7,6 +7,9 @@ clickhouse:
   database: logs
   user: '${CLICKHOUSE_USER}'
   password: '${CLICKHOUSE_PASSWORD}'
+  # Compte d'écriture de la sortie Vector (vector.elasticsearch_output: clickhouse), distinct du compte de validation
+  # sink_user: '${CLICKHOUSE_SINK_USER}'
+  # sink_password: '${CLICKHOUSE_SINK_PASSWORD}'
   cluster: ''
   default_table: logs.events
   time_field: timestamp

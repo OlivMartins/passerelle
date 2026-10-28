@@ -101,6 +101,13 @@ export const CASES = [
   /* ---------- Pipelines d’agrégation ---------- */
   { id: 'pipeline_cumul_script', dsl: perDay({ s: { sum: { field: 'bytes' } }, cs: { cumulative_sum: { buckets_path: 's' } }, bs: { bucket_script: { buckets_path: { a: 's', n: '_count' }, script: 'params.a / params.n' } } }) },
   { id: 'pipeline_derivative', dsl: perDay({ s: { sum: { field: 'bytes' } }, dv: { derivative: { buckets_path: 's' } } }) },
+  // rate : valeur par unité de temps ; une tranche mensuelle compte ses jours, une tranche fixe sa durée
+  { id: 'agg_rate_mois_jour', dsl: { size: 0, aggs: { m: { date_histogram: { field: TS, calendar_interval: 'month' }, aggs: { octets_jour: { rate: { field: 'bytes', unit: 'day' } }, docs_an: { rate: { unit: 'year' } } } } } } },
+  { id: 'agg_rate_tranche_fixe', known: { D: 'valeur par défaut : 0 compte aussi les documents sans retries (mode value_count)' }, dsl: { size: 0, aggs: { t: { date_histogram: { field: TS, fixed_interval: '6h' }, aggs: { docs_heure: { rate: { unit: 'hour' } }, valeurs_minute: { rate: { field: 'retries', mode: 'value_count', unit: 'minute' } } } } } } },
+  { id: 'agg_rate_sans_unite', dsl: perDay({ octets: { rate: { field: 'bytes' } } }) },
+  { id: 'agg_rate_semaine', dsl: { size: 0, aggs: { w: { date_histogram: { field: TS, calendar_interval: 'week' }, aggs: { octets_jour: { rate: { field: 'bytes', unit: 'day' } } } } } } },
+  // rate sous un terms, lui-même sous le date_histogram : Elasticsearch divise par la tranche de l’ancêtre (graphiques Lens ventilés)
+  { id: 'agg_rate_sous_terms', dsl: { size: 0, aggs: { d: { date_histogram: { field: TS, fixed_interval: '6h' }, aggs: { svc: { terms: { field: 'service', size: 3 }, aggs: { par_minute: { rate: { unit: 'minute' } } } } } } } } },
   { id: 'pipeline_serial_diff', dsl: perDay({ s: { sum: { field: 'bytes' } }, sd: { serial_diff: { buckets_path: 's', lag: 2 } } }) },
   { id: 'pipeline_moving_avg', dsl: perDay({ s: { sum: { field: 'bytes' } }, mv: { moving_fn: { buckets_path: 's', window: 2, script: 'MovingFunctions.unweightedAvg(values)' } } }) },
   { id: 'pipeline_moving_max', dsl: perDay({ s: { sum: { field: 'bytes' } }, mv: { moving_fn: { buckets_path: 's', window: 2, script: 'MovingFunctions.max(values)' } } }) },
@@ -109,11 +116,15 @@ export const CASES = [
   { id: 'pipeline_avec_tranches_vides', known: 'avec un pipeline, les tranches vides ne sont pas ajoutées : Elasticsearch les compte dans le calcul', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { d: { date_histogram: { field: TS, fixed_interval: '1h' }, aggs: { s: { sum: { field: 'bytes' } }, cs: { cumulative_sum: { buckets_path: 's' } }, dv: { derivative: { buckets_path: 's' } } } } } } },
   { id: 'pipeline_max_bucket', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { s: { sum: { field: 'bytes' } } } }, mx: { max_bucket: { buckets_path: 'svc>s' } } } } },
   { id: 'pipeline_bucket_selector', dsl: { size: 0, aggs: { h: { terms: { field: 'host', size: 20 }, aggs: { lat: { avg: { field: 'latency_ms' } }, garde: { bucket_selector: { buckets_path: { v: 'lat' }, script: 'params.v > 1500' } } } } } } },
+  // Chemin filtre._count : le nombre de documents d’un sous-filtre (formules Lens, filter_ratio de TSVB)
+  { id: 'pipeline_bucket_script_filtre_count', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { err: { filter: { range: { status: { gte: 500 } } } }, part: { bucket_script: { buckets_path: { e: 'err._count', t: '_count' }, script: 'params.e / params.t' } } } } } } },
   { id: 'pipeline_bucket_sort', dsl: { size: 0, aggs: { h: { terms: { field: 'host', size: 20 }, aggs: { lat: { avg: { field: 'latency_ms' } }, top: { bucket_sort: { sort: [{ lat: { order: 'desc' } }], size: 3 } } } } } } },
 
   /* ---------- Filtres ---------- */
   { id: 'filtre_bool_documents', dsl: { size: 20, sort: [{ [TS]: 'desc' }], query: { bool: { filter: [{ term: { level: 'ERROR' } }, { range: { status: { gte: 500 } } }] } } } },
   { id: 'filtre_wildcard', dsl: total({ wildcard: { host: 'web-*' } }) },
+  // « * » seul sur tous les champs : tous les documents, y compris sans message (requête par défaut des panneaux Grafana)
+  { id: 'filtre_query_string_etoile', dsl: total({ query_string: { query: '*', analyze_wildcard: true } }) },
   { id: 'filtre_prefix', dsl: total({ prefix: { host: 'web' } }) },
   { id: 'filtre_regexp', dsl: total({ regexp: { host: 'web-[1-3]' } }) },
   { id: 'filtre_term_insensible', dsl: total({ term: { service: { value: 'search', case_insensitive: true } } }) },
@@ -378,7 +389,13 @@ export const CASES = [
   // Tri sur un champ multivalué : Elasticsearch prend le minimum en croissant ; un document sans valeur va à la fin
   { id: 'audit_tri_tableau', dsl: { size: 10, sort: [{ nums: 'asc' }, { [TS]: 'asc' }] } },
   { id: 'audit_tri_tableau_desc', dsl: { size: 10, sort: [{ nums: 'desc' }, { [TS]: 'asc' }] } },
-  { id: 'audit_top_metrics_size_croissant', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { t: { top_metrics: { metrics: { field: 'bytes' }, sort: { latency_ms: 'asc' }, size: 2 } } } } } } },
+  // Tri sur l’horodatage, unique dans le jeu de données : sur latency_ms, deux documents de payment sont ex æquo
+  // (10 ms) ; Elasticsearch ne définit pas leur ordre (il dépend des segments), le cas échouait au hasard
+  { id: 'audit_top_metrics_size_croissant', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { t: { top_metrics: { metrics: { field: 'bytes' }, sort: { [TS]: 'asc' }, size: 2 } } } } } } },
+  // Tri en liste d’un seul élément, comme l’envoie Grafana : même sens que l’objet
+  { id: 'audit_top_metrics_tri_liste', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { t: { top_metrics: { metrics: [{ field: 'status' }], sort: [{ [TS]: 'desc' }], size: '1' } } } } } } },
+  // Script de valeur : _value est la valeur du champ (scripts en ligne de Grafana et de Kibana)
+  { id: 'agg_avg_script_valeur', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { a: { avg: { field: 'latency_ms', script: { source: '_value * 0.1' } } } } } } } },
   // Elasticsearch refuse un tri de top_metrics sur un champ keyword : la traduction aussi
   { id: 'audit_top_metrics_size_chaine', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { host: 'desc' }, size: 3 } } } } },
   { id: 'audit_top_metrics_size', dsl: { size: 0, query: { term: { service: 'Search' } }, aggs: { t: { top_metrics: { metrics: { field: 'latency_ms' }, sort: { [TS]: 'desc' }, size: 3 } } } } }

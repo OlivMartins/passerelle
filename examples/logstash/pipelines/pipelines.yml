@@ -1,0 +1,22 @@
+# Exemple de parc : pipelines.yml tel qu’il est sur la machine Logstash, avec ses fichiers à côté.
+#   passerelle ls2vector examples/logstash/pipelines/pipelines.yml --out build/
+# Le pipeline « entree » lit Kafka et répartit les événements (distributeur) ; « web » et « systeme » les traitent,
+# puis tous deux envoient une copie au pipeline « archive » (collecteur), qui l’écrit dans un topic d’archive.
+- pipeline.id: entree
+  path.config: "/etc/logstash/conf.d/entree.conf"
+  pipeline.workers: 4
+- pipeline.id: web
+  path.config: "/etc/logstash/conf.d/web/*.conf"
+- pipeline.id: systeme
+  path.config: "/etc/logstash/conf.d/systeme.conf"
+  queue.type: persisted
+- pipeline.id: archive
+  config.string: |
+    input { pipeline { address => "archive" } }
+    output {
+      kafka {
+        bootstrap_servers => "kafka:9092"
+        topic_id => "logs-archive"
+        codec => json
+      }
+    }

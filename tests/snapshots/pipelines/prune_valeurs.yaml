@@ -1,0 +1,28 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  prune:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # prune
+      orig = object!(.)
+      . = filter(orig) -> |key, _value| { !match(key, r'(?:%\{[^}]+\})') }
+      v = get!(orig, ["tags"])
+      if v != null && v != false {
+        if is_array(v) {
+          kept = filter(array!(v)) -> |_index, x| { is_string(x) && match(string!(x), r'(?m)^ok') }
+          if length(kept) != length(array!(v)) { if length(kept) == 0 { del(."tags") } else { ."tags" = kept } }
+        } else if is_string(v) {
+          if !match(string!(v), r'(?m)^ok') { del(."tags") }
+        }
+      }
+      v = get!(orig, ["host"])
+      if v != null && v != false {
+        if is_array(v) {
+          kept = filter(array!(v)) -> |_index, x| { !(is_string(x) && match(string!(x), r'(?m)^bad')) }
+          if length(kept) != length(array!(v)) { if length(kept) == 0 { del(."host") } else { ."host" = kept } }
+        } else if is_string(v) {
+          if match(string!(v), r'(?m)^bad') { del(."host") }
+        }
+      }

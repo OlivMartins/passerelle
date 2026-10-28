@@ -1,0 +1,5 @@
+description: dissect dont une clé apparaît deux fois (la dernière valeur l’emporte) ; deux groupes du même nom font refuser le VRL
+processors:
+  - dissect:
+      field: message
+      pattern: '%{heure} %{ip} - %{heure} %{ip}'

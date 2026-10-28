@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.3.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.3.0"></a>
+  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.4.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.4.0"></a>
   <a href="https://github.com/OlivMartins/passerelle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/OlivMartins/passerelle/ci.yml?branch=main&style=flat-square&label=tests&labelColor=1B2A33" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache%202.0-1E7A68?style=flat-square&labelColor=1B2A33" alt="Licence Apache 2.0"></a>
   <img src="https://img.shields.io/badge/Linux-x86__64-53636B?style=flat-square&labelColor=1B2A33" alt="Linux x86_64">
@@ -243,6 +243,20 @@ transforms:
 
 </details>
 
+## Au-delà des requêtes : Kibana, Grafana, schéma, ingestion
+
+Une migration ne se limite pas aux requêtes. Passerelle lit aussi ce qui les entoure, avec les mêmes verdicts (prête, à vérifier, à reprendre, non reconnue).
+
+- **Inventaire Kibana** (`passerelle kibana export.ndjson`) : le catalogue des objets sauvegardés (index patterns, recherches, visualisations, Lens, cartes, tableaux de bord, alertes, règles de sécurité, connecteurs, canvas, graphes), objet par objet, en Markdown, HTML, CSV ou JSON. Les requêtes KQL, Lucene et DSL qu’ils portent sont traduites en SQL.
+- **Tableaux de bord Grafana** (`passerelle grafana tableau.json`) : les panneaux dont la source est Elasticsearch deviennent des requêtes ClickHouse, avec un rapport par panneau.
+- **Schéma** (`passerelle schema ddl mapping.json`) : le `CREATE TABLE` ClickHouse déduit d’un mapping Elasticsearch, y compris les préréglages OpenTelemetry `otel` (attributs en `Map`) et `otel-json` (colonnes `JSON` typées). `passerelle schema pull` lit les tables déjà créées pour que les traductions s’y adaptent.
+- **Pipelines d’ingestion Elasticsearch** (`passerelle ingest pipeline.yml`) : chaque processeur devient une étape VRL pour Vector (`append`, `convert`, `date`, `dissect`, `dot_expander`, `foreach`, `geoip`, `grok`, `gsub`, `json`, `kv`, `pipeline`, `rename`, `script` Painless, `set`, `user_agent`, et une vingtaine d’autres). Vector refuse toute la configuration si un seul VRL ne compile pas : la CI compile donc les traductions avec `vector validate`.
+- **Sortie ClickHouse** : avec `vector.elasticsearch_output: clickhouse`, la sortie `elasticsearch` d’un pipeline Logstash devient un puits ClickHouse. Il écrit avec son propre compte, `clickhouse.sink_user` ([compte de la sortie Vector](docs/INSTALL.md)).
+- **Plusieurs pipelines** : `passerelle ls2vector pipelines.yml` relie les pipelines qui s’appellent entre eux.
+- **Analyseurs personnalisés** (`passerelle schema analyzers mapping.json`) : un analyseur Elasticsearch devient une colonne de mots calculée et un index plein texte ClickHouse, avec l’aperçu des mots produits. [Ce qui est repris, et les écarts](docs/ANALYSEURS.md).
+
+Tout cela est aussi dans l’interface (sections « Ingestion » et « Autres sources »), dans l’API (`/v1/schema/ddl` et `/v1/schema/analyzers` pour le schéma) et en ligne de commande.
+
 ## Une configuration, versionnée avec votre code
 
 Un seul fichier décrit votre plateforme cible. L’interface, l’API et la ligne de commande le lisent de la même façon : il se range dans Git, à côté des requêtes et des pipelines qu’il sert à traduire.
@@ -344,8 +358,8 @@ Téléchargez [`passerelle.html`](https://github.com/OlivMartins/passerelle/rele
 ### Sur un serveur Linux
 
 ```bash
-curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.3.0/passerelle-1.3.0-linux-x86_64.tar.gz
-tar xzf passerelle-1.3.0-linux-x86_64.tar.gz && cd passerelle-1.3.0-linux-x86_64
+curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.4.0/passerelle-1.4.0-linux-x86_64.tar.gz
+tar xzf passerelle-1.4.0-linux-x86_64.tar.gz && cd passerelle-1.4.0-linux-x86_64
 sudo ./install.sh
 ```
 
@@ -392,7 +406,7 @@ Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
 
 ## Ce que Passerelle sait traduire
 
-**28** types de requêtes, **51** agrégations, **18** filtres Logstash, avec les langages qui vont avec : Painless, syntaxe Lucene et grok. Les cas approchés sont signalés « à vérifier », les cas non traduits « à reprendre », sans jamais passer inaperçus.
+**28** types de requêtes, **51** agrégations, **25** filtres Logstash, **35** processeurs d’ingestion, avec les langages qui vont avec : Painless, syntaxe Lucene et grok. Les cas approchés sont signalés « à vérifier », les cas non traduits « à reprendre », sans jamais passer inaperçus.
 
 Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc différentiel](tests/README.md) exécute les mêmes requêtes sur Elasticsearch 7.17, 8.19 et 9.5 et sur ClickHouse, puis compare les résultats : la CI le joue sur les trois versions à chaque changement et avant chaque release.
 
@@ -409,11 +423,13 @@ Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc diffé
 | Pipelines d’agrégation | `bucket_selector`, `bucket_script`, `bucket_sort`, `cumulative_sum`, `derivative`, `serial_diff`, `moving_fn`, `moving_avg`, `avg_bucket`, `sum_bucket`, `min_bucket`, `max_bucket`, `stats_bucket`, `extended_stats_bucket`, `percentiles_bucket` |
 | Requête complète | `runtime_mappings`, `script_fields`, `_source`, `sort` (y compris scripté), `search_after`, `collapse`, `post_filter`, `track_total_hits`, `timeout`, format console Kibana |
 | Painless | Conditions, variables, `params`, dates et fuseaux (`ZonedDateTime`, `ChronoUnit`), chaînes, `Math`, conversions, `grok()` et `dissect()` |
-| Filtres Logstash | `grok` (60 motifs intégrés et motifs personnalisés), `dissect`, `date`, `mutate` (15 opérations), `json`, `kv`, `csv`, `xml`, `useragent`, `geoip`, `translate`, `fingerprint`, `uuid`, `urldecode`, `split`, `truncate`, `cidr`, `drop` |
+| Filtres Logstash | `grok` (60 motifs intégrés et motifs personnalisés), `dissect`, `date`, `mutate` (15 opérations), `json`, `kv`, `csv`, `xml`, `useragent`, `geoip`, `translate`, `fingerprint`, `uuid`, `urldecode`, `split`, `truncate`, `cidr`, `drop`, `prune`, `de_dot`, `syslog_pri`, `clone`, `throttle`, `environment`, `bytes` |
+| Pipelines d’ingestion Elasticsearch | `append`, `bytes`, `community_id`, `convert`, `csv`, `date`, `dissect`, `dot_expander`, `drop`, `fail`, `fingerprint`, `foreach`, `geoip`, `grok`, `gsub`, `html_strip`, `join`, `json`, `kv`, `lowercase`, `pipeline`, `registered_domain`, `remove`, `rename`, `reroute`, `script`, `set`, `split`, `terminate`, `trim`, `uppercase`, `uri_parts`, `urldecode`, `user_agent` |
+| Analyseurs | char_filters, tokenizers et filtres listés dans [docs/ANALYSEURS.md](docs/ANALYSEURS.md) |
 | Entrées et sorties | Kafka en entrée et en sortie (SASL, TLS, clés de message, compression) ; aussi `beats`, `tcp`, `udp`, `http`, `file`, `elasticsearch`, `stdout` |
 | Conditions Logstash | `if` / `else if` / `else`, `and`, `or`, `xor`, `nand`, `not`, `in`, `not in`, `=~`, `!~`, comparaisons |
 
-**Limites connues.** Les boucles Painless ne sont pas traduites. Une requête `nested` dont la corrélation entre sous-champs compte doit être réécrite avec `arrayExists`. Les filtres `ruby` et `aggregate` sont signalés « à reprendre », avec le code d’origine recopié en commentaire et la piste à suivre dans Vector.
+**Limites connues.** Dans une requête, les boucles Painless ne sont pas traduites. Dans un pipeline d’ingestion, les scripts sont traduits avec leurs boucles (`for`, `while`, bornées), lambdas, flux `stream()`, expressions régulières, références vers les objets de `ctx`, tris, dates et fonctions récursives (bornées en profondeur) ; une anticipation dans une expression régulière, `DateTimeFormatter`, `TreeSet` ou une variable rattachée à des objets différents au fil d’une boucle sont à reprendre. Les filtres `ruby` et `aggregate` sont signalés « à reprendre », avec le code d’origine recopié en commentaire et la piste à suivre dans Vector.
 
 </details>
 

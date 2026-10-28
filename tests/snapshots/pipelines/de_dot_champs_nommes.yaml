@@ -1,0 +1,20 @@
+# Couverture : 3 directs, 0 à vérifier, 0 à reprendre
+
+transforms:
+  de_dot:
+    type: remap
+    inputs: [stdin_in_init]
+    source: |
+      # de_dot
+      dd = object!(.)
+      v = get!(dd, ["a", "b.c"])
+      if exists(.a."b.c") {
+        dd = remove!(dd, ["a", "b.c"])
+        dd = set!(dd, ["a", "b_c"], v)
+      }
+      v = get!(dd, ["d.e"])
+      if exists(."d.e") {
+        dd = remove!(dd, ["d.e"])
+        dd = set!(dd, ["d_e"], v)
+      }
+      . = dd
