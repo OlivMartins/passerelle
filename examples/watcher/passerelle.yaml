@@ -1,0 +1,29 @@
+# Configuration de l’exemple de watches (watches.json, console.txt), sur la table des exemples Kibana
+#   passerelle watcher examples/watcher/ --config examples/watcher/passerelle.yaml --out watches/
+# Le motif d’index des watches désigne la table ; son profil décrit les colonnes, ce qui rend
+# exactes les exclusions et les tests d’existence (colonnes Nullable ou non).
+clickhouse:
+  database: logs
+  index_mapping:
+    logs-web-*: logs.web
+  field_mapping:
+    '@timestamp': timestamp
+  time_field: timestamp
+  text_fields: [message]
+  tables:
+    logs.web:
+      columns:
+        timestamp: DateTime64(3, 'UTC')
+        service.name: LowCardinality(String)
+        service.environment: LowCardinality(String)
+        host.name: LowCardinality(String)
+        url.path: String
+        http.request.method: LowCardinality(String)
+        http.response.status_code: UInt16
+        http.response.bytes: UInt64
+        event.duration: Int64
+        event.category: LowCardinality(String)
+        event.outcome: LowCardinality(String)
+        user.name: String
+        source.ip: String
+        message: String

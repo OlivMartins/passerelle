@@ -1,6 +1,6 @@
 #!/bin/sh
 # Démarre ou arrête l'Elasticsearch du banc différentiel dans Docker.
-#   tests/differential/es.sh up     nœud unique, sans sécurité, lié à 127.0.0.1
+#   tests/differential/es.sh up     nœud unique, sans sécurité, lié à 127.0.0.1, licence d’essai (Watcher, pour watcher.mjs)
 #   tests/differential/es.sh down
 # ES_VERSION (défaut 8.19.22) et ES_PORT (défaut 9200) sont pris dans l'environnement.
 set -eu
@@ -12,7 +12,7 @@ case "${1:-}" in
   up)
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     docker run -d --name "$NAME" -p "127.0.0.1:${ES_PORT}:9200" \
-      -e discovery.type=single-node -e xpack.security.enabled=false \
+      -e discovery.type=single-node -e xpack.security.enabled=false -e xpack.license.self_generated.type=trial \
       -e ES_JAVA_OPTS="-Xms1g -Xmx1g" -e cluster.routing.allocation.disk.threshold_enabled=false \
       "docker.elastic.co/elasticsearch/elasticsearch:${ES_VERSION}" >/dev/null
     i=0

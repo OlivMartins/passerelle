@@ -1,4 +1,4 @@
-# Passerelle 1.6.0 — Linux x86_64
+# Passerelle 1.7.0 — Linux x86_64
 
 Passerelle traduit les requêtes DSL Elasticsearch en SQL ClickHouse et les pipelines Logstash (Kafka vers Kafka) en configurations Vector. Un seul binaire fournit l’interface web, l’API REST et la ligne de commande. Le moteur Node.js 24 LTS est embarqué : rien d’autre à installer.
 
@@ -34,13 +34,13 @@ SHA256SUMS                     sommes de contrôle
 ## Installation
 
 ```bash
-sha256sum -c passerelle-1.6.0-linux-x86_64.tar.gz.sha256
-tar xzf passerelle-1.6.0-linux-x86_64.tar.gz
-cd passerelle-1.6.0-linux-x86_64
+sha256sum -c passerelle-1.7.0-linux-x86_64.tar.gz.sha256
+tar xzf passerelle-1.7.0-linux-x86_64.tar.gz
+cd passerelle-1.7.0-linux-x86_64
 sudo ./install.sh
 ```
 
-La somme de contrôle détecte un fichier abîmé. Pour vérifier aussi que l’archive a été construite par la CI du dépôt, à partir de l’étiquette de la release : `gh attestation verify passerelle-1.6.0-linux-x86_64.tar.gz -R OlivMartins/passerelle`.
+La somme de contrôle détecte un fichier abîmé. Pour vérifier aussi que l’archive a été construite par la CI du dépôt, à partir de l’étiquette de la release : `gh attestation verify passerelle-1.7.0-linux-x86_64.tar.gz -R OlivMartins/passerelle`.
 
 Le script vérifie l’architecture, la glibc et l’intégrité des fichiers. Il crée ensuite l’utilisateur système `passerelle` et installe `/usr/local/bin/passerelle`, `/etc/passerelle/` et l’unité systemd. Un jeton d’API aléatoire est écrit dans `/etc/passerelle/passerelle.env`, puis le service est démarré.
 
@@ -200,6 +200,21 @@ server {
 
 L’interface ne contient aucun secret, car la configuration diffusée masque les mots de passe. Elle est donc servie sans jeton. Pour en restreindre l’accès, placez une authentification SSO devant le proxy, par exemple oauth2-proxy.
 
+## Watches d’un cluster
+
+`passerelle watcher pull` lit les watches du cluster décrit par la section `elasticsearch` (ou `--es URL`), page par page, par `POST _watcher/_query/watches` (Elasticsearch 7.11 et suivants ; avant, l’index `.watches` est lu par `_search`). Il n’appelle que `GET /` et cette route, en lecture seule, puis produit le même rapport que `passerelle watcher watches.json`.
+
+**Compte Elasticsearch** : les privilèges de cluster `monitor_watcher` (lire les watches) et `monitor` (lire la version).
+
+```
+POST _security/role/passerelle_watcher
+{ "cluster": ["monitor", "monitor_watcher"] }
+```
+
+Avec `--out`, le dossier reçoit le rapport (`rapport.md`, `.html`, `.csv`, `.json`), un fichier SQL par watch et `export-watches.json`, l’export lu, qui se relit hors ligne (`passerelle watcher export-watches.json`). Elasticsearch masque déjà les secrets des actions (`::es_redacted::`) ; Passerelle masque en plus les mots de passe, jetons, en-têtes d’autorisation et identifiants d’URL qui resteraient, et écrit le fichier en `0600`. Le rapport ne cite ni adresse e-mail ni secret.
+
+Les requêtes attendent `{scheduled_time:String}`, l’heure prévue de l’exécution, que le planificateur fournit à chaque passage : `clickhouse-client --param_scheduled_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)" --queries-file sql/erreurs-5xx.sql`.
+
 ## API
 
 Toutes les routes `/v1/*` exigent l’en-tête `Authorization: Bearer <PASSERELLE_TOKEN>`, ou celui d’un [jeton à portée](#jetons-à-portée-identité-et-audit) qui ouvre la route demandée. Chaque réponse porte un `X-Request-Id`, qu’on retrouve dans le journal et l’audit.
@@ -214,6 +229,7 @@ Toutes les routes `/v1/*` exigent l’en-tête `Authorization: Bearer <PASSERELL
 | POST | `/v1/translate/logstash/pipelines?format=yaml` | `pipelines.yml` (ou JSON `{ "pipelines": "…", "files": { "chemin": "contenu" } }`) vers une configuration Vector reliant les pipelines |
 | POST | `/v1/translate/ingest?format=yaml` | Pipeline d’ingestion Elasticsearch (YAML, JSON ou requête `PUT _ingest/pipeline` de la console Kibana ; ou JSON `{ "files": { "nom": "contenu" } }`) vers Vector, VRL compris |
 | POST | `/v1/inventory/kibana?format=json` | Export d’objets sauvegardés Kibana (NDJSON) vers un inventaire (`json`, `md`, `html`, `csv`) ; `timezone=` fixe le fuseau des dates relatives |
+| POST | `/v1/translate/watcher?format=json` | Watches Elasticsearch (export `_query/watches`, `GET _watcher/watch/<id>`, console Kibana) vers un rapport par watch : SQL, décision de la condition, planification, actions (`json`, `md`, `html`, `csv`) |
 | POST | `/v1/translate/grafana?index=logs-*` | Tableau de bord Grafana (JSON) vers un rapport par panneau et le tableau réécrit (`format=md` pour le rapport seul) |
 | POST | `/v1/schema/ddl?preset=otel&format=sql` | Mapping, modèle d’index ou réponse d’API Elasticsearch (ou JSON `{ "files": { "nom": "contenu" } }`) vers le `CREATE TABLE` ClickHouse. `preset` (`otel`, `otel-json`), `compact`, `json`, `table` comme en ligne de commande ; sans `format=sql`, JSON avec verdict, profils par table et remarques |
 | POST | `/v1/schema/analyzers?text=…&field=…` | Plan ClickHouse des analyseurs personnalisés d’un mapping, avec l’aperçu des mots du texte donné ; `format=md` pour le rapport |
@@ -228,7 +244,7 @@ curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
 
 Chaque traduction porte un `verdict` : `ready` (prête), `review` (à vérifier), `todo` (à reprendre : le SQL s’arrête sur `throwIf`). Une entrée que Passerelle refuse, comme Elasticsearch la refuserait, répond 422 avec `verdict: "unrecognized"`.
 
-Les corps de requête sont limités à 2 Mio, et à 32 Mio pour `/v1/inventory/kibana`, `/v1/translate/grafana`, `/v1/translate/ingest`, `/v1/translate/logstash/pipelines`, `/v1/schema/ddl` et `/v1/schema/analyzers`. Au plus deux validations, Vector et SQL confondues, tournent en parallèle.
+Les corps de requête sont limités à 2 Mio, et à 32 Mio pour `/v1/inventory/kibana`, `/v1/translate/watcher`, `/v1/translate/grafana`, `/v1/translate/ingest`, `/v1/translate/logstash/pipelines`, `/v1/schema/ddl` et `/v1/schema/analyzers`. Au plus deux validations, Vector et SQL confondues, tournent en parallèle.
 
 Un navigateur ne peut pas appeler l’API depuis un autre site : `/v1/*` refuse les requêtes intersites. Sans jeton, cas d’un `passerelle serve` lancé sur un poste, l’API ne répond qu’aux requêtes adressées à `localhost`, `127.0.0.1` ou `[::1]`.
 
@@ -240,6 +256,8 @@ passerelle ls2vector pipelines/ --config passerelle.yaml --format yaml --out bui
 passerelle ingest ingest/ --config passerelle.yaml --out build/vector --fail-on review
 passerelle kibana export.ndjson --format md --out build/kibana
 passerelle grafana tableaux/ --index 'logs-*' --out build/grafana
+passerelle watcher watches.json --out build/watcher
+passerelle watcher pull --out build/watcher
 passerelle schema ddl mappings/ --preset otel --out build/ddl
 passerelle schema analyzers mappings/ --text "texte d’essai" --format md
 passerelle verify queries requetes/ --index 'logs-*' --out rapport/

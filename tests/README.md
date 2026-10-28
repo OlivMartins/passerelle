@@ -111,6 +111,15 @@ La liste des `known` est donc l’inventaire exact de ce qui reste à corriger.
 
 Ajoutez une entrée dans `cases.mjs`, lancez `npm run test:diff -- --only=<id> --verbose`, puis `npm run test:update` pour créer son instantané.
 
+### Watches : `npm run test:watcher`
+
+Chaque watch de `tests/differential/watches.mjs`, écrite sur le jeu de données du banc, est jouée par Watcher sans être enregistrée (`POST _watcher/watch/_execute`, actions ignorées) à plusieurs heures prévues, dont une fenêtre vide, et sa traduction par ClickHouse avec la même `scheduled_time`. `watch_record.result.condition.met` doit valoir la colonne `declenchee`. Un écart connu s’annonce dans le cas (`es`) : `hits.total.value`, vide dans une watch, ne déclenche jamais côté Elasticsearch, et le banc le vérifie à chaque version. Watcher demande une licence d’essai, qu’`es.sh` active. `--clickhouse-seul` vérifie, sans Elasticsearch, que chaque watch a une décision traduite qui s’exécute.
+
+```sh
+tests/differential/es.sh up
+CLICKHOUSE_LOCAL="$PWD/clickhouse local" npm run test:watcher
+```
+
 ## Banc d’équivalence Logstash / Vector : `npm run test:pipelines`
 
 Le pendant du banc différentiel pour les pipelines. Chaque cas est un bloc de filtres Logstash et quelques événements : Logstash joue le pipeline, Vector sa traduction, et le banc compare les événements produits, champ par champ et types compris.
@@ -203,11 +212,11 @@ La CI joue ce banc dans le job `ingest`, avec Vector 0.59.0 et des clones éping
 
 ## Interface : `npm run test:ui`
 
-Ouvre `dist/passerelle.html` dans Chromium avec Playwright : les sections requête, Logstash, ingestion, Kibana et « Autres sources » (inventaire Kibana, Grafana, schéma, analyseurs) traduisent leur exemple et affichent un verdict, leurs onglets s’ouvrent ; dans la section Kibana, un panneau choisi montre son SQL, et un export ouvert par le sélecteur de fichiers remplace l’exemple, et la page ne produit aucune erreur. Playwright n’est pas une dépendance du projet : `npm run build:ui`, puis `npm install --no-save playwright` et `npx playwright install chromium` (ou `PLAYWRIGHT_FROM=<dossier où playwright se résout>`). La CI joue ce test dans le job `interface`.
+Ouvre `dist/passerelle.html` dans Chromium avec Playwright : les sections requête, Logstash, ingestion, Kibana et « Autres sources » (inventaire Kibana, Grafana, Watcher, schéma, analyseurs) traduisent leur exemple et affichent un verdict, leurs onglets s’ouvrent ; dans la section Kibana, un panneau choisi montre son SQL, et un export ouvert par le sélecteur de fichiers remplace l’exemple ; des watches déposées sur la section Requêtes vont à l’outil Watcher ; et la page ne produit aucune erreur. Playwright n’est pas une dépendance du projet : `npm run build:ui`, puis `npm install --no-save playwright` et `npx playwright install chromium` (ou `PLAYWRIGHT_FROM=<dossier où playwright se résout>`). La CI joue ce test dans le job `interface`.
 
 ## Bancs ClickHouse : `npm run test:attributes` et `npm run test:clickhouse`
 
 Sans Elasticsearch, avec le binaire `clickhouse local` (`CLICKHOUSE_LOCAL`, extrait par `tests/differential/clickhouse.sh`).
 
 - `test:attributes` : les attributs OpenTelemetry (`Map`, `JSON`) donnent le résultat de la table plate.
-- `test:clickhouse` : ce que Passerelle génère pour ses exemples (schéma, inventaire Kibana) s’exécute avec les valeurs attendues ; `tests/clickhouse/analyseurs.mjs` rejoue la chaîne des analyseurs (table créée depuis un mapping, lignes insérées, plan appliqué, recherches vérifiées), et `tests/clickhouse/grafana.mjs` les requêtes des tableaux Grafana.
+- `test:clickhouse` : ce que Passerelle génère pour ses exemples (schéma, inventaire Kibana, watches) s’exécute avec les valeurs attendues, et la décision de chaque watch est recalculée à la main sur les mêmes documents ; `tests/clickhouse/analyseurs.mjs` rejoue la chaîne des analyseurs (table créée depuis un mapping, lignes insérées, plan appliqué, recherches vérifiées), et `tests/clickhouse/grafana.mjs` les requêtes des tableaux Grafana.

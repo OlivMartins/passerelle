@@ -7,6 +7,8 @@
  *     remplie de documents connus ; quelques résultats sont comparés à leur valeur calculée ici, à la main.
  *   - Tableau de bord Grafana (examples/grafana) : chaque requête du tableau converti est interpolée comme Grafana et le
  *     plugin ClickHouse le font (grafana.mjs), puis exécutée et contrôlée de la même façon.
+ *   - Watches (examples/watcher) : chaque requête s’exécute avec une heure prévue fixe (scheduled_time), et la décision
+ *     de chaque condition (colonne declenchee) est comparée à celle calculée ici sur les mêmes documents.
  *
  *   node tests/clickhouse/run.mjs [--verbose]
  *
@@ -149,7 +151,64 @@ const fresh = name => { const d = join(WORK, name); rmSync(d, { recursive: true,
   const b10 = new Map(); for (const r of inRange) { const t = Math.floor(Date.parse(r.timestamp.replace(' ', 'T') + 'Z') / 600000) * 600000; if (!b10.has(t)) b10.set(t, []); b10.get(t).push(r['event.duration']); }
   const firstBucket = lat10.find(x => x['Average event.duration'] !== null);
   const t0 = firstBucket && Date.parse(firstBucket.time.replace(' ', 'T') + 'Z');
-  check(firstBucket && b10.has(t0) && Math.abs(b10.get(t0).reduce((a, b) => a + b, 0) / b10.get(t0).length - firstBucket['Average event.duration']) < 1e-6 && lat10.length === 145, 'Grafana, date_histogram 10m : tranches alignées, comblées sur la période (WITH FILL), moyenne exacte', `${lat10.length} tranches`);
+  check(firstBucket && b10.has(t0) && Math.abs(b10.get(t0).reduce((a, b) => a + b, 0) / b10.get(t0).length - firstBucket['Average event.duration']) < 1e-6 && lat10.length === 145,'Grafana, date_histogram 10m : tranches alignées, comblées sur la période (WITH FILL), moyenne exacte', `${lat10.length} tranches`);
+  /* ---------- Watches (examples/watcher), sur la même table ---------- */
+  // Chaque requête s’exécute avec une heure prévue fixe ; la décision de chaque condition est recalculée ici, à la main
+  const wcfg = E.mergeConfig(E.DEFAULT_CONFIG, E.parseYAMLConfig(rd('examples/watcher/passerelle.yaml')));
+  const wfiles = ['watches.json', 'console.txt'];
+  const wrep = E.watcherTranslate(wfiles.map(f => rd(`examples/watcher/${f}`)), wcfg, { names: wfiles });
+  const T = '2026-10-01T12:00:00Z'; const tT = Date.parse(T);
+  const wparams = { scheduled_time: T, key: 'u1' };
+  const wres = new Map(); let wran = 0, wfailed = 0;
+  for (const x of wrep.entries) for (const q of x.queries) {
+    if (!q.sql) continue;
+    try { wres.set(`${x.id} / ${q.title}`, clickhouse(dir, q.sql, wparams)); wran++; }
+    catch (e) { wfailed++; check(false, `watch ${x.id} / ${q.title}`, errorOf(e)); }
+  }
+  check(!wfailed && wran >= 15, `watches : ${wran} requête(s) exécutée(s) sur ClickHouse avec scheduled_time = ${T}`, wfailed ? `${wfailed} en échec` : '');
+  const wget = k => wres.get(k) || [];
+  // Documents connus : ceux de la journée, et les 4 documents récents (horodatés maintenant, donc après T)
+  const ts = r => Date.parse(r.timestamp.replace(' ', 'T') + 'Z');
+  const now = Date.now();
+  const recentRows = [[60, 'checkout', 500, 900000000, 'connection refused'], [90, 'checkout', 503, 800000000, 'x'], [120, 'panier', 502, 100, 'x'], [30, 'panier', 200, 100, 'x']]
+    .map(([s, svc, st, d, m]) => ({ t: now - s * 1000, 'service.name': svc, 'service.environment': 'production', 'http.response.status_code': st, 'event.duration': d, message: m, 'url.path': '', 'host.name': '', 'http.response.bytes': 0, 'event.category': '', 'event.outcome': '', 'user.name': '' }));
+  const all = rows.map(r => Object.assign({ t: ts(r) }, r)).concat(recentRows);
+  const between = (from, to) => all.filter(r => r.t >= from && (to === undefined || r.t <= to));
+  const M = 60000;
+  const groupBy = (list, key) => { const m = new Map(); for (const r of list) { const k = r[key]; if (!m.has(k)) m.set(k, []); m.get(k).push(r); } return m; };
+  // Pic d’erreurs 5xx : hits.total > 20 sur cinq minutes, en production
+  const e5 = between(tT - 5 * M, tT).filter(r => r['http.response.status_code'] >= 500 && r['service.environment'] === 'production').length;
+  const pic5 = wget('erreurs-5xx / Condition')[0];
+  check(pic5 && pic5.count === e5 && pic5.declenchee === (e5 > 20 ? 1 : 0), 'watch compare hits.total (metadata.seuil = 20) : décompte sur cinq minutes et décision', `${JSON.stringify(pic5)} pour ${e5}`);
+  // Latence moyenne par service : array_compare some, avg ≥ 500 ms, sur quinze minutes
+  const wlat = [...groupBy(between(tT - 15 * M, tT), 'service.name').values()].map(l => l.reduce((a, r) => a + r['event.duration'], 0) / l.length);
+  const latC = wget('latence-par-service / Condition')[0];
+  const latN = wlat.filter(v => v >= 500000000).length;
+  check(latC && latC.groupes === wlat.length && latC.groupes_au_seuil === latN && latC.declenchee === (latN > 0 ? 1 : 0), 'watch array_compare some : moyenne par service, au moins un groupe au seuil', `${JSON.stringify(latC)} pour ${latN}/${wlat.length}`);
+  // Seuil de l’interface Watcher : durée maximale par hôte, les 5 premiers, > 800 ms
+  const hostMax = [...groupBy(between(tT - 5 * M, tT), 'host.name').values()].map(l => Math.max(...l.map(r => r['event.duration']))).sort((a, b) => b - a).slice(0, 5);
+  const thC = wget('6f1d0c2e-5b7a-4c1e-9e0d-3a2b1c4d5e6f / Condition')[0];
+  check(thC && thC.groupes === hostMax.length && thC.declenchee === (hostMax.some(v => v > 800000000) ? 1 : 0), 'watch de seuil (interface Watcher) : maximum par hôte, borne en strict_date_optional_time||epoch_millis', `${JSON.stringify(thC)} pour ${hostMax}`);
+  // Connexions refusées : la phrase sur les dernières 24 heures, sans borne haute (le document récent compte)
+  const refused = between(tT - 1440 * M).filter(r => /connection refused/i.test(r.message)).length;
+  const refC = wget('connexions-refusees / Condition')[0];
+  check(refC && refC.count === refused && refused === 1 && refC.declenchee === 1, 'watch script hits.total.value > 0 : la traduction suit l’intention, le nombre de documents', JSON.stringify(refC));
+  // Erreurs lentes sur le paiement : maximum ≥ 900 ms (le chemin /api/paiement n’a pas de document récent)
+  const pay = between(tT - 5 * M).filter(r => r['url.path'] === '/api/paiement' && r['http.response.status_code'] >= 500).map(r => r['event.duration']);
+  const payC = wget('erreurs-paiement / Condition')[0];
+  const payMax = pay.length ? Math.max(...pay) : null;
+  check(payC && payC.duree_max === payMax && payC.declenchee === (payMax !== null && payMax >= 900000000 ? 1 : 0), 'watch script sur une valeur d’agrégation, index en date math : maximum et décision', `${JSON.stringify(payC)} pour ${payMax}`);
+  // Ancien export : les 100 documents les plus récents du panier depuis T - 1 h, au moins un ≥ 4000 octets
+  const docs100 = between(tT - 60 * M).filter(r => r['service.name'] === 'panier').sort((a, b) => b.t - a.t).slice(0, 100);
+  const expC = wget('ancien-export / Condition')[0];
+  const expN = docs100.filter(r => r['http.response.bytes'] >= 4000).length;
+  check(expC && expC.documents === docs100.length && expC.documents_au_seuil === expN && expC.declenchee === (expN > 0 ? 1 : 0), 'watch array_compare sur hits.hits : modèle de recherche rendu, 100 documents, champ de _source', `${JSON.stringify(expC)} pour ${expN}/${docs100.length}`);
+  // Échecs de connexion : utilisateurs avec au moins 5 échecs en trente minutes (min_doc_count), taille de la liste
+  const fails = [...groupBy(between(tT - 30 * M).filter(r => r['event.category'] === 'authentication' && r['event.outcome'] === 'failure'), 'user.name').values()].filter(l => l.length >= 5).length;
+  const failC = wget('echecs-de-connexion / Condition')[0];
+  check(failC && failC.groupes === Math.min(fails, 20) && failC.declenchee === (fails > 0 ? 1 : 0), 'watch script buckets.size() : nombre de groupes après min_doc_count', `${JSON.stringify(failC)} pour ${fails}`);
+  // Rapport hebdomadaire : sept jours entiers avant le jour de T ; tous les documents sont du jour de T
+  check(wres.has('rapport-hebdo / Recherche') && wget('rapport-hebdo / Recherche').length === 0, 'watch, fenêtre arrondie au jour (||-7d/d, ||/d) : le jour en cours est exclu', JSON.stringify(wget('rapport-hebdo / Recherche')));
 }
 
 rmSync(WORK, { recursive: true, force: true });

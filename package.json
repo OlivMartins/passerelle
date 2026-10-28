@@ -1,6 +1,6 @@
 {
   "name": "passerelle",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "description": "Traduction des requêtes DSL Elasticsearch en SQL ClickHouse et des pipelines Logstash en configurations Vector",
   "license": "Apache-2.0",
@@ -11,6 +11,7 @@
     "test": "node scripts/test.mjs && node tests/server/run.mjs && node tests/verify/run.mjs && node tests/ops/run.mjs && node tests/assist/run.mjs",
     "test:update": "node scripts/test.mjs --update",
     "test:diff": "node tests/differential/run.mjs",
+    "test:watcher": "node tests/differential/watcher.mjs",
     "test:assist": "node tests/assist/ruby.mjs --require",
     "test:pipelines": "node tests/pipelines/run.mjs",
     "test:attributes": "node tests/attributes/run.mjs",

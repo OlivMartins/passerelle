@@ -752,7 +752,11 @@ function ruleDecision(sql, rule) {
   const t = rule.threshold.map(Number);
   if (!t.every(Number.isFinite)) return null;
   const cond = /BETWEEN/.test(rule.comparator) ? `${value} ${rule.comparator} ${t[0]} AND ${t[1]}` : `${value} ${rule.comparator} ${t[0]}`;
-  return `SELECT\n    *,\n    ${cond} AS declenchee\nFROM\n(\n${indent(sql.replace(/;\s*$/, ''), '    ')}\n)`;
+  return decisionWrap(sql, ['*', `${cond} AS declenchee`]);
+}
+// Décision d’une alerte (règle Kibana, watch) : des colonnes calculées sur le résultat de sa requête
+function decisionWrap(sql, select) {
+  return `SELECT\n    ${select.join(',\n    ')}\nFROM\n(\n${indent(String(sql).replace(/;\s*$/, ''), '    ')}\n)`;
 }
 
 /* ---------- Inventaire ---------- */
@@ -1288,6 +1292,24 @@ function inventoryCSV(inv) {
   // Point-virgule et BOM : le fichier s’ouvre tel quel dans un tableur réglé en français
   return '\uFEFF' + rows.map(r => r.map(q).join(';')).join('\r\n') + '\r\n';
 }
+// Feuille de style des rapports HTML (inventaire Kibana, watches) : thème clair et sombre
+const KB_CSS = `:root{--bg:#fbfbf9;--fg:#1d1d1b;--muted:#6b6b66;--line:#e3e2dc;--card:#fff;--ready:#2f7d4f;--review:#b7791f;--todo:#c0392b;--unrec:#7a7a7a;--code:#f3f2ee}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#161615;--fg:#ecebe6;--muted:#a3a29b;--line:#34332f;--card:#1f1f1d;--ready:#5fbf86;--review:#e0a84a;--todo:#ec7063;--unrec:#a0a0a0;--code:#262624}}
+:root[data-theme="dark"]{--bg:#161615;--fg:#ecebe6;--muted:#a3a29b;--line:#34332f;--card:#1f1f1d;--ready:#5fbf86;--review:#e0a84a;--todo:#ec7063;--unrec:#a0a0a0;--code:#262624}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1100px;margin:0 auto;padding:32px 16px 64px}h1{font-size:26px;margin:0 0 4px}h2{font-size:19px;margin:36px 0 10px}h3{font-size:16px;margin:0 0 4px}
+.muted{color:var(--muted)}.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:20px 0}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}.tile b{display:block;font-size:24px}
+.bar{display:flex;height:10px;border-radius:5px;overflow:hidden;margin:8px 0 18px;background:var(--line)}.seg.v-ready{background:var(--ready)}.seg.v-review{background:var(--review)}.seg.v-todo{background:var(--todo)}.seg.v-unrecognized{background:var(--unrec)}
+
+.tw{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:10px}table{width:100%;border-collapse:collapse}tr:last-child td{border-bottom:0}th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{font-weight:600;font-size:13px;color:var(--muted)}td.n,th.n{text-align:right;white-space:nowrap}
+a{color:inherit}.v{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.v-ready{color:var(--ready)}.v-review{color:var(--review)}.v-todo{color:var(--todo)}.v-unrecognized{color:var(--unrec)}
+.obj{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:12px 0}.obj ul{margin:6px 0 10px;padding-left:20px}
+ul.todo li::marker,li.err::marker{color:var(--todo)}ul.review li::marker,li.warn::marker{color:var(--review)}
+.q{border-top:1px dashed var(--line);margin-top:10px;padding-top:10px}pre{background:var(--code);border-radius:8px;padding:10px 12px;overflow-x:auto;font-size:12.5px;line-height:1.45}
+.filters{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.filters button{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:999px;padding:3px 12px;cursor:pointer}.filters button[aria-pressed="true"]{border-color:var(--fg)}
+.eff summary{cursor:pointer;color:var(--muted);font-size:13px}p.err{color:var(--todo)}`;
 const kbHtml = s => String(s === undefined || s === null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 function inventoryHTML(inv, title) {
   const s = inv.summary; const h = kbHtml;
@@ -1315,23 +1337,7 @@ function inventoryHTML(inv, title) {
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${h(title || 'Inventaire Kibana')}</title>
 <style>
-:root{--bg:#fbfbf9;--fg:#1d1d1b;--muted:#6b6b66;--line:#e3e2dc;--card:#fff;--ready:#2f7d4f;--review:#b7791f;--todo:#c0392b;--unrec:#7a7a7a;--code:#f3f2ee}
-@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#161615;--fg:#ecebe6;--muted:#a3a29b;--line:#34332f;--card:#1f1f1d;--ready:#5fbf86;--review:#e0a84a;--todo:#ec7063;--unrec:#a0a0a0;--code:#262624}}
-:root[data-theme="dark"]{--bg:#161615;--fg:#ecebe6;--muted:#a3a29b;--line:#34332f;--card:#1f1f1d;--ready:#5fbf86;--review:#e0a84a;--todo:#ec7063;--unrec:#a0a0a0;--code:#262624}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{max-width:1100px;margin:0 auto;padding:32px 16px 64px}h1{font-size:26px;margin:0 0 4px}h2{font-size:19px;margin:36px 0 10px}h3{font-size:16px;margin:0 0 4px}
-.muted{color:var(--muted)}.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:20px 0}
-.tile{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}.tile b{display:block;font-size:24px}
-.bar{display:flex;height:10px;border-radius:5px;overflow:hidden;margin:8px 0 18px;background:var(--line)}.seg.v-ready{background:var(--ready)}.seg.v-review{background:var(--review)}.seg.v-todo{background:var(--todo)}.seg.v-unrecognized{background:var(--unrec)}
-
-.tw{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:10px}table{width:100%;border-collapse:collapse}tr:last-child td{border-bottom:0}th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{font-weight:600;font-size:13px;color:var(--muted)}td.n,th.n{text-align:right;white-space:nowrap}
-a{color:inherit}.v{display:inline-block;font-size:12px;font-weight:600;padding:1px 8px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
-.v-ready{color:var(--ready)}.v-review{color:var(--review)}.v-todo{color:var(--todo)}.v-unrecognized{color:var(--unrec)}
-.obj{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:12px 0}.obj ul{margin:6px 0 10px;padding-left:20px}
-ul.todo li::marker,li.err::marker{color:var(--todo)}ul.review li::marker,li.warn::marker{color:var(--review)}
-.q{border-top:1px dashed var(--line);margin-top:10px;padding-top:10px}pre{background:var(--code);border-radius:8px;padding:10px 12px;overflow-x:auto;font-size:12.5px;line-height:1.45}
-.filters{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.filters button{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:999px;padding:3px 12px;cursor:pointer}.filters button[aria-pressed="true"]{border-color:var(--fg)}
-.eff summary{cursor:pointer;color:var(--muted);font-size:13px}p.err{color:var(--todo)}
+${KB_CSS}
 </style></head><body><main>
 <h1>Inventaire de migration Kibana vers ClickHouse</h1>
 <p class="muted">${s.objects} objets à migrer, ${s.queries} requêtes traduites.${Object.keys(inv.source.ignored).length ? ` Non comptés (sans requête) : ${h(Object.entries(inv.source.ignored).map(([t, n]) => `${n} ${t}`).join(', '))}.` : ''}</p>

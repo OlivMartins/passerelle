@@ -13,7 +13,8 @@ const { spawn: nodeSpawn } = require('node:child_process');
 
 /* ---------- Elasticsearch (lecture seule) ---------- */
 // Les seules routes appelées. Tout le reste est refusé ici, quoi que demande l’appelant.
-const ES_ALLOWED = [['GET', /^\/$/], ['POST', /^\/[^/?]+\/_search$/]];
+// _watcher/_query/watches : lecture des watches (passerelle watcher pull), privilège monitor_watcher
+const ES_ALLOWED = [['GET', /^\/$/], ['POST', /^\/[^/?]+\/_search$/], ['POST', /^\/_watcher\/_query\/watches$/]];
 
 function esClient(cfg, override) {
   const es = cfg.elasticsearch;
@@ -27,7 +28,7 @@ function esClient(cfg, override) {
   const timeout = (Number(cfg.verify.timeout) || 60) * 1000;
   async function call(method, path, body) {
     const route = path.split('?')[0];
-    if (!ES_ALLOWED.some(([m, re]) => m === method && re.test(route))) throw new Error(`appel Elasticsearch refusé : ${method} ${route} (lecture seule : GET / et POST /<index>/_search)`);
+    if (!ES_ALLOWED.some(([m, re]) => m === method && re.test(route))) throw new Error(`appel Elasticsearch refusé : ${method} ${route} (lecture seule : GET /, POST /<index>/_search et POST /_watcher/_query/watches)`);
     try {
       const r = await fetch(endpoint + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeout + 5000) });
       const text = await r.text();
@@ -47,7 +48,9 @@ function esClient(cfg, override) {
       if (body.track_total_hits === undefined) body.track_total_hits = true;
       if (body.timeout === undefined) body.timeout = `${Math.round(timeout / 1000)}s`;
       return call('POST', `/${encodeURIComponent(index).replace(/%2A/g, '*').replace(/%2C/g, ',')}/_search?allow_partial_search_results=false`, body);
-    }
+    },
+    // Une page des watches du cluster ({ from, size }) : { count, watches: [{ _id, watch, status }] }
+    queryWatches: body => call('POST', '/_watcher/_query/watches', body)
   };
 }
 
