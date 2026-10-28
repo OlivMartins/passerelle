@@ -1,0 +1,9 @@
+description: putAll sur une variable que VRL voit nulle ou table (merge doit rester infaillible)
+processors:
+  - script:
+      lang: painless
+      source: |
+        Map resource = ctx.res;
+        if (resource == null) { resource = new HashMap(); }
+        resource.putAll(ctx.extra);
+        ctx.res = resource;

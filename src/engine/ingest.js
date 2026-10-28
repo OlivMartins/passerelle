@@ -2331,7 +2331,7 @@ Object.assign(IngestGen.prototype, {
         if (local) { this.emit(`${local} = set!(${local}, [${this.plStr(a[0])}], ${a[1].c})`); return done(false); }
         this.set(this.plRef(segs.concat(e.args[0].v)), a[1].c); return done(false);
       }
-      case 'putAll': if (local) { this.emit(`${local} = merge(${local}, ${this.plO(a[0])})`); return done(true); } this.emit(`${target} = merge(object(${this.get(this.plRef(segs))}) ?? {}, object(${a[0].c}) ?? {})`); return done(true);
+      case 'putAll': if (local) { this.emit(`${local} = merge(${this.plO({ c: local, t: 'any' })}, ${this.plO(a[0])})`); return done(true); } this.emit(`${target} = merge(object(${this.get(this.plRef(segs))}) ?? {}, object(${a[0].c}) ?? {})`); return done(true);
       case 'remove': {
         if (local) { this.emit(`${local} = remove!(${local}, [${a[0].c}])`); return done(false); }
         this.emit(`del(${this.vpath(segs.concat(e.args[0].v))})`); return done(false);
