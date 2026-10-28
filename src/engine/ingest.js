@@ -387,11 +387,19 @@ function ingPainless(src) {
   const is = (v, k) => { const t = toks[p + (k || 0)]; return !!t && t.t !== 'str' && t.t !== 'num' && t.v === v; };
   const next = () => toks[p++];
   const expect = v => { if (!is(v)) throw new Error(`« ${v} » attendu${peek() ? `, trouvé « ${peek().v} »` : ''}`); p++; };
-  const BIN = { '||': 2, '&&': 3, '|': 4, '^': 5, '&': 6, '==': 7, '!=': 7, '===': 7, '!==': 7, '<': 8, '>': 8, '<=': 8, '>=': 8, '=~': 8, '==~': 8, instanceof: 8, '+': 9, '-': 9, '*': 10, '/': 10, '%': 10 };
+  const BIN = { '<<': 8.5, '>>': 8.5, '>>>': 8.5, '||': 2, '&&': 3, '|': 4, '^': 5, '&': 6, '==': 7, '!=': 7, '===': 7, '!==': 7, '<': 8, '>': 8, '<=': 8, '>=': 8, '=~': 8, '==~': 8, instanceof: 8, '+': 9, '-': 9, '*': 10, '/': 10, '%': 10 };
   const fns = new Map();
   function block() { const out = []; while (p < toks.length && !is('}')) out.push(stmt()); return out; }
   const endStmt = () => { if (is(';')) p++; };
   const isType = (k) => { const t = peek(k); return t && t.t === 'id' && (P_TYPES.has(t.v) || /^[A-Z]\w*$/.test(t.v)); };
+  // Nombre de jetons d’un type à partir de k : Map.Entry, List<Map<String, Object>>, String[]
+  const typeLen = (k0) => {
+    let k = k0 + 1;
+    while (is('.', k) && peek(k + 1) && peek(k + 1).t === 'id') k += 2;
+    if (is('<', k)) { let d = 0; do { if (is('<', k)) d++; else d -= P_ANG(peek(k)); k++; } while (d > 0 && p + k < toks.length); }
+    while (is('[', k) && is(']', k + 1)) k += 2;
+    return k - k0;
+  };
   function stmt() {
     if (is('{')) { next(); const b = block(); expect('}'); return { k: 'block', body: b }; }
     if (is(';')) { next(); return { k: 'nop' }; }
@@ -440,7 +448,8 @@ function ingPainless(src) {
       }
       // for (def x : liste) ou for (x in liste)
       let name;
-      if (isType(0) && peek(1) && peek(1).t === 'id') { next(); name = next().v; }
+      const tl = isType(0) ? typeLen(0) : 0;
+      if (tl && peek(tl) && peek(tl).t === 'id') { p += tl; name = next().v; }
       else name = next().v;
       if (is(':')) next(); else if (peek() && peek().t === 'id' && peek().v === 'in') next(); else throw new Error('boucle for à compteur non prise en charge (seule « for (x : liste) » l’est)');
       const list = expr(0); expect(')');
@@ -470,7 +479,7 @@ function ingPainless(src) {
         const params = []; let cur = null; let ang = 0;
         while (!is(')') || ang > 0) {
           if (p >= toks.length) throw new Error(`fonction « ${name} » : parenthèse fermante absente`);
-          if (is('<')) ang++; else if (is('>')) ang--;
+          if (is('<')) ang++; else if (P_ANG(peek())) ang -= P_ANG(peek());
           else if (is(',') && ang === 0) { if (cur) params.push(cur); cur = null; next(); continue; }
           const t = next(); if (t.t === 'id') cur = t.v;
         }
@@ -483,9 +492,7 @@ function ingPainless(src) {
     }
     // Déclaration : type (générique compris) puis nom
     if (isType(0)) {
-      let k = 1;
-      if (is('<', 1)) { let d = 0; do { if (is('<', k)) d++; else if (is('>', k)) d--; k++; } while (d > 0 && p + k < toks.length); }
-      while (is('[', k) && is(']', k + 1)) k += 2;
+      const k = typeLen(0);
       const nt = peek(k);
       if (nt && nt.t === 'id' && (is('=', k + 1) || is(';', k + 1))) {
         p += k; const name = next().v; let v = null;
@@ -524,7 +531,7 @@ function ingPainless(src) {
     // (Number) x, (List<String>) x, (String[]) x : un nom de classe Java entre parenthèses, suivi d’une valeur
     if (t && t.t === 'op' && t.v === '(' && peek(1) && peek(1).t === 'id' && /^[A-Z][\w.]*$/.test(peek(1).v)) {
       let k = 2;
-      if (is('<', k)) { let d = 0; do { if (is('<', k)) d++; else if (is('>', k)) d--; k++; } while (d > 0 && p + k < toks.length); }
+      if (is('<', k)) { let d = 0; do { if (is('<', k)) d++; else d -= P_ANG(peek(k)); k++; } while (d > 0 && p + k < toks.length); }
       while (is('[', k) && is(']', k + 1)) k += 2;
       const after = peek(k + 1);
       if (is(')', k) && after && (after.t === 'id' || after.t === 'num' || after.t === 'str' || (after.t === 'op' && ['(', '!'].includes(after.v)))) {
@@ -575,7 +582,7 @@ function ingPainless(src) {
       if (t.v === 'null') return { k: 'null' };
       if (t.v === 'new') {
         const ty = next(); if (!ty || ty.t !== 'id') throw new Error('type attendu après new');
-        if (is('<')) { let d = 0; do { if (is('<')) d++; else if (is('>')) d--; next(); } while (d > 0 && p < toks.length); }
+        if (is('<')) { let d = 0; do { if (is('<')) d++; else d -= P_ANG(peek()); next(); } while (d > 0 && p < toks.length); }
         // Tableau : new T[n] (n cases nulles) ou new T[] { a, b }
         if (is('[')) {
           next();
@@ -1093,6 +1100,7 @@ Object.assign(IngestGen.prototype, {
         if (e.v === 'ctx') return { c: '.', t: 'map' };
         if (env.locals.has(e.v)) {
           if (env.locals.get(e.v) === 're') throw new Error('expression régulière employée hors de matcher()');
+          if (env.locals.get(e.v) === 'matcher') throw new Error('Matcher employé autrement que par ses méthodes');
           return { c: `p_${e.v}`, t: env.locals.get(e.v) || 'any' };
         }
         if (e.v === 'params') { env.usesParams = true; return { c: 'p_params', t: 'map' }; }
@@ -1181,6 +1189,13 @@ Object.assign(IngestGen.prototype, {
       const re = javaRe(e.r.v); const full = op === '==~' ? `^(?:${re})$` : re;
       return { c: a.t === 'str' ? `match(${a.c}, ${vraw(full, 'r')})` : `(is_string(${a.c}) && match(string!(${a.c}), ${vraw(full, 'r')}))`, t: 'bool' };
     }
+    if (op === '>>' || op === '>>>' || op === '<<') {
+      // Décalage d’un nombre constant de bits : division (arrondie vers le bas, comme >> en Java) ou multiplication
+      if (e.r.k !== 'num' || !e.r.int || Number(e.r.v) > 62) throw new Error(`opérateur « ${op} » sans décalage constant non pris en charge`);
+      const f = 1n << BigInt(e.r.v); const x = this.plTmp(this.plExpr(e.l, env).c);
+      if (op === '>>>') this.approx('Painless : opérateur >>>', 'Le décalage non signé est traduit comme >> : identique pour les entiers positifs, pas pour les négatifs.');
+      return this.plTmp(op === '<<' ? `if is_integer(${x.c}) { int!(${x.c}) * ${f} } else { null }` : `if is_integer(${x.c}) { to_int(floor(int!(${x.c}) / ${f})) } else { null }`);
+    }
     if (op === '&' || op === '|' || op === '^') {
       // Masque constant seulement : VRL n’a pas d’opérateur sur les bits ; chaque bit du masque est extrait par division et reste
       const k = e.r.k === 'num' && e.r.int ? e.r : e.l.k === 'num' && e.l.int ? e.l : null;
@@ -1220,8 +1235,13 @@ Object.assign(IngestGen.prototype, {
   plCall(e, env) {
     const name = e.name; const args = () => e.args.map(a => this.plExpr(a, env));
     // /motif/.matcher(texte).replaceAll(…) | replaceFirst(…) | matches() | find()
-    const reNode = e.obj.k === 'mcall' && e.obj.name === 'matcher' && e.obj.args.length === 1
-      ? (e.obj.obj.k === 're' ? e.obj.obj : e.obj.obj.k === 'id' && env.reLocals && env.reLocals.get(e.obj.obj.v)) : null;
+    const reOf = x => x.k === 're' ? x : x.k === 'id' && env.reLocals && env.reLocals.get(x.v) ? env.reLocals.get(x.v)
+      : x.k === 'mcall' && x.name === 'compile' && x.obj.k === 'id' && x.obj.v === 'Pattern' && x.args.length === 1 && x.args[0].k === 'str' ? { k: 're', v: x.args[0].v } : null;
+    // Matcher gardé dans une variable : m.find(), m.group(1)…
+    if (e.obj.k === 'id' && env.matchers && env.matchers.has(e.obj.v) && env.locals.get(e.obj.v) === 'matcher') return this.plMatcherCall(e.obj.v, name, e.args, env);
+    // Pattern.split(texte), /motif/.split(texte)
+    if (name === 'split' && e.args.length === 1 && reOf(e.obj)) { env.regex = true; return this.plJavaSplit(this.plStr(this.plExpr(e.args[0], env)), vraw(javaRe(reOf(e.obj).v), 'r')); }
+    const reNode = e.obj.k === 'mcall' && e.obj.name === 'matcher' && e.obj.args.length === 1 ? reOf(e.obj.obj) : null;
     if (reNode) {
       env.regex = true;
       const re = javaRe(reNode.v); const s = this.plTmp(this.plStr(this.plExpr(e.obj.args[0], env)), 'str');
@@ -1298,7 +1318,10 @@ Object.assign(IngestGen.prototype, {
       return { c: `exists(${this.vpath(segs)})`, t: 'bool' };
     }
     if (name === 'getClass' || name === 'hashCode') throw new Error(`méthode ${name} non prise en charge`);
-    const r = this.plExpr(e.obj, env); const a = args();
+    const r = this.plExpr(e.obj, env);
+    // Les arguments d’une méthode de flux (lambdas, Collectors) sont lus par plStreamCall
+    const STREAM = ['filter', 'map', 'anyMatch', 'allMatch', 'noneMatch', 'collect', 'distinct', 'count', 'limit', 'skip', 'findFirst', 'findAny', 'sorted'];
+    const a = STREAM.includes(name) && (r.t === 'list' || r.stream) ? [] : args();
     const str = this.plStr(r);
     if (r.t === 'tok') {
       if (!(e.obj.k === 'id' && env.locals.has(e.obj.v))) throw new Error('StringTokenizer utilisé sans variable locale');
@@ -1326,7 +1349,7 @@ Object.assign(IngestGen.prototype, {
       }
       case 'equals': return { c: `(${r.c} == ${a[0].c})`, t: 'bool' };
       case 'equalsIgnoreCase': return { c: `(is_string(${r.c}) && is_string(${a[0].c}) && downcase(string!(${r.c})) == downcase(string!(${a[0].c})))`, t: 'bool' };
-      case 'isEmpty': return { c: `((is_string(${r.c}) && string!(${r.c}) == "") || (is_array(${r.c}) && length(array!(${r.c})) == 0) || (is_object(${r.c}) && length(object!(${r.c})) == 0))`, t: 'bool' };
+      case 'isEmpty': if (r.opt) return { c: `(${r.c} == null)`, t: 'bool' }; return { c: `((is_string(${r.c}) && string!(${r.c}) == "") || (is_array(${r.c}) && length(array!(${r.c})) == 0) || (is_object(${r.c}) && length(object!(${r.c})) == 0))`, t: 'bool' };
       case 'size': return ['list', 'map'].includes(r.t) ? { c: `length(${r.c})`, t: 'int' } : this.plTmp(`if is_array(${r.c}) { length(array!(${r.c})) } else if is_object(${r.c}) { length(object!(${r.c})) } else { null }`);
       case 'length': return { c: `strlen(${this.plS(r)})`, t: 'int' };
       case 'toLowerCase': return { c: `downcase(${this.plS(r)})`, t: 'str' };
@@ -1338,7 +1361,15 @@ Object.assign(IngestGen.prototype, {
         const x = this.plTmp(r.c);
         return this.plTmp(`if is_timestamp(${x.c}) { to_unix_timestamp(timestamp!(${x.c}), unit: "${name === 'toEpochMilli' ? 'milliseconds' : 'seconds'}") } else { null }`);
       }
-      case 'remove': {
+      case 'remove': if (a.length === 1 && !(e.args[0].k === 'str' && (path || isRoot))) {
+        // def v = m.remove(k) : la valeur enlevée est rendue ; liste.remove(i) rend l’élément d’indice i
+        const k = this.plTmp(a[0].c); const old = this.tmp('p');
+        this.emit(`${old} = if is_object(${r.c}) && is_string(${k.c}) { get!(${r.c}, [string!(${k.c})]) } else if is_array(${r.c}) && is_integer(${k.c}) { get!(${r.c}, [int!(${k.c})]) } else { null }`);
+        this.plMutate({ k: 'mcall', obj: e.obj, name: 'remove', args: [{ k: 'vrl', c: k.c, t: a[0].t }] }, env);
+        return { c: old, t: 'any' };
+      }
+      // fall through
+      case 'removeKey': {
         // def v = ctx.a.remove('b') : la valeur est lue puis le champ supprimé
         if (a.length !== 1 || e.args[0].k !== 'str' || !(path || isRoot)) throw new Error('méthode « remove » non prise en charge');
         const segs = (path ? path.segs : []).concat(e.args[0].v);
@@ -1358,12 +1389,31 @@ Object.assign(IngestGen.prototype, {
       case 'sha1': return { c: `sha1(${this.plStr(r)})`, t: 'str' };
       case 'decodeBase64': return { c: `(decode_base64(${this.plStr(r)}) ?? null)`, t: 'any' };
       case 'toArray': return { c: this.plA(r), t: 'list' };
+      case 'stream': return { c: this.plA(r), t: 'list', stream: true };
+      case 'filter': case 'map': case 'anyMatch': case 'allMatch': case 'noneMatch': case 'collect': case 'distinct': case 'count': case 'limit': case 'skip': case 'findFirst': case 'findAny': case 'sorted':
+        if (r.t === 'list' || r.stream) return this.plStreamCall(e, env, r);
+        break;
+      case 'toList': if (r.stream || r.t === 'list') return { c: this.plA(r), t: 'list' }; break;
+      // Optional (findFirst) : une valeur ou null
+      case 'orElse': return this.plTmp(`if ${r.c} != null { ${r.c} } else { ${a[0].c} }`);
+      case 'isPresent': return { c: `(${r.c} != null)`, t: 'bool' };
+
       case 'subList': return { c: `(slice(${this.plA(r)}, ${a[0].c}, ${a[1].c}) ?? [])`, t: 'list' };
       case 'substring': return { c: `(slice(${this.plS(r)}, ${a.map(x => x.c).join(', ')}) ?? null)`, t: 'any' };
       // find() est typé « entier ou null » par VRL : int() rend la comparaison infaillible
       case 'indexOf': return { c: `(int(find(${this.plS(r)}, ${this.plStr(a[0])})) ?? -1)`, t: 'int' };
       case 'replace': return { c: `replace(${this.plS(r)}, ${this.plStr(a[0])}, ${this.plStr(a[1])})`, t: 'str' };
-      case 'split': env.regex = true; return { c: `split(${this.plS(r)}, ${a[0].t === 'str' && e.args[0].k === 'str' ? vraw(javaRe(e.args[0].v), 'r') : a[0].c})`, t: 'list' };
+      case 'split': {
+        env.regex = true;
+        const sep = a[0].t === 'str' && e.args[0].k === 'str' ? vraw(javaRe(e.args[0].v), 'r') : a[0].c;
+        if (a.length === 2) {
+          // split(motif, n) : n < 0 garde les éléments vides de fin, n > 0 coupe en n parties au plus
+          if (e.args[1].k === 'un' && e.args[1].op === '-' && e.args[1].e.k === 'num') return { c: `split(${this.plS(r)}, ${sep})`, t: 'list' };
+          if (e.args[1].k === 'num' && e.args[1].int && Number(e.args[1].v) > 0) return { c: `split(${this.plS(r)}, ${sep}, limit: ${Number(e.args[1].v)})`, t: 'list' };
+          if (!(e.args[1].k === 'num' && Number(e.args[1].v) === 0)) throw new Error('split avec une limite calculée non pris en charge');
+        }
+        return this.plJavaSplit(this.plS(r), sep);
+      }
       case 'get': return { c: `(get(${r.c}, [${a[0].c}]) ?? null)`, t: 'any' };
       case 'keySet': return { c: `keys(${this.plO(r)})`, t: 'list' };
       case 'values': return { c: `values(${this.plO(r)})`, t: 'list' };
@@ -1522,6 +1572,100 @@ Object.assign(IngestGen.prototype, {
     this.close();
     return { c: out, ok };
   },
+  // Matcher gardé dans une variable : { s: texte, ms: correspondances, i: rang de la dernière, cur: groupes courants }
+  plMatcherNew(name, reNode, sAst, env) {
+    env.regex = true;
+    const re = javaRe(reNode.v); const s = this.plTmp(this.plStr(this.plExpr(sAst, env)), 'str');
+    this.emit(`p_${name} = { "s": ${s.c}, "ms": parse_regex_all(${s.c}, ${vraw(re, 'r')}, numeric_groups: true) ?? [], "i": -1, "cur": null }`);
+    (env.matchers = env.matchers || new Map()).set(name, { re, depth: (env.loops || []).length, multi: false });
+    env.locals.set(name, 'matcher');
+  },
+  plMatcherCall(name, method, args, env) {
+    const m = env.matchers.get(name); const v = `p_${name}`;
+    switch (method) {
+      case 'matches':
+        this.emit(`${v}.cur = parse_regex(string!(${v}.s), ${vraw(`^(?:${m.re})$`, 'r')}, numeric_groups: true) ?? null`);
+        return { c: `(${v}.cur != null)`, t: 'bool' };
+      case 'lookingAt':
+        this.emit(`${v}.cur = parse_regex(string!(${v}.s), ${vraw(`^(?:${m.re})`, 'r')}, numeric_groups: true) ?? null`);
+        return { c: `(${v}.cur != null)`, t: 'bool' };
+      case 'find':
+        if (args.length) throw new Error('Matcher.find(début) non pris en charge');
+        if ((env.loops || []).length > m.depth) m.multi = true;
+        this.emit(`${v}.i = int!(${v}.i) + 1`);
+        this.emit(`${v}.cur = get!(${v}.ms, [${v}.i])`);
+        return { c: `(${v}.cur != null)`, t: 'bool' };
+      case 'group': {
+        const g = !args.length ? '"0"' : args[0].k === 'num' && args[0].int ? vq(String(Number(args[0].v))) : args[0].k === 'str' ? vq(args[0].v) : null;
+        if (!g) throw new Error('Matcher.group avec un groupe calculé non pris en charge');
+        return { c: `(get(${v}.cur, [${g}]) ?? null)`, t: 'any' };
+      }
+      case 'groupCount': return { c: `(length(object(${v}.cur) ?? {}) - 1)`, t: 'any' };
+      case 'start': case 'end': {
+        // Début de la première correspondance : le plus court préfixe suivi du motif (recherche la plus à gauche, comme Java)
+        if (args.length) throw new Error(`Matcher.${method}(groupe) non pris en charge`);
+        if (m.multi) throw new Error(`Matcher.${method}() après plusieurs find() non pris en charge`);
+        const pre = this.plTmp(`strlen(string(get(parse_regex(string!(${v}.s), ${vraw(`^(?s)(?P<pre_>.*?)(?:${m.re})`, 'r')}) ?? {}, ["pre_"]) ?? null) ?? "")`, 'int');
+        if (method === 'start') return pre;
+        return this.plTmp(`${pre.c} + strlen(string(get(${v}.cur, ["0"]) ?? null) ?? "")`, 'int');
+      }
+    }
+    throw new Error(`Matcher.${method} non pris en charge`);
+  },
+  // String.split / Pattern.split de Java : les éléments vides de fin disparaissent ; un texte vide donne [""]
+  plJavaSplit(sCode, sepCode) {
+    const parts = this.plTmp(`split(${sCode}, ${sepCode})`, 'list'); const last = this.tmp('p');
+    this.emit(`${last} = -1`);
+    this.emit(`for_each(${parts.c}) -> |_i, _x| { if _x != "" { ${last} = _i } }`);
+    return this.plTmp(`if ${sCode} == "" { [""] } else { slice(${parts.c}, 0, ${last} + 1) ?? [] }`, 'list');
+  },
+  // Flux Java (stream()) : traités comme des listes ; filter, map, collect, anyMatch… deviennent des boucles
+  plStreamCall(e, env, r) {
+    const name = e.name; const lam = e.args[0];
+    const each = (fn) => {
+      if (!lam || lam.k !== 'lambda' || lam.params.length !== 1) throw new Error(`${name} : lambda à un paramètre attendue`);
+      const n = lam.params[0]; const prev = env.locals.get(n); env.locals.set(n, 'any');
+      const src = this.plA(r); const x = this.tmp('x');
+      const res = fn('start');
+      this.open(`for_each(${src}) -> |_i, ${x}|`);
+      this.emit(`p_${n} = ${x}`);
+      const val = this.plLambdaValue(lam, env);
+      fn('body', val, x);
+      this.close();
+      if (prev === undefined) env.locals.delete(n); else env.locals.set(n, prev);
+      return res;
+    };
+    switch (name) {
+      case 'filter': { let out; each((ph, val, x) => { if (ph === 'start') { out = this.tmp('p'); this.emit(`${out} = []`); return out; } this.emit(`if ${this.plBool(val)} { ${out} = push(${out}, ${x}) }`); }); return { c: out, t: 'list' }; }
+      case 'map': { let out; each((ph, val) => { if (ph === 'start') { out = this.tmp('p'); this.emit(`${out} = []`); return out; } this.emit(`${out} = push(${out}, ${val.c})`); }); return { c: out, t: 'list' }; }
+      case 'anyMatch': case 'allMatch': case 'noneMatch': {
+        let out; each((ph, val) => {
+          if (ph === 'start') { out = this.tmp('p'); this.emit(`${out} = ${name === 'anyMatch' ? 'false' : 'true'}`); return out; }
+          if (name === 'anyMatch') this.emit(`if ${this.plBool(val)} { ${out} = true }`);
+          else if (name === 'allMatch') this.emit(`if !${this.plBool(val)} { ${out} = false }`);
+          else this.emit(`if ${this.plBool(val)} { ${out} = false }`);
+        });
+        return { c: out, t: 'bool' };
+      }
+      case 'collect': {
+        const c = e.args[0];
+        if (c && c.k === 'mcall' && c.obj.k === 'id' && c.obj.v === 'Collectors') {
+          if (c.name === 'toList' || c.name === 'toCollection') return { c: this.plA(r), t: 'list' };
+          if (c.name === 'toSet') return { c: `unique(${this.plA(r)})`, t: 'list' };
+          if (c.name === 'joining') return this.plTmp(`join!(map_values(${this.plA(r)}) -> |x| { ${jstrOf('x')} }, ${c.args.length ? this.plStr(this.plExpr(c.args[0], env)) : '""'})`, 'str');
+        }
+        throw new Error('collect : seuls Collectors.toList, toSet et joining sont pris en charge');
+      }
+      case 'toList': return { c: this.plA(r), t: 'list' };
+      case 'distinct': return { c: `unique(${this.plA(r)})`, t: 'list' };
+      case 'count': return { c: `length(${this.plA(r)})`, t: 'int' };
+      case 'limit': return { c: `(slice(${this.plA(r)}, 0, ${this.plExpr(e.args[0], env).c}) ?? [])`, t: 'list' };
+      case 'skip': return { c: `(slice(${this.plA(r)}, ${this.plExpr(e.args[0], env).c}) ?? [])`, t: 'list' };
+      case 'findFirst': case 'findAny': return { c: this.plTmp(`get!(${this.plA(r)}, [0])`).c, t: 'any', opt: true };
+      case 'sorted': if (!e.args.length) return { c: this.plSortList(this.plA(r), false, null).c, t: 'list' }; break;
+    }
+    throw new Error(`stream().${name} non pris en charge`);
+  },
   plStmts(list, env) { for (const s of list) this.plStmt(s, env); },
   // Après un return, un break ou un continue possibles, les instructions suivantes sont gardées par leur drapeau
   plStmt(s, env) {
@@ -1565,6 +1709,11 @@ Object.assign(IngestGen.prototype, {
         let sv = s.v;
         if (sv && sv.k === 'mcall' && sv.name === 'compile' && sv.obj.k === 'id' && sv.obj.v === 'Pattern' && sv.args.length === 1 && sv.args[0].k === 'str') sv = { k: 're', v: sv.args[0].v };
         if (sv && sv.k === 're') { (env.reLocals = env.reLocals || new Map()).set(s.name, sv); env.locals.set(s.name, 're'); return; }
+        if (sv && sv.k === 'mcall' && sv.name === 'matcher' && sv.args.length === 1) {
+          const ro = sv.obj.k === 're' ? sv.obj : sv.obj.k === 'id' && env.reLocals && env.reLocals.get(sv.obj.v) ? env.reLocals.get(sv.obj.v)
+            : sv.obj.k === 'mcall' && sv.obj.name === 'compile' && sv.obj.obj.k === 'id' && sv.obj.obj.v === 'Pattern' && sv.obj.args.length === 1 && sv.obj.args[0].k === 'str' ? { k: 're', v: sv.obj.args[0].v } : null;
+          if (ro) return this.plMatcherNew(s.name, ro, sv.args[0], env);
+        }
         if (sv && sv.k === 'sbnew') (env.sbs = env.sbs || new Set()).add(s.name);
         if (sv && sv.k === 'list' && sv.set) (env.sets = env.sets || new Set()).add(s.name);
         const v = s.v ? this.plExpr(s.v, env) : { c: 'null', t: 'null' }; env.locals.set(s.name, v.t === 'null' ? 'any' : v.t); /* null d’un type opaque : VRL ne doit pas déduire « null » pour une variable que la boucle réaffecte */ this.emit(`p_${s.name} = ${v.t === 'null' ? 'parse_json!("null")' : v.c}`);
@@ -2848,7 +2997,9 @@ Object.assign(IngestGen.prototype, {
     const item = this.tmp('valeur'); const key = this.tmp('cle');
     const ok = this.tmp('ok'); const ech = this.tmp('echec');
     const inner = mapMode => {
-      const prev = [this.value, this.key, this.inLoop]; this.value = item; this.key = mapMode ? key : null; this.inLoop = true;
+      // Sur une liste, _ingest._key n’existe pas : un modèle {{{_ingest._key}}} s’y rend en texte vide, comme dans Elasticsearch
+      const prev = [this.value, this.key, this.inLoop]; this.value = item; this.key = key; this.inLoop = true;
+      if (!mapMode) this.emit(`${key} = null`);
       this.emit(`${ok} = true`); this.emit(`${ech} = null`);
       this.processor(o.processor, `${label} → processor`, ok, ech);
       this.emit(`if !${ok} { fail = ${ech} }`);

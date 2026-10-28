@@ -37,3 +37,12 @@ processors:
       field: mots
       order: desc
       target_field: mots_desc
+  - script:
+      lang: painless
+      source: |
+        Map<String, List<String>> types = new HashMap();
+        if (ctx.prio != null) {
+          ctx.sev = ctx.prio & 0x7;
+          ctx.fac = ctx.prio >> 3;
+          ctx.dbl = ctx.prio << 1;
+        }

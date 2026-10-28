@@ -432,7 +432,9 @@ function dissectRegex(pattern, target, named) {
 }
 
 /* ---------- Painless → expression ClickHouse ---------- */
-const P_OPS = ['==~', '===', '!==', '==', '!=', '<=', '>=', '&&', '||', '?.', '?:', '=~', '++', '--', '+=', '-=', '*=', '/=', '->', '::'];
+const P_OPS = ['==~', '===', '!==', '>>>', '==', '!=', '<=', '>=', '>>', '<<', '&&', '||', '?.', '?:', '=~', '++', '--', '+=', '-=', '*=', '/=', '->', '::'];
+// Fermeture de chevrons d’un type générique : « >> » et « >>> » en ferment deux ou trois
+const P_ANG = t => (t && t.t === 'op' ? { '>': 1, '>>': 2, '>>>': 3 }[t.v] || 0 : 0);
 function ptokens(src) {
   const t = []; let i = 0; const n = src.length;
   while (i < n) {
@@ -496,7 +498,7 @@ function pparse(src) {
     if (t.t === 'id' && ['for', 'while', 'do', 'try', 'throw', 'switch'].includes(t.v)) throw new Error(`instruction « ${t.v} » non prise en charge`);
     if (t.t === 'id' && P_TYPES.has(t.v)) {
       let k = 1;
-      if (is('<', 1)) { let d = 0; do { if (is('<', k)) d++; else if (is('>', k)) d--; k++; } while (d > 0 && p + k < toks.length); }
+      if (is('<', 1)) { let d = 0; do { if (is('<', k)) d++; else d -= P_ANG(peek(k)); k++; } while (d > 0 && p + k < toks.length); }
       while (is('[', k) && is(']', k + 1)) k += 2;
       const nt = peek(k);
       if (nt && nt.t === 'id') {
