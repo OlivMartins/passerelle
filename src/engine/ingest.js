@@ -630,6 +630,76 @@ function ingPainless(src) {
   return prog;
 }
 
+
+/*
+ * Séparateur de split ou de kv qui emploie une anticipation ou une rétrospection, que le moteur de VRL n’a pas.
+ * Deux formes sont rendues exactement :
+ *  - (?<!\\)c : c non précédé d’une barre oblique inverse. Les « \c » sont d’abord masqués, puis rétablis dans chaque morceau.
+ *  - X(?=Y) : X suivi de Y. On remplace X(Y) par une marque suivie de Y, puis on découpe sur la marque ; exact quand aucun
+ *    X ne peut commencer dans le texte reconnu par Y (le premier caractère de X n’est accepté par aucun élément de Y).
+ * Les marques sont des caractères de contrôle (\x1D, \x1E) : un texte qui en contient serait mal découpé.
+ */
+const SEP_WS = [' ', '\t', '\n', '\r', '\x0B', '\f'];
+function sepAtoms(re) {
+  const atoms = []; let i = 0;
+  while (i < re.length) {
+    const c = re[i];
+    if (c === '[') {
+      let j = i + 1; if (re[j] === '^') j++; if (re[j] === ']') j++;
+      while (j < re.length && re[j] !== ']') j += re[j] === '\\' ? 2 : 1;
+      if (j >= re.length) return null;
+      atoms.push({ cls: re.slice(i + 1, j) }); i = j + 1;
+    } else if (c === '\\') { atoms.push({ esc: re[i + 1] }); i += 2; }
+    else if ('(|)'.includes(c)) return null;
+    else if ('+*?'.includes(c)) i++;
+    else if (c === '{') { const j = re.indexOf('}', i); if (j < 0) return null; i = j + 1; }
+    else { atoms.push({ lit: c }); i++; }
+  }
+  return atoms;
+}
+function sepEscMatches(e, ch) {
+  if (e === 's') return SEP_WS.includes(ch);
+  if (e === 'S') return !SEP_WS.includes(ch);
+  if (e === 'w') return /[0-9A-Za-z_]/.test(ch);
+  if (e === 'W') return !/[0-9A-Za-z_]/.test(ch);
+  if (e === 'd') return /[0-9]/.test(ch);
+  if (e === 'D') return !/[0-9]/.test(ch);
+  return e === ch;
+}
+function sepClassMatches(cls, ch) {
+  let neg = false; let i = 0; if (cls[0] === '^') { neg = true; i = 1; }
+  let hit = false;
+  while (i < cls.length) {
+    let a; if (cls[i] === '\\') { const e = cls[i + 1]; i += 2; if (/[sSwWdD]/.test(e)) { if (sepEscMatches(e, ch)) hit = true; continue; } a = e; } else a = cls[i++];
+    if (cls[i] === '-' && i + 1 < cls.length && cls[i + 1] !== ']') { let b = cls[i + 1]; i += 2; if (b === '\\') { b = cls[i++]; } if (ch >= a && ch <= b) hit = true; continue; }
+    if (a === ch) hit = true;
+  }
+  return neg ? !hit : hit;
+}
+function sepAtomMatches(a, ch) { return a.lit !== undefined ? a.lit === ch : a.esc !== undefined ? sepEscMatches(a.esc, ch) : sepClassMatches(a.cls, ch); }
+function javaSepPlan(pat) {
+  let p = String(pat); const plan = { steps: [], restore: null, re: null };
+  const NEG_BS = '(?<!\\\\)';
+  if (p.startsWith(NEG_BS)) {
+    const c = p[NEG_BS.length];
+    if (!c || /[\\.*+?^$()[\]{}|]/.test(c)) return null;
+    plan.steps.push({ re: '\\\\' + c, rep: '\x1D' });
+    plan.restore = { from: '\x1D', to: '\\' + c };
+    p = p.slice(NEG_BS.length);
+  }
+  const la = /^(.*?)\(\?=(.*)\)$/s.exec(p);
+  if (la) {
+    const X = la[1]; const Y = la[2];
+    const xa = sepAtoms(X); const ya = sepAtoms(Y);
+    if (!xa || !ya || !xa.length || !ya.length) return null;
+    const firsts = xa[0].lit !== undefined ? [xa[0].lit] : xa[0].esc === 's' ? SEP_WS : null;
+    if (!firsts || firsts.some(ch => ya.some(a => sepAtomMatches(a, ch)))) return null;
+    plan.steps.push({ re: `${javaRe(X)}(?P<la_>${javaRe(Y)})`, rep: '\x1E${la_}' });
+    plan.re = '\\x1E';
+  } else plan.re = javaRe(p);
+  return plan;
+}
+
 /* ---------- Génération du programme VRL ---------- */
 // Métadonnées du document (ctx._index…) : rangées dans les métadonnées de l’événement Vector
 const INGEST_META = ['_index', '_id', '_routing', '_version', '_version_type', '_if_seq_no', '_if_primary_term', '_op_type', '_dynamic_templates'];
@@ -1291,8 +1361,30 @@ Object.assign(IngestGen.prototype, {
       }
       if (cls === 'Instant' && (name === 'ofEpochMilli' || name === 'ofEpochSecond') && a.length === 1) {
         this.approx('Painless : dates', 'Une date illisible fait échouer le script en Painless (le document part en on_failure) ; la traduction donne null et continue.');
-        return this.plTmp(`if is_integer(${a[0].c}) { from_unix_timestamp(int!(${a[0].c}), unit: "${name === 'ofEpochMilli' ? 'milliseconds' : 'seconds'}") ?? null } else { null }`, 'ts');
+        return Object.assign(this.plTmp(`if is_integer(${a[0].c}) { from_unix_timestamp(int!(${a[0].c}), unit: "${name === 'ofEpochMilli' ? 'milliseconds' : 'seconds'}") ?? null } else { null }`, 'ts'), { inst: true });
       }
+      if (cls === 'Instant' && name === 'ofEpochSecond' && a.length === 2) {
+        return Object.assign(this.plTmp(`if is_integer(${a[0].c}) && is_integer(${a[1].c}) { from_unix_timestamp(int!(${a[0].c}) * 1000000000 + int!(${a[1].c}), unit: "nanoseconds") ?? null } else { null }`, 'ts'), { inst: true });
+      }
+      // Collections, Arrays, List.of : des listes et des tables ordinaires
+      if (cls === 'Collections' && (name === 'emptyList' || name === 'emptySet') && !a.length) return { c: '[]', t: 'list' };
+      if (cls === 'Collections' && name === 'emptyMap' && !a.length) return { c: '{}', t: 'map' };
+      if (cls === 'Collections' && name === 'singletonList' && a.length === 1) return { c: `[${a[0].c}]`, t: 'list' };
+      if (cls === 'Collections' && /^unmodifiable(List|Map|Set|Collection)$/.test(name) && a.length === 1) return a[0];
+      if ((cls === 'Arrays' && name === 'asList') || ((cls === 'List' || cls === 'Set') && name === 'of')) {
+        // Un seul argument qui est un tableau : ses éléments (varargs de Java)
+        const l = a.length === 1 && a[0].t === 'list' ? a[0]
+          : a.length === 1 && !PL_SCALAR.has(a[0].t) ? this.plTmp(`if is_array(${a[0].c}) { array!(${a[0].c}) } else { [${a[0].c}] }`, 'list')
+            : { c: `[${a.map(x => x.c).join(', ')}]`, t: 'list' };
+        return cls === 'Set' ? { c: `unique(${l.c})`, t: 'list' } : l;
+      }
+      if (cls === 'Boolean' && name === 'parseBoolean' && a.length === 1) return { c: `(downcase(${this.plS(a[0])}) == "true")`, t: 'bool' };
+      if (cls === 'Integer' && name === 'parseUnsignedInt' && a.length === 1) {
+        // Au-delà de 2^31 - 1, l’entier Java est négatif (complément à deux sur 32 bits)
+        const x = this.plTmp(`to_int(${this.plS(a[0])}) ?? null`);
+        return this.plTmp(`if is_integer(${x.c}) && int!(${x.c}) >= 0 && int!(${x.c}) <= 4294967295 { if int!(${x.c}) > 2147483647 { int!(${x.c}) - 4294967296 } else { int!(${x.c}) } } else { null }`);
+      }
+      if (cls === 'String' && name === 'format' && e.args.length >= 1 && e.args[0].k === 'str') return this.plFormat(e.args[0].v, a.slice(1));
       if (cls === 'Json' && name === 'dump' && a.length === 1) {
         this.approx('Painless : Json.dump', 'encode_json écrit les clés dans l’ordre alphabétique ; Json.dump les écrit dans l’ordre du document. Le contenu est le même, pas le texte.');
         return { c: `encode_json(${a[0].c})`, t: 'str' };
@@ -1355,8 +1447,15 @@ Object.assign(IngestGen.prototype, {
       case 'toLowerCase': return { c: `downcase(${this.plS(r)})`, t: 'str' };
       case 'toUpperCase': return { c: `upcase(${this.plS(r)})`, t: 'str' };
       case 'trim': return { c: `replace(${this.plS(r)}, r'^[\\x00-\\x20]+|[\\x00-\\x20]+$', "")`, t: 'str' };
-      case 'toString': return { c: str, t: 'str' };
-      case 'toInstant': case 'toZonedDateTime': if (r.t === 'ts') return r; break;
+      case 'toString':
+        if (r.t === 'ts') {
+          // Instant.toString (ISO_INSTANT) : secondes toujours écrites, fraction de 0, 3, 6 ou 9 chiffres, « Z »
+          if (!r.inst) this.approx('Painless : ZonedDateTime.toString', 'La date est écrite en UTC au format ISO (comme un Instant) ; Java garde le fuseau d’origine et omet les secondes nulles.');
+          return this.plTmp(`if is_timestamp(${r.c}) { format_timestamp!(timestamp!(${r.c}), "%Y-%m-%dT%H:%M:%S%.fZ") } else { "" }`, 'str');
+        }
+        return { c: str, t: 'str' };
+      case 'toInstant': return Object.assign({}, r, { t: 'ts', inst: true });
+      case 'toZonedDateTime': if (r.t === 'ts') return r; break;
       case 'toEpochSecond': case 'toEpochMilli': {
         const x = this.plTmp(r.c);
         return this.plTmp(`if is_timestamp(${x.c}) { to_unix_timestamp(timestamp!(${x.c}), unit: "${name === 'toEpochMilli' ? 'milliseconds' : 'seconds'}") } else { null }`);
@@ -1611,6 +1710,31 @@ Object.assign(IngestGen.prototype, {
       }
     }
     throw new Error(`Matcher.${method} non pris en charge`);
+  },
+  // String.format : %s, %d, %x, %X, avec remplissage par des zéros ou des espaces (%05d, %08X, %3s), %%
+  plFormat(fmt, args) {
+    const parts = []; let k = 0; const re = /%(0?)(\d*)([sdxX%])/g; let last = 0; let m;
+    while ((m = re.exec(fmt))) {
+      if (m.index > last) parts.push(vq(fmt.slice(last, m.index)));
+      last = re.lastIndex;
+      if (m[3] === '%') { parts.push('"%"'); continue; }
+      const a = args[k++]; if (!a) throw new Error('String.format : argument manquant');
+      let v;
+      if (m[3] === 's') v = this.plStr(a);
+      else {
+        const n = this.plTmp(this.plCast('int', a).c);
+        v = m[3] === 'd' ? this.plTmp(`if is_integer(${n.c}) { to_string(int!(${n.c})) } else { "" }`, 'str').c
+          : this.plTmp(`if is_integer(${n.c}) { ${m[3] === 'X' ? 'upcase' : 'downcase'}(format_int!(int!(${n.c}), 16)) } else { "" }`, 'str').c;
+      }
+      if (m[2]) {
+        const w = Number(m[2]); const pad = (m[1] === '0' ? '0' : ' ').repeat(w);
+        v = this.plTmp(`if strlen(${v}) < ${w} { slice!(${vq(pad)} + ${v}, strlen(${v})) } else { ${v} }`, 'str').c;
+      }
+      parts.push(v);
+    }
+    if (/%[^sdxX%]/.test(fmt.replace(/%(0?)(\d*)([sdxX%])/g, ''))) throw new Error('String.format : format non pris en charge');
+    if (last < fmt.length) parts.push(vq(fmt.slice(last)));
+    return { c: parts.length ? `(${parts.join(' + ')})` : '""', t: 'str' };
   },
   // String.split / Pattern.split de Java : les éléments vides de fin disparaissent ; un texte vide donne [""]
   plJavaSplit(sCode, sepCode) {
@@ -2618,7 +2742,7 @@ Object.assign(IngestGen.prototype, {
     this.open('if v == null'); if (!ignore) this.emit(`fail = ${vq(`field [${r.path}] is null, cannot split.`)}`);
     this.close('} else if !is_string(v) {'); this.ind++; this.failCast('v', r.path, 'java.lang.String');
     this.close('} else {'); this.ind++;
-    this.emit(`parts = split(string!(v), ${vraw(javaRe(o.separator), 'r')})`);
+    this.splitParts('string!(v)', o.separator);
     if (!keepTrail) {
       // String.split de Java : les éléments vides de fin sont retirés (une chaîne vide donne [""])
       this.emit('last = -1');
@@ -2870,7 +2994,7 @@ Object.assign(IngestGen.prototype, {
     this.open('if v == null'); if (!ignore) this.emit(`fail = ${vq(`field [${r.path}] is null, cannot extract key-value pairs.`)}`);
     this.close('} else if !is_string(v) {'); this.ind++; this.failCast('v', r.path, 'java.lang.String');
     this.close('} else {'); this.ind++;
-    this.emit(`parts = split(string!(v), ${vraw(javaRe(o.field_split), 'r')})`);
+    this.splitParts('string!(v)', o.field_split);
     // String.split : éléments vides de fin retirés
     this.emit('last = -1');
     this.emit('for_each(parts) -> |i, x| { if x != "" { last = i } }');
@@ -3056,6 +3180,17 @@ Object.assign(IngestGen.prototype, {
   }
 });
 Object.assign(IngestGen.prototype, {
+  // parts = découpage de src (texte) selon le motif Java pat, anticipation et rétrospection comprises quand c’est exact
+  splitParts(src, pat) {
+    let plan = null;
+    try { javaRe(pat); } catch (e) { if (!(e instanceof IngestUnsupported)) throw e; plan = javaSepPlan(pat); if (!plan) throw e; }
+    if (!plan) { this.emit(`parts = split(${src}, ${vraw(javaRe(pat), 'r')})`); return; }
+    this.emit(`sep_src = ${src}`);
+    for (const st of plan.steps) this.emit(`sep_src = replace(sep_src, ${vraw(st.re, 'r')}, ${vq(st.rep)})`);
+    this.emit(`parts = split(sep_src, ${vraw(plan.re, 'r')})`);
+    if (plan.restore) this.emit(`parts = map_values(parts) -> |x| { replace(string!(x), ${vq(plan.restore.from)}, ${vq(plan.restore.to)}) }`);
+    this.approx('Séparateur avec anticipation', `Le séparateur « ${pat} » est rendu sans anticipation ni rétrospection, à l’aide de caractères de contrôle (\x1D, \x1E) : un texte qui en contient serait mal découpé.`);
+  },
   // uri_parts : découpage RFC 3986, parties décodées comme le fait java.net.URI
   p_uri_parts(o, label) {
     const r = this.field(o, label); if (!r) return;

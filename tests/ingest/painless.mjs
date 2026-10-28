@@ -95,6 +95,18 @@ const traduire = f => { const r = E.translateIngest([{ name: f, text: readFileSy
   };
   for (const [k, v] of Object.entries(att)) check(same(d[k], v), `flux/matcher ${k}`, `attendu ${JSON.stringify(v)}, obtenu ${JSON.stringify(d[k])}`);
   check(same([...d.rate].sort(), ['1m_count', '1m_rate']), 'flux sur keySet() filtré', JSON.stringify(d.rate));
+  const [f] = play(r, [{ tags: '', ver: 'a1', mac: '', liste: '', csv: '', res: {}, nums: [1], mots: ['kiwi'], metriques: {}, w: 255 }]);
+  const att2 = { fmt: '0x000000FF 42- ab|00007', inst: '2020-04-01T12:03:00Z', inst_ms: '2020-04-01T12:03:00.500Z', vrai: true, liste_fixe: ['a', 'b'], connu: true, u32: -1, vide: [] };
+  for (const [k, v] of Object.entries(att2)) check(same(f[k], v), `méthodes Java ${k}`, `attendu ${JSON.stringify(v)}, obtenu ${JSON.stringify(f[k])}`);
+}
+
+// Séparateurs de kv et de split avec anticipation ou rétrospection
+{
+  const r = traduire('separateurs.yml');
+  const [d] = play(r, [{ kvs: 'a=1, b=x, y, c=3', liste: 'a\\,b,c,,', ldap: 'conn=1 op=2 msg=bind as x y=1 filter=(a=b)' }]);
+  check(same(d.kv, { a: '1', b: 'x, y', c: '3' }), 'kv : « , » suivi d’une clé seulement', JSON.stringify(d.kv));
+  check(same(d.morceaux, ['a\\,b', 'c']), 'split : virgule non précédée d’une barre oblique inverse', JSON.stringify(d.morceaux));
+  check(same(d.ld, { conn: '1', op: '2', msg: 'bind as x', y: '1', filter: '(a=b)' }), 'kv : espace suivie d’une clé', JSON.stringify(d.ld));
 }
 
 if (failed) { console.log(`\n${failed} échec(s)`); process.exit(1); }

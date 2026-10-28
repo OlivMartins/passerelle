@@ -1,0 +1,16 @@
+description: séparateurs de kv et de split avec anticipation ou rétrospection, rendus sans elles
+processors:
+  - kv:
+      field: kvs
+      target_field: kv
+      field_split: ', (?=[^,=]+=)'
+      value_split: '='
+  - split:
+      field: liste
+      target_field: morceaux
+      separator: '(?<!\\),'
+  - kv:
+      field: ldap
+      target_field: ld
+      field_split: ' (?=[A-Za-z][A-Za-z0-9]*=)'
+      value_split: '='
