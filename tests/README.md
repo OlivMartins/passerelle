@@ -16,6 +16,15 @@ S’y ajoutent des garde-fous ciblés : refus des clés inconnues, verdicts, par
 
 `npm test` lance aussi `tests/server/run.mjs` : le serveur et la ligne de commande, interrogés à travers une fausse instance ClickHouse et un faux binaire Vector (Linux seulement). Il couvre les codes HTTP, les refus de sécurité, les options et les codes de sortie.
 
+`npm test` lance enfin `tests/verify/run.mjs` : `passerelle verify`, sans aucun vrai moteur. Il éprouve :
+
+- que les comparateurs du moteur (`src/engine/equivalence.js`, `src/engine/replay.js`), extraits des deux bancs, rendent exactement les mêmes écarts que le code d’origine, dont `tests/verify/reference.mjs` garde une copie figée ;
+- la fenêtre de temps (`now` figé, bornes, durées), les verdicts d’une requête et les états du rapport (rien d’identique sans preuve) ;
+- la commande, contre un faux Elasticsearch et un faux ClickHouse en HTTP (lecture seule : routes, `readonly`, authentification, `--no-values`, `--out`, codes de sortie), puis contre un faux Vector et un faux Logstash ;
+- que le pipeline du client réduit à ses filtres est celui que joue le banc des pipelines, et les rapports (échappement HTML, CSV, Markdown).
+
+Il ne prouve pas la traduction : ce sont les bancs, qui demandent Docker, et `passerelle verify` sur vos données.
+
 ## Banc différentiel : `npm run test:diff`
 
 Un instantané prouve que la sortie n’a pas changé, pas qu’elle est juste. Le banc exécute donc chaque requête DSL sur Elasticsearch, sa traduction sur ClickHouse, et compare les deux résultats ligne à ligne : clés, comptes, mesures et ordre.

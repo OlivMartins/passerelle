@@ -111,6 +111,37 @@ GRANT INSERT ON logs.events TO vector_ecriture;
 
 Sans `sink_user` ni `sink_password`, le puits reprend `clickhouse.user` et la traduction le signale « à vérifier ». Les deux restent des références à des variables d’environnement, listées dans le résultat de la traduction : Vector les lit au démarrage.
 
+## Équivalence sur vos données
+
+`passerelle verify` compare, sur vos données, une requête jouée par Elasticsearch et sa traduction jouée par ClickHouse (voir le [README](../README.md#prouver-léquivalence-sur-vos-données)). Il se lance depuis un poste ou un serveur qui atteint les deux moteurs ; le service `passerelle` n’en a pas besoin.
+
+```yaml
+elasticsearch:
+  endpoint: https://elasticsearch.internal:9200
+  user: ${ES_USER}                  # ou api_key: ${ES_API_KEY}, qui l’emporte
+  password: ${ES_PASSWORD}
+verify:
+  window: { length: 1h, lag: 10m }  # 1 h se terminant 10 minutes avant le lancement
+  tolerance: 1e-9                   # écart relatif toléré sur les nombres flottants
+  examples: 3                       # écarts cités par requête
+  timeout: 60                       # secondes, par requête et par moteur
+```
+
+Un certificat d’autorité privée se déclare comme pour tout programme Node.js, par `NODE_EXTRA_CA_CERTS=/chemin/ca.pem`.
+
+**Compte Elasticsearch** : lecture des seuls index comparés, plus le privilège de cluster `monitor`, qu’exige la route `GET /` pour lire la version.
+
+```
+POST _security/role/passerelle_verify
+{ "cluster": ["monitor"], "indices": [{ "names": ["logs-*"], "privileges": ["read"] }] }
+```
+
+**Compte ClickHouse** : le compte de validation ci-dessus convient (`SELECT` sur les tables de `index_mapping`). Chaque requête part sous `readonly = 1` et `max_execution_time = verify.timeout`.
+
+Choisissez la fenêtre dans une période où les deux moteurs ont reçu les mêmes documents. Si Elasticsearch et ClickHouse sont alimentés en parallèle, gardez un retard (`lag`) supérieur au délai de la plus lente des deux chaînes d’ingestion, sans quoi les dernières minutes diffèrent pour une raison qui n’a rien à voir avec la traduction.
+
+Pour un pipeline, `--sample` est un export du topic Kafka d’entrée, un événement JSON par ligne. Logstash le relit par une entrée fichier, Vector par son entrée standard ; les métadonnées Kafka (`[@metadata][kafka]`) ne sont pas rejouées, et le rapport le signale quand le pipeline s’en sert. Un échantillon de moins de 100 événements ne dit rien des cas rares.
+
 ## Accès à l’interface
 
 Le service n’écoute que sur `127.0.0.1:8080`. Deux options :
@@ -176,6 +207,7 @@ passerelle kibana export.ndjson --format md --out build/kibana
 passerelle grafana tableaux/ --index 'logs-*' --out build/grafana
 passerelle schema ddl mappings/ --preset otel --out build/ddl
 passerelle schema analyzers mappings/ --text "texte d’essai" --format md
+passerelle verify queries requetes/ --index 'logs-*' --out rapport/
 ```
 
 Chaque fichier reçoit un verdict : prête, à vérifier, à reprendre ou non reconnue. Codes de sortie : `0` succès, `1` erreur ou fichier non reconnu, `2` fichier à reprendre (`--fail-on todo`), ou à vérifier ou à reprendre (`--fail-on review`). `--verbose` affiche les remarques de chaque fichier.

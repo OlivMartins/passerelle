@@ -32,7 +32,7 @@ function loadConfig(file) {
     const out = over.vector && over.vector.elasticsearch_output;
     if (out !== undefined && !['elasticsearch', 'clickhouse'].includes(out)) throw new Error(`vector.elasticsearch_output attend elasticsearch ou clickhouse, pas « ${out} » (${file})`);
   }
-  return mergeConfig(DEFAULT_CONFIG, { clickhouse: over.clickhouse, kafka: over.kafka, vector: over.vector });
+  return mergeConfig(DEFAULT_CONFIG, { clickhouse: over.clickhouse, kafka: over.kafka, vector: over.vector, elasticsearch: over.elasticsearch, verify: over.verify });
 }
 // Les tables de correspondance ont des clés libres, comme dans mergeConfig
 function unknownKeys(src, ref, prefix) {
@@ -54,7 +54,7 @@ const ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
 function expand(s) { return String(s || '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, v) => process.env[v] || ''); }
 function configWarnings(cfg) {
   const w = [];
-  for (const [sec, key] of [['clickhouse', 'password'], ['clickhouse', 'sink_password'], ['kafka', 'password']]) {
+  for (const [sec, key] of [['clickhouse', 'password'], ['clickhouse', 'sink_password'], ['kafka', 'password'], ['elasticsearch', 'password'], ['elasticsearch', 'api_key']]) {
     const v = cfg[sec][key];
     if (v && !ENV_REF.test(v)) w.push(`${sec}.${key} est écrit en clair : remplacez-le par une référence \${VARIABLE} définie dans le fichier d’environnement.`);
   }
@@ -67,6 +67,8 @@ function publicConfig(cfg) {
   if (c.clickhouse.password && !ENV_REF.test(c.clickhouse.password)) c.clickhouse.password = '${CLICKHOUSE_PASSWORD}';
   if (c.clickhouse.sink_password && !ENV_REF.test(c.clickhouse.sink_password)) c.clickhouse.sink_password = '${CLICKHOUSE_SINK_PASSWORD}';
   if (c.kafka.password && !ENV_REF.test(c.kafka.password)) c.kafka.password = '${KAFKA_PASSWORD}';
+  if (c.elasticsearch.password && !ENV_REF.test(c.elasticsearch.password)) c.elasticsearch.password = '${ES_PASSWORD}';
+  if (c.elasticsearch.api_key && !ENV_REF.test(c.elasticsearch.api_key)) c.elasticsearch.api_key = '${ES_API_KEY}';
   return c;
 }
 
@@ -409,6 +411,8 @@ Utilisation :
   passerelle schema analyzers <fichier|dossier>... [--config FICHIER] [--text TEXTE] [--field CHAMP] [--format md|json|sql] [--out DOSSIER] [--fail-on todo|review]
   passerelle kibana      <export.ndjson>... [--config FICHIER] [--timezone FUSEAU] [--format md|html|csv|json] [--out DOSSIER] [--fail-on todo|review]
   passerelle grafana     <tableau.json>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo|review]
+  passerelle verify queries   <fichier|dossier|export.ndjson>... --index MOTIF [--config FICHIER] [--from DATE --to DATE | --last 1h --lag 10m] [--out DOSSIER] [--format md|html|csv|json] [--no-values] [--strict]
+  passerelle verify pipelines <pipeline.conf|dossier>... --sample FICHIER (--logstash-bin CHEMIN | --reference FICHIER|DOSSIER) [--ecs v8|disabled] [--config FICHIER] [--out DOSSIER] [--no-values] [--strict]
   passerelle check-config [--config FICHIER] [--quiet]
   passerelle version
 
@@ -417,11 +421,12 @@ Variables d’environnement :
   PASSERELLE_LISTEN      adresse d’écoute, 127.0.0.1:8080 par défaut
   PASSERELLE_TOKEN       jeton exigé sur /v1/* (Authorization: Bearer …)
   PASSERELLE_VECTOR_BIN  binaire Vector pour /v1/validate/vector (vector par défaut)
-  CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, KAFKA_USERNAME, KAFKA_PASSWORD : secrets référencés par la configuration
+  CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, KAFKA_USERNAME, KAFKA_PASSWORD, ES_USER, ES_PASSWORD, ES_API_KEY : secrets référencés par la configuration
 
 Verdict de chaque fichier : prête, à vérifier, à reprendre, non reconnue.
 Codes de sortie : 0 succès, 1 erreur ou fichier non reconnu,
-  2 fichier à reprendre (--fail-on todo), ou à vérifier ou à reprendre (--fail-on review).`;
+  2 fichier à reprendre (--fail-on todo), ou à vérifier ou à reprendre (--fail-on review).
+  verify : 0 tout est identique, 2 au moins un écart (ou un résultat non concluant avec --strict), 1 au moins une erreur.`;
 // Options déclarées : une option mal écrite ou une valeur inconnue est une erreur, pas une option ignorée
 // (« --fail-on todos » désactivait en silence le contrôle d’une intégration continue).
 const OPTIONS = {
@@ -429,6 +434,10 @@ const OPTIONS = {
   format: { type: 'string' }, 'fail-on': { type: 'string' }, quiet: { type: 'boolean' }, verbose: { type: 'boolean' },
   preset: { type: 'string' }, compact: { type: 'boolean' }, json: { type: 'boolean' }, table: { type: 'string', multiple: true },
   timezone: { type: 'string' }, text: { type: 'string' }, field: { type: 'string' },
+  from: { type: 'string' }, to: { type: 'string' }, last: { type: 'string' }, lag: { type: 'string' }, es: { type: 'string' },
+  sample: { type: 'string' }, reference: { type: 'string' }, 'logstash-bin': { type: 'string' }, 'vector-bin': { type: 'string' }, ecs: { type: 'string' },
+  examples: { type: 'string' }, timeout: { type: 'string' }, 'max-queries': { type: 'string' },
+  'no-values': { type: 'boolean' }, 'no-window': { type: 'boolean' }, keep: { type: 'boolean' }, strict: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' }
 };
 function parseArgs(argv) {
@@ -768,11 +777,20 @@ function main(argv) {
     case 'ingest': return ingestConvert(o);
     case 'kibana': return kibanaReport(o);
     case 'grafana': return grafanaConvert(o);
+    case 'verify': return verifyCommand(o);
     case 'check-config': {
       const file = o.config || process.env.PASSERELLE_CONFIG || null;
       let cfg; try { cfg = loadConfig(file); } catch (e) { fail(e.message); }
       const w = configWarnings(cfg);
-      if (!o.quiet) process.stdout.write(configToYAML(publicConfig(cfg)));
+      if (!o.quiet) {
+        const pub = publicConfig(cfg);
+        process.stdout.write(configToYAML(pub));
+        // Sections de passerelle verify : montrées quand elles sont renseignées ou modifiées
+        const extra = {};
+        if (pub.elasticsearch.endpoint) extra.elasticsearch = pub.elasticsearch;
+        if (JSON.stringify(pub.verify) !== JSON.stringify(DEFAULT_CONFIG.verify)) extra.verify = pub.verify;
+        if (Object.keys(extra).length) process.stdout.write(toYAML(extra) + '\n');
+      }
       w.forEach(x => process.stderr.write(`attention : ${x}\n`));
       process.stderr.write(`${file || '(valeurs par défaut)'} : configuration lisible${w.length ? `, ${w.length} avertissement(s)` : ''}.\n`);
       return;

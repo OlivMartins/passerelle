@@ -14,7 +14,7 @@ import { CASES } from '../tests/differential/cases.mjs';
 import { INDEX, configOverride } from '../tests/differential/dataset.mjs';
 import { CASES as PIPELINE_CASES } from '../tests/pipelines/cases.mjs';
 import { translatedPipeline, translatedChain } from '../tests/pipelines/transport.mjs';
-import { loadEngine, engineSource } from './engine.mjs';
+import { loadEngine, engineSource, serverSource } from './engine.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const UPDATE = process.argv.includes('--update');
@@ -473,7 +473,7 @@ const unknownCol = E.translateDSL(JSON.stringify({ query: { term: { inconnue: 'x
 check(E.verdictOf(unknownCol) === 'review' && unknownCol.notes.some(n => /absente du schéma/.test(n.title)), 'schéma déclaré : une colonne qu’il ne connaît pas est à vérifier, pas prête');
 
 // Les fichiers du moteur et le serveur partagent une portée : un nom déclaré deux fois casserait le binaire
-const declared = (engineSource() + rd('src/server.js')).match(/^(?:function|const|let|class) +[A-Za-z_$][\w$]*/gm).map(d => d.split(/ +/)[1]);
+const declared = (engineSource() + serverSource()).match(/^(?:function|const|let|class) +[A-Za-z_$][\w$]*/gm).map(d => d.split(/ +/)[1]);
 const twice = [...new Set(declared.filter((d, i) => declared.indexOf(d) !== i))];
 check(!twice.length, 'aucun nom déclaré deux fois dans le binaire assemblé', twice.join(', '));
 

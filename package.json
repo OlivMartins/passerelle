@@ -8,7 +8,7 @@
     "build": "node scripts/build.mjs",
     "build:ui": "node scripts/build.mjs --ui-only",
     "build:server": "node scripts/build.mjs --no-binary",
-    "test": "node scripts/test.mjs && node tests/server/run.mjs",
+    "test": "node scripts/test.mjs && node tests/server/run.mjs && node tests/verify/run.mjs",
     "test:update": "node scripts/test.mjs --update",
     "test:diff": "node tests/differential/run.mjs",
     "test:pipelines": "node tests/pipelines/run.mjs",

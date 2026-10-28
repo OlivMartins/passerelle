@@ -49,3 +49,15 @@ vector:
   acknowledgements: true
   shadow_mode: false
   ecs_compatibility: v8               # comme Logstash 8 et suivants ; disabled pour les pipelines d'avant ECS. Un réglage du pipeline l'emporte
+# Équivalence sur vos données (passerelle verify) : l'Elasticsearch à interroger, en lecture seule
+# elasticsearch:
+#   endpoint: https://elasticsearch.internal:9200
+#   user: '${ES_USER}'
+#   password: '${ES_PASSWORD}'
+#   api_key: '${ES_API_KEY}'          # l'emporte sur user et password
+# verify:
+#   time_field: ''                    # champ de date côté Elasticsearch ; vide : celui que field_mapping envoie sur la colonne de temps
+#   window: { length: 1h, lag: 10m }  # 1 h se terminant 10 minutes avant le lancement
+#   tolerance: 1e-9
+#   examples: 3
+#   timeout: 60

@@ -118,48 +118,11 @@ function vectorResult(c, mode, t, codes) {
 /* ---------- Comparaison ---------- */
 /*
  * Les événements sont comparés champ par champ, types compris : 42 n’est pas "42", et [event][original] compris.
- * Une tolérance seulement, désactivée par le champ « exact » d’un cas qui en fait l’inventaire :
- *   horodatage   un @timestamp posé à l’ingestion ne peut pas être égal des deux côtés : il est reconnu à ce
- *                qu’il tombe pendant l’exécution du banc, et sa précision n’est pas comparée non plus
- * Un UUID, tiré au hasard par chaque moteur, n’est comparé que par sa forme.
+ * Le comparateur est celui de « passerelle verify pipelines » (src/engine/replay.js), avec ses deux tolérances :
+ *   horodatage   un @timestamp posé à l’ingestion ne peut pas être égal des deux côtés : désactivé par le champ
+ *                « exact » d’un cas qui en fait l’inventaire
+ *   UUID         tiré au hasard par chaque moteur, comparé par sa forme
  */
-const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
-const canon = v => JSON.stringify(v, (k, x) => (isObj(x) ? Object.fromEntries(Object.keys(x).sort().map(key => [key, x[key]])) : x));
-const UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
-
-function normalize(event, c, window) {
-  const e = JSON.parse(JSON.stringify(event), (k, v) => (typeof v === 'string' && UUID.test(v) ? '<uuid>' : v));
-  const exact = c.exact || [];
-  const ts = e['@timestamp'];
-  if (typeof ts === 'string' && Date.parse(ts) >= window[0] && Date.parse(ts) <= window[1]) {
-    const digits = (/\.(\d+)Z$/.exec(ts) || ['', ''])[1].length;
-    e['@timestamp'] = exact.includes('horodatage') ? `<ingestion, ${digits} décimales>` : '<ingestion>';
-  }
-  return e;
-}
-
-// Aligne les deux suites sur leurs événements identiques : un événement perdu ne décale pas les suivants
-function align(a, b) {
-  const n = a.length; const m = b.length;
-  const L = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
-  const gaps = []; let gap = { a: [], b: [] }; let i = 0; let j = 0;
-  while (i < n || j < m) {
-    if (i < n && j < m && a[i] === b[j]) { gaps.push(gap); gap = { a: [], b: [] }; i++; j++; }
-    else if (j >= m || (i < n && L[i + 1][j] >= L[i][j + 1])) gap.a.push(i++);
-    else gap.b.push(j++);
-  }
-  gaps.push(gap);
-  return gaps.filter(g => g.a.length || g.b.length);
-}
-
-function leaves(v, path, out) {
-  if (isObj(v) && Object.keys(v).length) for (const k of Object.keys(v)) leaves(v[k], path ? `${path}.${k}` : k, out);
-  else out.set(path, canon(v));
-  return out;
-}
-const short = s => (s.length > 120 ? s.slice(0, 117) + '…' : s);
-
 function compare(c, l, v, window) {
   if (l.error) return { verdict: 'L✗', detail: l.error };
   if (v.error) return { verdict: 'V✗', detail: v.error };
@@ -167,19 +130,9 @@ function compare(c, l, v, window) {
   for (const name of outputsOf(c)) {
     const where = name ? `[sortie ${name}] ` : '';
     // Pipelines reliés : deux pipelines qui écrivent dans une même sortie s’y entrelacent au hasard, l’ordre n’est pas comparé
-    const order = list => (c.chain ? list.slice().sort((x, y) => (canon(x) < canon(y) ? -1 : canon(x) > canon(y) ? 1 : 0)) : list);
-    const ln = order(l.outputs[name].map(e => normalize(e, c, window))); const vn = order(v.outputs[name].map(e => normalize(e, c, window)));
-    if (ln.length !== vn.length) diffs.push(`${where}${ln.length} événement(s) côté Logstash, ${vn.length} côté Vector`);
-    for (const gap of align(ln.map(canon), vn.map(canon))) {
-      gap.a.forEach((i, k) => {
-        if (k >= gap.b.length) { diffs.push(`${where}[événement ${i + 1}] sans équivalent côté Vector : ${short(canon(ln[i]))}`); return; }
-        const a = leaves(ln[i], '', new Map()); const b = leaves(vn[gap.b[k]], '', new Map());
-        for (const key of [...new Set([...a.keys(), ...b.keys()])].sort()) {
-          if (a.get(key) !== b.get(key)) diffs.push(`${where}[événement ${i + 1}] ${key} : Logstash ${a.has(key) ? short(a.get(key)) : 'absent'} / Vector ${b.has(key) ? short(b.get(key)) : 'absent'}`);
-        }
-      });
-      for (const j of gap.b.slice(gap.a.length)) diffs.push(`${where}[Vector seul] ${short(canon(vn[j]))}`);
-    }
+    const order = list => (c.chain ? list.slice().sort((x, y) => (E.eqCanon(x) < E.eqCanon(y) ? -1 : E.eqCanon(x) > E.eqCanon(y) ? 1 : 0)) : list);
+    const ln = order(l.outputs[name].map(e => E.eqNormalizeEvent(e, window, c.exact))); const vn = order(v.outputs[name].map(e => E.eqNormalizeEvent(e, window, c.exact)));
+    diffs.push(...E.eqEventDiffs(ln, vn, where).map(d => d.text));
   }
   return { verdict: diffs.length ? '≠' : '=', detail: diffs.join(' || ') };
 }

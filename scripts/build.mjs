@@ -14,7 +14,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { engineSource } from './engine.mjs';
+import { engineSource, nodeSource } from './engine.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(ROOT, 'dist');
@@ -47,7 +47,7 @@ function buildUI() {
 
 function buildServer() {
   const server = rd('src/server.js').replace(/^const VERSION = '[^']*';$/m, `const VERSION = '${VERSION}';`);
-  const js = "'use strict';\n/* Passerelle — binaire autonome : moteur de traduction + serveur + CLI */\n" + ENGINE + server;
+  const js = "'use strict';\n/* Passerelle — binaire autonome : moteur de traduction + serveur + CLI */\n" + ENGINE + nodeSource() + server;
   writeFileSync(join(DIST, 'passerelle.cjs'), js);
   execFileSync(process.execPath, ['--check', join(DIST, 'passerelle.cjs')]);
   step('dist/passerelle.cjs');

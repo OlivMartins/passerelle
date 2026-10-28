@@ -243,6 +243,23 @@ transforms:
 
 </details>
 
+## Prouver l’équivalence sur vos données
+
+Le banc différentiel de Passerelle prouve la traduction sur un jeu de données de test. `passerelle verify` rejoue la même preuve sur **vos** données : chaque requête est jouée sur votre Elasticsearch, sa traduction sur votre ClickHouse, sur une fenêtre de temps close, et les deux résultats sont comparés ligne à ligne (clés, comptes, mesures, ordre).
+
+```bash
+# Un rapport daté, une ligne par requête (Markdown, HTML, CSV et JSON dans rapport/)
+passerelle verify queries requetes/ --index 'logs-*' --out rapport/
+
+# Les pipelines : un échantillon du topic Kafka d’entrée, rejoué dans votre Logstash et dans le Vector traduit
+passerelle verify pipelines pipelines/web.conf --sample echantillon.ndjson \
+  --logstash-bin /usr/share/logstash/bin/logstash --out rapport/
+```
+
+Chaque requête ou pipeline reçoit un état : **identique**, **différent** (avec l’écart et les deux valeurs), **non concluant** (pas de quoi conclure), **non comparé** (traduction à reprendre, point-in-time, pipeline relié à d’autres) ou **en erreur**. Rien n’est jamais « identique » sans preuve : deux résultats vides, une réponse partielle d’Elasticsearch ou un échantillon qui ne produit aucun événement sont signalés comme tels. Pour un rapport qui quitte l’organisation, `--no-values` retire toute valeur des données (clés de groupe, identifiants, champs, nom du cluster) et ne garde que des comptes.
+
+Les deux moteurs ne sont lus qu’en lecture seule : Elasticsearch ne reçoit que `GET /` et `POST /<index>/_search`, ClickHouse que des `SELECT` sous `readonly = 1`. Les comptes conseillés sont décrits dans le [guide d’installation](docs/INSTALL.md#équivalence-sur-vos-données).
+
 ## Au-delà des requêtes : Kibana, Grafana, schéma, ingestion
 
 Une migration ne se limite pas aux requêtes. Passerelle lit aussi ce qui les entoure, avec les mêmes verdicts (prête, à vérifier, à reprendre, non reconnue).
@@ -400,6 +417,7 @@ curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
 - **Vos requêtes restent chez vous.** L’interface traduit dans le navigateur, hors ligne, sans police ni script externe ni télémétrie.
 - **Service durci.** Utilisateur dédié sans privilège, système de fichiers en lecture seule, filtre seccomp vérifié sur les appels système réellement utilisés. Score `systemd-analyze security` : 1.2, « OK ».
 - **API sobre.** Jeton comparé en temps constant, requêtes intersites refusées, politique CSP stricte, corps limités à 2 Mio. La validation SQL n’accepte qu’un `SELECT` sur les tables de la configuration, vérifiées par `EXPLAIN AST` avant toute exécution, en `readonly`. Le compte ClickHouse conseillé est décrit dans le [guide d’installation](docs/INSTALL.md#compte-clickhouse-de-validation).
+- **Lecture seule chez vous.** `passerelle verify` n’envoie à Elasticsearch que des `_search` et à ClickHouse que des `SELECT` en `readonly`, et `--no-values` garde les données du client hors du rapport.
 - **Secrets hors des fichiers.** Par défaut, les mots de passe sont des références `${VARIABLE}`, aussi bien dans la configuration de Passerelle que dans les configurations Vector qu’il génère.
 
 Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
@@ -445,7 +463,7 @@ npm run build:server     # interface et dist/passerelle.cjs, sans binaire (image
 npm run build            # interface, binaire Linux x86_64 et archive de release
 ```
 
-Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction (assemblé dans l’ordre donné par `scripts/engine.mjs`), `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur.
+Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction (assemblé dans l’ordre donné par `scripts/engine.mjs`), `src/node/` pour les entrées-sorties de la ligne de commande (assemblé après le moteur), `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur.
 
 ## Licence
 

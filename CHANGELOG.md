@@ -2,6 +2,24 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Ajouté
+
+- **Équivalence sur les données du client** (`passerelle verify queries`, `passerelle verify pipelines`). Le comparateur du banc différentiel et celui du banc des pipelines sortent des bancs (`src/engine/equivalence.js`, `src/engine/replay.js`) : la commande les branche sur l’Elasticsearch et le ClickHouse du client, pour un rapport d’équivalence daté, une ligne par requête ou par pipeline, en `md`, `html`, `csv` ou `json`.
+  - **Requêtes** : chaque requête DSL (fichiers `.json`, `.txt`, `.es`, ou export Kibana `.ndjson`) est jouée sur Elasticsearch, sa traduction sur ClickHouse, sur une fenêtre de temps close (par défaut 1 h se terminant 10 min avant le lancement, ou `--from`/`--to`). `now` est figé à la fin de la fenêtre pour les deux moteurs : deux moteurs alimentés en parallèle n’ont pas les mêmes dernières minutes. Les agrégations `composite` sont paginées jusqu’au bout des deux côtés.
+  - **Pipelines** : un échantillon d’événements (`--sample`, un export du topic Kafka d’entrée) est rejoué dans le Logstash du client (`--logstash-bin`) et dans le Vector que produit Passerelle, ou comparé aux événements déjà produits (`--reference`). Les événements sont comparés champ par champ, types compris.
+  - **Lecture seule des deux côtés** : Elasticsearch ne reçoit que `GET /` et `POST /<index>/_search` (jamais de scroll ni de point-in-time, `allow_partial_search_results=false`), ClickHouse que des `SELECT` sous `readonly = 1`. Les identifiants viennent de `ES_USER`, `ES_PASSWORD` ou `ES_API_KEY`, et de `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`.
+  - **Rien d’égal sans preuve** : deux résultats vides, une réponse partielle d’Elasticsearch (délai dépassé, shard en échec), une instruction que le comparateur ne sait pas lire ou un échantillon qui ne produit aucun événement ne sont jamais « identiques » : ils sont « non concluants » ou « en erreur ». Un écart sur un `terms` dont Elasticsearch annonce une marge d’erreur le dit.
+  - **`--no-values`** : le rapport ne cite ni clé de groupe, ni identifiant, ni champ, ni nom de cluster, seulement des comptes, pour qu’il quitte la machine du client.
+  - Codes de sortie : `0` tout est identique, `2` au moins un écart (ou un résultat non concluant avec `--strict`), `1` au moins une erreur.
+  - Nouvelles sections de configuration : `elasticsearch` (`endpoint`, `user`, `password`, `api_key`) et `verify` (`time_field`, `window`, `tolerance`, `examples`, `timeout`).
+- Les bancs `tests/differential` et `tests/pipelines` emploient les comparateurs du moteur, plus leur propre copie. `tests/verify/run.mjs` (lancé par `npm test`) vérifie, contre une copie figée de l’ancien code, que l’extraction rend exactement les mêmes écarts, puis éprouve la commande contre un faux Elasticsearch, un faux ClickHouse, un faux Vector et un faux Logstash.
+
+### Modifié
+
+- Le code propre à Node.js (entrées-sorties de la ligne de commande) se range dans `src/node/`, assemblé entre le moteur et `src/server.js`.
+
 ## [1.5.0] - 2026-10-28
 
 ### Ajouté
