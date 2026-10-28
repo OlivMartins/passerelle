@@ -1,0 +1,7 @@
+description: grok avec @timestamp comme champ, type vide (champ:), nom de groupe (?'nom') et %{ non fermé
+processors:
+  - grok:
+      field: message
+      patterns:
+        - '%{TIMESTAMP_ISO8601:@timestamp} %{DATA:user_agent.name:} de %{WORD:hote}$'
+        - '%{WORD:a} \[%{WORD:b}\s+%{GREEDYDATA:c\]'

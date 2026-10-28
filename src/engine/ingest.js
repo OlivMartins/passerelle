@@ -3,6 +3,9 @@
 // VRL ne lit pas la notation 1e18 : le flottant est écrit en décimal
 // Plafond de lignes recopiées pour un groupe de fonctions récursives : au-delà, Vector consomme des gigaoctets à compiler
 const INLINE_LINES = 2500;
+// Blocs imbriqués au plus dans une copie récursive : la mémoire de compilation de Vector croît très vite avec l’imbrication
+// (≈ 0,5 Go à 26 niveaux, plus de 5 Go à 50)
+const INLINE_NEST = 26;
 // Tours au plus d’une boucle dont le nombre de tours n’est pas connu à l’entrée (while, for à condition quelconque)
 const LOOP_MAX = 1024;
 class InlineTooBig extends Error {}
@@ -740,7 +743,7 @@ class IngestGen {
     if (!scalar) { this.emit(`if is_array(${x}) { ${v} = "java.util.ArrayList" }`); this.emit(`if is_object(${x}) { ${v} = "java.util.HashMap" }`); }
   }
   emit(l) { this.lines.push('  '.repeat(this.ind) + l); }
-  open(l) { this.emit(l + ' {'); this.ind++; }
+  open(l) { this.emit(l + ' {'); this.ind++; if (this.ind > (this.maxInd || 0)) this.maxInd = this.ind; }
   // Un bloc vide est refusé par VRL : null y tient lieu d’instruction
   close(l) {
     let k = this.lines.length - 1; while (k >= 0 && /^\s*(#|$)/.test(this.lines[k])) k--;
@@ -2235,27 +2238,27 @@ Object.assign(IngestGen.prototype, {
     const g = fn.group;
     if (g && !(env.stack || []).some(n => env.fns.get(n).group === g)) {
       if (!env.canFail) throw new Error(`fonction « ${e.name} » récursive : non prise en charge hors d’un script de processeur`);
-      const start0 = this.lines.length; const ind = this.ind; const outer = this.inlineBudget; const h0 = this.hoisted || 0;
+      const start0 = this.lines.length; const ind = this.ind; const outer = this.inlineBudget; const h0 = this.hoisted || 0; const outerMax = this.maxInd || 0;
       // Les indicateurs déclarés en tête du script décalent le début de la copie
       const startNow = () => start0 + (this.hoisted || 0) - h0;
       for (let d = g.sites <= 1 ? 8 : 5; d >= 1; d--) {
         g.limit = d;
         const start = startNow();
-        this.inlineBudget = { start, max: INLINE_LINES };
+        this.inlineBudget = { start, max: INLINE_LINES, ind0: ind }; this.maxInd = ind;
         try {
           const r = this.plInline1(e, env);
-          if (this.lines.length - startNow() <= INLINE_LINES) { this.inlineBudget = outer; return r; }
-        } catch (err) { if (!(err instanceof InlineTooBig)) { this.inlineBudget = outer; throw err; } }
+          if (this.lines.length - startNow() <= INLINE_LINES && this.maxInd - ind <= INLINE_NEST) { this.inlineBudget = outer; this.maxInd = Math.max(outerMax, this.maxInd); return r; }
+        } catch (err) { if (!(err instanceof InlineTooBig)) { this.inlineBudget = outer; this.maxInd = Math.max(outerMax, this.maxInd); throw err; } }
         this.lines.length = startNow(); this.ind = ind;
       }
-      this.inlineBudget = outer;
+      this.inlineBudget = outer; this.maxInd = outerMax;
       throw new Error(`fonction « ${e.name} » récursive : copie trop volumineuse`);
     }
     return this.plInline1(e, env);
   },
   plInline1(e, env) {
     const fn = env.fns.get(e.name);
-    if (this.inlineBudget && this.lines.length - this.inlineBudget.start > this.inlineBudget.max + 200) throw new InlineTooBig();
+    if (this.inlineBudget && (this.lines.length - this.inlineBudget.start > this.inlineBudget.max + 200 || this.ind - this.inlineBudget.ind0 > INLINE_NEST + 4)) throw new InlineTooBig();
     // Profondeur : nombre de fonctions du même groupe récursif déjà en cours de recopie
     const inStack = fn.group ? (env.stack || []).filter(x => env.fns.get(x).group === fn.group).length : 0;
     let terminal = !!env.terminal; let limitGuard = null;
@@ -2942,13 +2945,16 @@ Object.assign(IngestGen.prototype, {
     // Motifs personnalisés : remplacés par leur définition (qui peut en appeler d’autres) ; types :int, :long… relevés
     const expand = (x, depth) => {
       if (depth > 20) throw new Error('motifs personnalisés en boucle');
-      return x.replace(/%\{(\w+)(?::([^:}]+))?(?::(\w+))?\}/g, (m, name, f, t) => {
+      // %{NOM:champ:type}, type vide admis ; « @ » d’un nom de champ (@timestamp) est refusé par le grok de VRL : il est
+      // écrit _x40_ dans le motif et rétabli sur les captures
+      return x.replace(/%\{(\w+)(?::([^:}]+))?(?::(\w*))?\}/g, (m, name, f, t) => {
         if (t) types.push([f, t]);
+        const g = f ? f.replace(/@/g, '_x40_') : f;
         if (Object.prototype.hasOwnProperty.call(custom, name)) {
           const def = expand(String(custom[name]), depth + 1);
-          return f ? `(?<${f}>${def})` : `(?:${def})`;
+          return g ? `(?<${g}>${def})` : `(?:${def})`;
         }
-        return f ? `%{${name}:${f}}` : `%{${name}}`;
+        return g ? `%{${name}:${g}}` : `%{${name}}`;
       });
     };
     let compiled;
@@ -2982,6 +2988,7 @@ Object.assign(IngestGen.prototype, {
     this.open('for_each(object!(m)) -> |k0, val|');
     this.open('if val != null && fail == null');
     this.emit(`k = replace(k0, r'\\[[0-9]+\\]$', "")`);
+    if (compiled.some(x => String(x).includes('_x40_'))) this.emit('k = replace(k, "_x40_", "@")');
     this.emit('cv = val');
     for (const [f, t] of types) {
       if (t === 'boolean') this.emit(`if k == ${vq(f)} { cv = downcase(string!(val)) == "true" }`);
