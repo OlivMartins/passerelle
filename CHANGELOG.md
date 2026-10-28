@@ -12,6 +12,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 ### Modifié
 
 - Interface : les tableaux des rapports (inventaire, Grafana, analyseurs) sont mis en forme, colonnes de nombres alignées à droite ; sur mobile, la barre de navigation prend des libellés courts pour tenir ses huit sections.
+- README : le GIF de démonstration et les captures (lecture, remarques, pipelines) sont refaits avec l’interface de la 1.5.0, section Kibana comprise ; le nombre de filtres Logstash repris passe de 18 à 25.
 
 ## [1.4.0] - 2026-10-28
 
