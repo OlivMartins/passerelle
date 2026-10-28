@@ -68,5 +68,19 @@ const traduire = f => { const r = E.translateIngest([{ name: f, text: readFileSy
   check(same(d1.lg, { details: { x: 1, cle: 'valeur' } }) && same(d2.lg, { details: { cle: 'valeur' } }), 'table existante complétée, sinon remplacée', JSON.stringify([d1.lg, d2.lg]));
 }
 
+// Boucles à compteur, while, tri (script et processeur sort), tableaux, conversion vers une classe Java
+{
+  const r = traduire('painless_boucles.yml');
+  const [d] = play(r, [{ nums: [5, 3, 9, 1, 7], texte: 'a,b,,c', mots: ['poire', 'Abricot', 'pomme', 'abricot'], objs: [{ k: 'b', v: 1 }, { k: 'a', v: 2 }, { k: 'c', v: 3 }], nombre: 42 }]);
+  const att = {
+    pairs: [3, 1], rev: [7, 1, 9, 3, 5], virgules: 3, j: 8, tries: ['Abricot', 'abricot', 'poire', 'pomme'],
+    objs: [{ k: 'a', v: 2 }, { k: 'b', v: 1 }, { k: 'c', v: 3 }], desc: [9, 7, 5, 3, 1], big: 42, cles: ['k', 'v'],
+    mots_desc: ['pomme', 'poire', 'abricot', 'Abricot']
+  };
+  for (const [k, v] of Object.entries(att)) check(same(d[k], v), `boucle/tri ${k}`, `attendu ${JSON.stringify(v)}, obtenu ${JSON.stringify(d[k])}`);
+  const [mix] = play(r, [{ nums: [1], texte: '', mots: ['a', 1], objs: [{ k: 'a' }], nombre: 1 }]);
+  check(mix.__echec && /cannot be cast|non comparables/.test(mix.__echec.message), 'tri d’une liste mêlant textes et nombres : le document échoue', JSON.stringify(mix.__echec));
+}
+
 if (failed) { console.log(`\n${failed} échec(s)`); process.exit(1); }
 console.log('\nTous les tests Painless passent.');

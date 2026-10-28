@@ -1,0 +1,39 @@
+description: boucles for à compteur générales, while, tri (script et processeur sort), tableaux, conversions vers une classe Java
+processors:
+  - script:
+      lang: painless
+      source: |
+        List l = ctx.nums;
+        def pairs = [];
+        for (int i = 1; i <= l.size() - 1; i += 2) { pairs.add(l[i]); }
+        ctx.pairs = pairs;
+        def rev = [];
+        for (int i = l.size() - 1; i >= 0; i--) { rev.add(l[i]); }
+        ctx.rev = rev;
+        int n = 0;
+        int pos = 0;
+        while (pos < ctx.texte.length()) {
+          if (ctx.texte.charAt(pos) == ',') { n++; }
+          pos++;
+        }
+        ctx.virgules = n;
+        int j = 0;
+        for (; j < 100; j++) { if (j * j > 50) { break; } }
+        ctx.j = j;
+        def s = new ArrayList(ctx.mots);
+        Collections.sort(s);
+        ctx.tries = s;
+        def objs = ctx.objs;
+        objs.sort((a, b) -> a["k"].compareTo(b["k"]));
+        def desc = new ArrayList(ctx.nums);
+        desc.sort((a, b) -> b.compareTo(a));
+        ctx.desc = desc;
+        long big = ((Number) ctx.nombre).longValue();
+        ctx.big = big;
+        def cles = [];
+        for (def k : ctx.objs[0].keySet().toArray(new def[ctx.objs[0].size()])) { cles.add(k); }
+        ctx.cles = cles;
+  - sort:
+      field: mots
+      order: desc
+      target_field: mots_desc

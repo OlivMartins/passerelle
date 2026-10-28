@@ -3,6 +3,8 @@
 // VRL ne lit pas la notation 1e18 : le flottant est écrit en décimal
 // Plafond de lignes recopiées pour un groupe de fonctions récursives : au-delà, Vector consomme des gigaoctets à compiler
 const INLINE_LINES = 2500;
+// Tours au plus d’une boucle dont le nombre de tours n’est pas connu à l’entrée (while, for à condition quelconque)
+const LOOP_MAX = 1024;
 class InlineTooBig extends Error {}
 // Groupes de fonctions récursives d’un script : composantes fortement connexes du graphe des appels (Tarjan). Chaque
 // fonction d’un cycle reçoit fn.group = { sites } : nombre d’appels internes au groupe, qui fixe la profondeur recopiable.
@@ -402,21 +404,39 @@ function ingPainless(src) {
     }
     if (t.t === 'id' && t.v === 'for') {
       next(); expect('(');
-      // for (int i = A; i < liste.size() [- K]; i++) : un parcours par indice
-      if (isType(0) && peek(1) && peek(1).t === 'id' && is('=', 2)) {
-        next(); const name = next().v; next(); const init = expr(0); expect(';');
-        const c = expr(0); expect(';');
-        const u1 = next(); const u2 = peek();
-        const okUpd = (u1.v === name && u2 && (u2.v === '++' || (u2.v === '+=' && peek(1) && peek(1).t === 'num' && peek(1).v === '1'))) || (u1.v === '++' && u2 && u2.v === name);
-        if (!okUpd) throw new Error('boucle for à compteur : seul « i++ » est pris en charge');
-        next(); if (u2.v === '+=') next();
+      // Boucle à trois clauses : for (init; condition; pas)
+      let semi = false;
+      for (let k = 0, d = 0; p + k < toks.length; k++) {
+        if (is('(', k)) d++; else if (is(')', k)) { if (d === 0) break; d--; } else if (is(';', k) && d === 0) { semi = true; break; }
+      }
+      if (semi) {
+        let init = null; let name = null;
+        if (isType(0) && peek(1) && peek(1).t === 'id' && is('=', 2)) { next(); name = next().v; next(); init = { decl: true, v: expr(0) }; }
+        else if (peek() && peek().t === 'id' && is('=', 1)) { name = next().v; next(); init = { decl: false, v: expr(0) }; }
+        else if (!is(';')) throw new Error('boucle for : initialisation non prise en charge');
+        if (is(',')) throw new Error('boucle for à plusieurs compteurs non prise en charge');
+        expect(';');
+        const c = is(';') ? null : expr(0); expect(';');
+        // Pas : i++, ++i, i--, --i, i += k, i -= k
+        let upd = null; let step = null;
+        if (!is(')')) {
+          const u1 = next(); const u2 = peek();
+          if (u1.t === 'op' && (u1.v === '++' || u1.v === '--') && u2 && u2.t === 'id') { next(); upd = u2.v; step = u1.v === '++' ? 1 : -1; }
+          else if (u1.t === 'id' && u2 && (u2.v === '++' || u2.v === '--')) { next(); upd = u1.v; step = u2.v === '++' ? 1 : -1; }
+          else if (u1.t === 'id' && u2 && (u2.v === '+=' || u2.v === '-=') && peek(1) && peek(1).t === 'num' && peek(1).int) { next(); const k = Number(next().v); upd = u1.v; step = u2.v === '+=' ? k : -k; }
+          else throw new Error('boucle for : seul un pas « i++ », « i-- », « i += k » ou « i -= k » est pris en charge');
+        }
         expect(')');
-        let bound = c.k === 'bin' && c.op === '<' && c.l.k === 'id' && c.l.v === name ? c.r : null;
+        const body = stmt();
+        if (upd && !name) name = upd;
+        if (upd && upd !== name) throw new Error('boucle for : le pas ne porte pas sur le compteur');
+        // for (int i = A; i < liste.size() [- K]; i++) : les éléments de la liste (ou les caractères du texte)
+        let bound = c && c.k === 'bin' && c.op === '<' && c.l.k === 'id' && c.l.v === name ? c.r : null;
         let trim = 0;
         if (bound && bound.k === 'bin' && bound.op === '-' && bound.r.k === 'num' && bound.r.int) { trim = Number(bound.r.v); bound = bound.l; }
         const list = bound && ((bound.k === 'mcall' && (bound.name === 'size' || bound.name === 'length') && !bound.args.length) ? bound.obj : (bound.k === 'member' && bound.name === 'length') ? bound.obj : null);
-        if (!list || init.k !== 'num' || !init.int) throw new Error('boucle for à compteur : seul « for (int i = 0; i < liste.size(); i++) » est pris en charge');
-        return { k: 'forIdx', name, list, from: Number(init.v), trim, body: stmt() };
+        if (init && init.decl && list && step === 1 && init.v.k === 'num' && init.v.int) return { k: 'forIdx', name, list, from: Number(init.v.v), trim, body };
+        return { k: 'forCount', name, init, cond: c, step, body };
       }
       // for (def x : liste) ou for (x in liste)
       let name;
@@ -439,6 +459,7 @@ function ingPainless(src) {
       return { k: 'try', body, fin };
     }
     if (t.t === 'id' && (t.v === 'break' || t.v === 'continue')) { next(); endStmt(); return { k: t.v }; }
+    if (t.t === 'id' && t.v === 'while') { next(); expect('('); const c = expr(0); expect(')'); return { k: 'forCount', name: null, init: null, cond: c, step: null, body: stmt() }; }
     if (t.t === 'id' && t.v === 'throw') { next(); const v = expr(0); endStmt(); return { k: 'throw', v }; }
     if (t.t === 'id' && ['while', 'do', 'switch'].includes(t.v)) throw new Error(`instruction « ${t.v} » non prise en charge`);
     // Fonction déclarée dans le script : « type nom(…) { … } »
@@ -500,6 +521,16 @@ function ingPainless(src) {
     if (t && t.t === 'op' && t.v === '(' && peek(1) && peek(1).t === 'id' && P_TYPES.has(peek(1).v) && is(')', 2)) {
       const type = peek(1).v; p += 3; return { k: 'cast', type, e: unary() };
     }
+    // (Number) x, (List<String>) x, (String[]) x : un nom de classe Java entre parenthèses, suivi d’une valeur
+    if (t && t.t === 'op' && t.v === '(' && peek(1) && peek(1).t === 'id' && /^[A-Z][\w.]*$/.test(peek(1).v)) {
+      let k = 2;
+      if (is('<', k)) { let d = 0; do { if (is('<', k)) d++; else if (is('>', k)) d--; k++; } while (d > 0 && p + k < toks.length); }
+      while (is('[', k) && is(']', k + 1)) k += 2;
+      const after = peek(k + 1);
+      if (is(')', k) && after && (after.t === 'id' || after.t === 'num' || after.t === 'str' || (after.t === 'op' && ['(', '!'].includes(after.v)))) {
+        const type = peek(1).v; p += k + 1; return { k: 'cast', type, e: unary() };
+      }
+    }
     return postfix(primary());
   }
   // Lambda « x -> … » ou « (k, v) -> … », corps expression ou bloc ; employée par forEach et removeIf
@@ -545,6 +576,16 @@ function ingPainless(src) {
       if (t.v === 'new') {
         const ty = next(); if (!ty || ty.t !== 'id') throw new Error('type attendu après new');
         if (is('<')) { let d = 0; do { if (is('<')) d++; else if (is('>')) d--; next(); } while (d > 0 && p < toks.length); }
+        // Tableau : new T[n] (n cases nulles) ou new T[] { a, b }
+        if (is('[')) {
+          next();
+          if (is(']')) {
+            next(); expect('{'); const items = [];
+            while (!is('}')) { items.push(expr(0)); if (is(',')) next(); else break; }
+            expect('}'); return { k: 'list', items };
+          }
+          const size = expr(0); expect(']'); return { k: 'newarr', size };
+        }
         expect('('); const a = args();
         if (/^(ArrayList|LinkedList|List)$/.test(ty.v)) return { k: 'list', items: [], from: a[0] || null };
         if (/^(HashSet|LinkedHashSet|Set)$/.test(ty.v)) return { k: 'list', items: [], from: a[0] || null, set: true };
@@ -1120,6 +1161,12 @@ Object.assign(IngestGen.prototype, {
       case 'exc': throw new Error('exception employée hors de throw');
       case 'incdec': throw new Error('++ et -- ne sont pris en charge qu’en instruction');
       case 'sbnew': return { c: e.arg ? this.plStr(X(e.arg)) : '""', t: 'str' };
+      case 'newarr': {
+        // new T[n] : n cases nulles (au plus LOOP_MAX)
+        const n = this.plTmp(this.plCast('int', X(e.size)).c);
+        if (env.canFail) this.emit(`if is_integer(${n.c}) && int!(${n.c}) > ${LOOP_MAX} { fail = "tableau de plus de ${LOOP_MAX} cases" }`);
+        return this.plTmp(`if is_integer(${n.c}) { map_values(chunks(truncate(${this.plRng(LOOP_MAX)}, int!(${n.c})), 1)) -> |_c| { null } } else { [] }`, 'list');
+      }
       case 're': throw new Error('expression régulière hors d’un =~');
     }
     throw new Error(`expression « ${e.k} » non prise en charge`);
@@ -1310,6 +1357,7 @@ Object.assign(IngestGen.prototype, {
       }
       case 'sha1': return { c: `sha1(${this.plStr(r)})`, t: 'str' };
       case 'decodeBase64': return { c: `(decode_base64(${this.plStr(r)}) ?? null)`, t: 'any' };
+      case 'toArray': return { c: this.plA(r), t: 'list' };
       case 'subList': return { c: `(slice(${this.plA(r)}, ${a[0].c}, ${a[1].c}) ?? [])`, t: 'list' };
       case 'substring': return { c: `(slice(${this.plS(r)}, ${a.map(x => x.c).join(', ')}) ?? null)`, t: 'any' };
       // find() est typé « entier ou null » par VRL : int() rend la comparaison infaillible
@@ -1343,6 +1391,137 @@ Object.assign(IngestGen.prototype, {
   },
 
   /* Instructions d’un script */
+  // Chaîne de n caractères déclarée en tête du script : chunks() en tire une liste de n éléments pour les boucles
+  plRng(n) {
+    const h = this.flagHome; const key = `rng${n}`;
+    if (h && h[key]) return h[key];
+    const v = this.tmp('rng'); const line = `${v} = ${vq('x'.repeat(n))}`;
+    if (h) { this.lines.splice(h.at, 0, '  '.repeat(h.ind) + line); this.hoisted = (this.hoisted || 0) + 1; h[key] = v; } else this.emit(line);
+    return v;
+  },
+  // Nombre de tours d’une boucle for (i = A; i < B; i += k) dont ni i ni B ne changent dans le corps ; null sinon
+  plTripCount(s, env) {
+    if (!s.name || !s.step || !s.init || !s.cond || s.cond.k !== 'bin' || !['<', '<=', '>', '>='].includes(s.cond.op)) return null;
+    const FLIP = { '<': '>', '<=': '>=', '>': '<', '>=': '<=' };
+    let op = s.cond.op; let B = null;
+    if (s.cond.l.k === 'id' && s.cond.l.v === s.name) B = s.cond.r;
+    else if (s.cond.r.k === 'id' && s.cond.r.v === s.name) { B = s.cond.l; op = FLIP[op]; }
+    if (!B) return null;
+    const up = s.step > 0;
+    if (up !== (op === '<' || op === '<=')) return null;
+    // Variables affectées dans le corps : ni le compteur ni la borne ne doivent en faire partie
+    const assigned = new Set(); const used = new Set();
+    const walk = x => { if (Array.isArray(x)) return x.forEach(walk); if (!x || typeof x !== 'object') return; if ((x.k === 'set' && x.target.k === 'id') ) assigned.add(x.target.v); if (x.k === 'let' || x.k === 'for' || x.k === 'forIdx' || x.k === 'forCount') assigned.add(x.name); Object.values(x).forEach(walk); };
+    walk(s.body);
+    const ids = x => { if (Array.isArray(x)) return x.forEach(ids); if (!x || typeof x !== 'object') return; if (x.k === 'id') used.add(x.v); if (x.k === 'mcall' || x.k === 'call') used.add('#call'); Object.values(x).forEach(ids); };
+    ids(B);
+    if (assigned.has(s.name) || used.has('#call') && /"k":"mcall","obj":\{"k":"id","v":"[^"]*"\},"name":"(add|remove|put|clear|addAll)"/.test(JSON.stringify(s.body))) return null;
+    for (const v of used) if (assigned.has(v)) return null;
+    const a0 = this.plTmp(this.plCast('int', { c: `p_${s.name}`, t: env.locals.get(s.name) || 'any' }).c);
+    const b = this.plTmp(this.plCast('int', this.plExpr(B, env)).c);
+    const k = Math.abs(s.step); const A = `int!(${a0.c})`; const Bc = `int!(${b.c})`;
+    const n = op === '<' ? `if ${Bc} > ${A} { to_int(ceil((${Bc} - ${A}) / ${k})) } else { 0 }`
+      : op === '<=' ? `if ${Bc} >= ${A} { to_int(floor((${Bc} - ${A}) / ${k})) + 1 } else { 0 }`
+        : op === '>' ? `if ${A} > ${Bc} { to_int(ceil((${A} - ${Bc}) / ${k})) } else { 0 }`
+          : `if ${A} >= ${Bc} { to_int(floor((${A} - ${Bc}) / ${k})) + 1 } else { 0 }`;
+    const cnt = this.plTmp(`if is_integer(${a0.c}) && is_integer(${b.c}) { ${n} } else { 0 }`, 'int');
+    return { cnt: cnt.c, a0: a0.c };
+  },
+  // Boucle for à trois clauses ou while : un nombre de tours connu à l’entrée quand c’est possible, sinon au plus
+  // LOOP_MAX tours ; une boucle qui tournerait davantage fait échouer le processeur au lieu de s’arrêter en silence
+  plCountLoop(s, env) {
+    if (!env.canFail) throw new Error('boucle for à compteur ou while non prise en charge hors d’un script de processeur');
+    const name = s.name;
+    if (s.init) {
+      if (s.init.decl) this.plStmtInner({ k: 'let', name, v: s.init.v }, env);
+      else this.plAssign({ k: 'id', v: name }, this.plExpr(s.init.v, env), env);
+    }
+    if (name) env.locals.set(name, 'any');
+    const trip = this.plTripCount(s, env);
+    env.loops = env.loops || [];
+    const loop = { brk: this.tmp('brk'), cnt: this.tmp('cnt') };
+    const rng = this.plRng(LOOP_MAX);
+    this.emit(`${loop.brk} = false`);
+    if (trip) this.emit(`if ${trip.cnt} > ${LOOP_MAX} { fail = ${vq(`boucle de plus de ${LOOP_MAX} tours : non traduite au-delà`)} }`);
+    const k = this.tmp('_k');
+    this.open(`for_each(chunks(${trip ? `truncate(${rng}, ${trip.cnt})` : rng}, 1)) -> |${k}, _c|`);
+    this.emit(`${loop.cnt} = false`);
+    env.loops.push(loop);
+    const mk = this.plMark(env);
+    this.open(`if !${loop.brk}`);
+    if (trip) {
+      this.emit(`p_${name} = int!(${trip.a0}) + ${k} * ${s.step}`);
+      this.plStmt(s.body, env);
+    } else {
+      const c = s.cond ? this.plExpr(s.cond, env) : { c: 'true', t: 'bool' };
+      this.open(`if !${this.plBool(c)}`); this.emit(`${loop.brk} = true`); this.close('} else {'); this.ind++;
+      this.plStmt(s.body, env);
+      // Le pas s’applique après un continue, pas après un break ou un return
+      if (s.step) {
+        this.open(`if !${loop.brk}`);
+        this.plAssign({ k: 'id', v: name }, this.plTmp(this.plNum('+', { c: `p_${name}`, t: 'any' }, { c: String(s.step), t: 'int' })), env);
+        this.close();
+      }
+      this.close();
+    }
+    this.close();
+    env.loops.pop();
+    this.plMerge(env, mk, [{ st: this.plRestore(env, mk), v: 0 }, { st: mk.o, v: 0 }], null);
+    this.close();
+    if (trip && s.init && !s.init.decl) this.emit(`p_${name} = int!(${trip.a0}) + ${trip.cnt} * ${s.step}`);
+    if (!trip) this.emit(`if !${loop.brk} { fail = ${vq(`boucle de plus de ${LOOP_MAX} tours : non traduite au-delà`)} }`);
+  },
+  // Tri par insertion (VRL n’a pas de tri) : stable, comme Collections.sort. key(x) donne la clé comparée ; une liste
+  // qui mêle textes et nombres laisse ok à false (ClassCastException en Java)
+  plSortStmt(listAst, cmp, env) {
+    let desc = false; let keyOf = null;
+    if (cmp) {
+      // Comparateur (a, b) -> f(a).compareTo(f(b)) : tri selon la clé f ; (a, b) -> f(b).compareTo(f(a)) : ordre inverse
+      const bad = () => new Error('tri : seul un comparateur « (a, b) -> clé(a).compareTo(clé(b)) » est pris en charge');
+      if (cmp.k === 'mcall' && cmp.obj.k === 'id' && cmp.obj.v === 'Collections' && cmp.name === 'reverseOrder' && !cmp.args.length) desc = true;
+      else {
+        if (cmp.k !== 'lambda' || cmp.params.length !== 2 || cmp.body.length !== 1) throw bad();
+        const b0 = cmp.body[0]; const ex = b0.k === 'expr' ? b0.e : b0.k === 'ret' ? b0.v : null;
+        if (!ex || ex.k !== 'mcall' || ex.name !== 'compareTo' || ex.args.length !== 1) throw bad();
+        const [pa, pb] = cmp.params;
+        const ren = (x, from, to) => JSON.parse(JSON.stringify(x).split(`{"k":"id","v":"${from}"}`).join(`{"k":"id","v":"${to}"}`));
+        const refs = (x, n) => JSON.stringify(x).includes(`{"k":"id","v":"${n}"}`);
+        let keyAst;
+        if (JSON.stringify(ren(ex.obj, pa, pb)) === JSON.stringify(ex.args[0]) && !refs(ex.obj, pb)) keyAst = ex.obj;
+        else if (JSON.stringify(ren(ex.obj, pb, pa)) === JSON.stringify(ex.args[0]) && !refs(ex.obj, pa)) { keyAst = ren(ex.obj, pb, pa); desc = true; }
+        else throw bad();
+        if (!(keyAst.k === 'id' && keyAst.v === pa)) {
+          keyOf = v => { const prev = env.locals.get(pa); env.locals.set(pa, 'any'); this.emit(`p_${pa} = ${v}`); const c = this.plTmp(this.plExpr(keyAst, env).c).c; if (prev === undefined) env.locals.delete(pa); else env.locals.set(pa, prev); return c; };
+        }
+      }
+    }
+    this.approx('Painless : tri', 'Les textes sont comparés octet par octet (UTF-8) ; Java compare des unités UTF-16 : l’ordre ne diffère que pour les caractères au-delà de U+FFFF.');
+    const cur = this.plExpr(listAst, env);
+    const r = this.plSortList(this.plA(cur), desc, keyOf);
+    if (env.canFail) this.emit(`if !${r.ok} { fail = "tri d’une liste de valeurs non comparables (ClassCastException)" }`);
+    return this.plAssign(listAst, { c: r.c, t: 'list' }, env, { mutation: true });
+  },
+  plSortList(arr, desc, key) {
+    const out = this.tmp('p'); const ok = this.tmp('ok');
+    this.emit(`${out} = []`); this.emit(`${ok} = true`);
+    const x = this.tmp('x'); const y = this.tmp('y');
+    this.open(`for_each(${arr}) -> |_i, ${x}|`);
+    this.emit(`ins = false`); this.emit(`nxt = []`);
+    const kx = key ? key(x) : x;
+    this.open(`for_each(${out}) -> |_j, ${y}|`);
+    this.open('if !ins');
+    const ky = key ? key(y) : y;
+    const [l, r] = desc ? [ky, kx] : [kx, ky];
+    this.emit(`lt = if is_string(${l}) && is_string(${r}) { string!(${l}) < string!(${r}) } else if (is_integer(${l}) || is_float(${l})) && (is_integer(${r}) || is_float(${r})) { to_float!(${l}) < to_float!(${r}) } else { ${ok} = false; false }`);
+    this.emit(`if lt { nxt = push(nxt, ${x}); ins = true }`);
+    this.close();
+    this.emit(`nxt = push(nxt, ${y})`);
+    this.close();
+    this.emit(`if !ins { nxt = push(nxt, ${x}) }`);
+    this.emit(`${out} = nxt`);
+    this.close();
+    return { c: out, ok };
+  },
   plStmts(list, env) { for (const s of list) this.plStmt(s, env); },
   // Après un return, un break ou un continue possibles, les instructions suivantes sont gardées par leur drapeau
   plStmt(s, env) {
@@ -1467,6 +1646,7 @@ Object.assign(IngestGen.prototype, {
         const llv = L.k === 'mcall' ? null : this.plLv(L, env);
         return this.plLoop(s, env, this.plA(l), false, null, llv ? iv => ({ k: 'index', obj: llv, idx: { k: 'vrl', c: iv, t: 'int' } }) : null);
       }
+      case 'forCount': return this.plCountLoop(s, env);
       case 'throw': {
         // throw : le script s’arrête et le processeur échoue avec le message de l’exception
         if (!env.canFail || !s.v || s.v.k !== 'exc') throw new Error('throw non pris en charge ici');
@@ -1509,6 +1689,9 @@ Object.assign(IngestGen.prototype, {
             throw new Error(`StringBuilder.${e.name} non pris en charge`);
           }
         }
+        // Collections.sort(l), Collections.sort(l, cmp), l.sort(null), l.sort((a, b) -> clé(a).compareTo(clé(b)))
+        const sortCall = e.k === 'mcall' && e.name === 'sort' && (e.obj.k === 'id' && e.obj.v === 'Collections' && !env.locals.has('Collections') ? { list: e.args[0], cmp: e.args[1] || null } : e.args.length === 1 ? { list: e.obj, cmp: e.args[0].k === 'null' ? null : e.args[0] } : null);
+        if (sortCall && sortCall.list) return this.plSortStmt(sortCall.list, sortCall.cmp, env);
         // liste.set(i, v) : affectation de l’élément ; entry.setValue(v) : affectation dans la table parcourue
         if (e.k === 'mcall' && e.name === 'set' && e.args.length === 2) return this.plAssign({ k: 'index', obj: e.obj, idx: e.args[0] }, this.plExpr(e.args[1], env), env);
         if (e.k === 'mcall' && e.name === 'setValue' && e.args.length === 1 && e.obj.k === 'id' && env.entries && env.entries.has(e.obj.v)) {
@@ -2026,6 +2209,7 @@ Object.assign(IngestGen.prototype, {
 const INGEST_OPTIONS = {
   set: ['field', 'value', 'copy_from', 'override', 'ignore_empty_value', 'media_type'],
   remove: ['field', 'keep', 'ignore_missing'],
+  sort: ['field', 'order', 'target_field'],
   rename: ['field', 'target_field', 'ignore_missing', 'override'],
   append: ['field', 'value', 'copy_from', 'allow_duplicates', 'ignore_empty_values', 'media_type'],
   convert: ['field', 'type', 'target_field', 'ignore_missing'],
@@ -2062,7 +2246,6 @@ const INGEST_UNSUPPORTED = {
   set_security_user: 'set_security_user lit l’utilisateur authentifié par Elasticsearch : sans objet hors d’Elasticsearch.',
   circle: 'circle convertit des formes géographiques : aucun équivalent dans Vector.',
   geo_grid: 'geo_grid calcule des cellules géographiques : aucun équivalent dans Vector.',
-  sort: 'sort trie une liste : VRL n’a pas de fonction de tri.',
   network_direction: 'network_direction classe les adresses selon des réseaux nommés : à reprendre avec ip_cidr_contains.',
   redact: 'redact masque des motifs grok : à reprendre avec redact ou replace en VRL.',
   cef: 'cef lit le format Common Event Format : à reprendre avec parse_cef.',
@@ -2308,6 +2491,25 @@ Object.assign(IngestGen.prototype, {
       this.t.stats.ok++; return;
     }
     this.strProc(o, label, x => `replace(${x}, ${vraw(javaRe(o.pattern), 'r')}, ${vq(rep)})`);
+    this.t.stats.ok++;
+  },
+  // sort : tri par insertion, stable comme Collections.sort ; textes et nombres mêlés : ClassCastException en Java
+  p_sort(o, label) {
+    const r = this.field(o, label); if (!r) return;
+    const order = o.order === undefined ? 'asc' : String(o.order);
+    if (order !== 'asc' && order !== 'desc') return this.ko(label, `order « ${order} » : asc ou desc attendu`);
+    const tr = o.target_field !== undefined ? this.ref(o.target_field) : r;
+    this.read(r, 'v');
+    this.open('if fail == null');
+    this.open('if v == null'); this.emit(`fail = ${vq(`field [${r.path}] is null, cannot sort.`)}`);
+    this.close('} else if !is_array(v) {'); this.ind++; this.failCast('v', r.path, 'java.util.List');
+    this.close('} else {'); this.ind++;
+    const sorted = this.plSortList('array!(v)', order === 'desc', null);
+    this.open(`if !${sorted.ok}`); this.emit('fail = "class java.lang.String cannot be cast to class java.lang.Number"');
+    this.close('} else {'); this.ind++;
+    this.set(tr, sorted.c);
+    this.close(); this.close(); this.close();
+    this.approx('sort', 'Les textes sont comparés octet par octet (UTF-8) ; Java compare des unités UTF-16 : l’ordre ne diffère que pour les caractères au-delà de U+FFFF.');
     this.t.stats.ok++;
   },
   p_join(o, label) {
