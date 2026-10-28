@@ -425,7 +425,8 @@ function dissectRegex(pattern, target, named) {
     if (/^[+&*]/.test(k)) { warnings.push(`modificateur « ${k[0]} » de dissect ignoré (${k})`); k = ''; }
     const skip = k === '' || k.startsWith('?');
     if (skip) { out += `(?:${g})`; return; }
-    if (named) { const grp = reSafeName(k); fields.push({ group: grp, field: k }); out += `(?P<${grp}>${g})`; }
+    // Une clé répétée : un groupe par occurrence (Rust refuse deux groupes du même nom), la dernière valeur l’emporte
+    if (named) { let grp = reSafeName(k); for (let n = 2; fields.some(f => f.group === grp); n++) grp = `${reSafeName(k)}_${n}`; fields.push({ group: grp, field: k }); out += `(?P<${grp}>${g})`; }
     else out += k === target ? `(${g})` : `(?:${g})`;
   });
   return { regex: out + '$', fields, warnings };

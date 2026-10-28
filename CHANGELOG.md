@@ -51,6 +51,7 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
   - `rename` ou `remove` de `_ingest._value` dans un `foreach` échouaient (« cannot remove ») ; `_ingest._key` dans un `foreach` sur une liste rendait le processeur intraduisible (Elasticsearch le rend vide).
   - grok : un nom de groupe `(?'nom'…)` et un `%{` sans accolade fermante faisaient refuser la configuration par Vector.
   - Painless : `String.split` gardait les éléments vides de fin, que Java retire.
+  - `dissect` dont une clé apparaît deux fois produisait deux groupes du même nom, que Vector refuse ; la dernière valeur l’emporte, comme dans Elasticsearch.
   - Painless : le reste de la division (`%`) produisait un VRL invalide (VRL n’a pas cet opérateur) ; il utilise `mod()`.
   - Painless : `for (int i = 0; i < texte.length(); i++)` parcourait un texte comme une liste vide ; il parcourt maintenant ses caractères.
   - `dot_expander` concaténait des tableaux avec `+`, que VRL refuse (E110) ; il utilise `append()`.
