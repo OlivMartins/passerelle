@@ -54,7 +54,7 @@ const traduire = f => { const r = E.translateIngest([{ name: f, text: readFileSy
   const r = traduire('painless_reference.yml');
   const [d] = play(r, [{
     a: {}, c: {}, l: [{}, {}], audit: { obj: {} }, rules: [{ groups: ['', 'apps'] }, { groups: ['x', ''] }], m: { p: {}, q: {}, r: 1 },
-    n: { a: 'x', b: 2 }, o: { a: null, b: { c: '', d: 1 }, e: [null, 'z', {}] }, o2: { a: '', b: { c: null }, d: 1 }, r: { x: 1 }, s: {}, u: {}, garde: ''
+    n: { a: 'x', b: 2 }, o: { a: null, b: { c: '', d: 1 }, e: [null, 'z', {}] }, o2: { a: '', b: { c: null }, d: 1 }, r: { x: 1 }, s: {}, u: {}, garde: '', rows: []
   }]);
   const att = {
     a: { b: 1 }, c: { d: 2 }, l: [{ f: 3 }, { f: 3 }], audit: { obj: { g: 'core' } }, rules: [{ groups: ['core', 'apps'] }, { groups: ['x', 'core'] }],
@@ -63,12 +63,14 @@ const traduire = f => { const r = E.translateIngest([{ name: f, text: readFileSy
   };
   for (const [k, v] of Object.entries(att)) check(same(d[k], v), `référence ${k}`, `attendu ${JSON.stringify(v)}, obtenu ${JSON.stringify(d[k])}`);
   // Rattachement selon la branche : seul l’objet de la branche suivie est modifié
-  const base = { a: {}, c: {}, l: [], audit: {}, rules: [], m: {}, n: {}, o: {}, o2: {}, r: {}, s: {}, u: {}, za: {}, zc: {} };
+  const base = { a: {}, c: {}, l: [], audit: {}, rules: [], m: {}, n: {}, o: {}, o2: {}, r: {}, s: {}, u: {}, za: {}, zc: {}, rows: [] };
   const [k1, k2, k3, d1, d2] = play(r, [{ ...base, k: 1 }, { ...base, k: 2 }, { ...base, k: 3 }, { ...base, k: 1, lg: { details: { x: 1 } } }, { ...base, k: 1, lg: { details: 'texte' } }]);
   check(same([k1.za, k1.zc], [{ b: 1 }, {}]), 'branche 1 : seul ctx.za est modifié', JSON.stringify([k1.za, k1.zc]));
   check(same([k2.za, k2.zc], [{}, { b: 1 }]), 'branche 2 : seul ctx.zc est modifié', JSON.stringify([k2.za, k2.zc]));
   check(same([k3.za, k3.zc, k3.zlocal], [{}, {}, { b: 1 }]), 'aucune branche : la table locale est modifiée, ctx ne l’est pas', JSON.stringify([k3.za, k3.zc, k3.zlocal]));
   check(same(d1.lg, { details: { x: 1, cle: 'valeur' } }) && same(d2.lg, { details: { cle: 'valeur' } }), 'table existante complétée, sinon remplacée', JSON.stringify([d1.lg, d2.lg]));
+  const [rows] = play(r, [{ ...base, k: 3, rows: [{ k: 1 }, { k: 2 }] }]);
+  check(same(rows.rows, [{ k: 1, vu: true }, { k: 2 }]), 'boucle : rattachement selon la branche dans le corps', JSON.stringify(rows.rows));
 }
 
 // Boucles à compteur, while, tri (script et processeur sort), tableaux, conversion vers une classe Java

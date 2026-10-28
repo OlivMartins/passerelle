@@ -86,3 +86,11 @@ processors:
         m['cle'] = 'valeur';
         ctx.lg["details"] = m;
         ctx.zlocal = z;
+  - script:
+      lang: painless
+      source: |
+        for (def r : ctx.rows) {
+          def m = new HashMap();
+          if (r.k == 1) { m = r; }
+          m.put('vu', true);
+        }

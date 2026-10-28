@@ -752,7 +752,7 @@ class IngestGen {
   // Retire le bloc ouvert à la ligne k (sa première et sa dernière ligne) et désindente son contenu
   unwrap(k) {
     const last = this.lines.length - 1;
-    if (!/\{$/.test(this.lines[k]) || this.lines[last].trim() !== '}') return;
+    if (!/^\s*if !brk_\d+ \{$/.test(this.lines[k] || '') || this.lines[last].trim() !== '}') return;
     const body = this.lines.slice(k + 1, last).filter(l => l.trim() !== 'null' || last - k > 2).map(l => l.replace(/^ {2}/, ''));
     this.lines.splice(k, last - k + 1, ...(body.length ? body : []));
   }
@@ -1859,12 +1859,13 @@ Object.assign(IngestGen.prototype, {
     const mk = this.plMark(env);
     if (origin) this.plBind(s.name, origin(iv), env);
     env.loops.push(loop);
-    const gl = this.lines.length;
+    const gl = this.lines.length; const h0 = this.hoisted || 0;
     this.open(`if !${loop.brk}${guard ? ` && ${guard}` : ''}`);
     this.plStmt(s.body, env);
     this.close();
-    // Ni break ni return dans le corps : le garde ne sert à rien et chaque bloc imbriqué coûte cher à compiler
-    if (!guard && !loop.brkPossible) this.unwrap(gl);
+    // Ni break ni return dans le corps : le garde ne sert à rien et chaque bloc imbriqué coûte cher à compiler.
+    // Les lignes hissées en tête du script entre-temps décalent l’indice du garde.
+    if (!guard && !loop.brkPossible) this.unwrap(gl + (this.hoisted || 0) - h0);
     env.loops.pop();
     this.plMerge(env, mk, [{ st: this.plRestore(env, mk), v: 0 }, { st: mk.o, v: 0 }], null);
     this.close();
@@ -1911,7 +1912,7 @@ Object.assign(IngestGen.prototype, {
       }
       case 'if': {
         const c = this.plExpr(s.c, env);
-        const at = this.lines.length; const ind0 = this.ind;
+        const at = this.lines.length; const ind0 = this.ind; const h0 = this.hoisted || 0;
         this.open(`if ${this.plBool(c)}`);
         const before = env.retPossible;
         // Une variable rattachée à un autre objet dans une branche : un indicateur retient la branche suivie
@@ -1928,8 +1929,13 @@ Object.assign(IngestGen.prototype, {
           if (f2) { this.emit(`${flag} = 2`); used = true; }
           this.plRestore(env, mk);
         }
-        // L’indicateur est déclaré en tête du script : une branche imbriquée le lit après la fin du bloc qui l’a posé
-        if (used) { const home = this.flagHome || { at, ind: ind0 }; this.lines.splice(home.at, 0, '  '.repeat(home.ind) + `${flag} = 0`); this.hoisted = (this.hoisted || 0) + 1; }
+        // L’indicateur est déclaré en tête du script (une branche imbriquée le lit après la fin du bloc qui l’a posé) et
+        // remis à zéro devant le if, à chaque passage (dans une boucle, le tour précédent ne doit pas compter)
+        if (used) {
+          const home = this.flagHome;
+          if (home) { this.lines.splice(home.at, 0, '  '.repeat(home.ind) + `${flag} = 0`); this.hoisted = (this.hoisted || 0) + 1; }
+          this.lines.splice(at + (this.hoisted || 0) - h0, 0, '  '.repeat(ind0) + `${flag} = 0`);
+        }
         this.plMerge(env, mk, [{ st: e1, v: f1 ? 1 : 0 }, { st: e2, v: f2 ? 2 : 0 }], used ? flag : null);
         this.close();
         if (env.retPossible && !before) env.retPossible = true;
