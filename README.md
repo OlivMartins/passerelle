@@ -406,7 +406,7 @@ Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
 
 ## Ce que Passerelle sait traduire
 
-**28** types de requêtes, **51** agrégations, **25** filtres Logstash, **34** processeurs d’ingestion, avec les langages qui vont avec : Painless, syntaxe Lucene et grok. Les cas approchés sont signalés « à vérifier », les cas non traduits « à reprendre », sans jamais passer inaperçus.
+**28** types de requêtes, **51** agrégations, **25** filtres Logstash, **35** processeurs d’ingestion, avec les langages qui vont avec : Painless, syntaxe Lucene et grok. Les cas approchés sont signalés « à vérifier », les cas non traduits « à reprendre », sans jamais passer inaperçus.
 
 Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc différentiel](tests/README.md) exécute les mêmes requêtes sur Elasticsearch 7.17, 8.19 et 9.5 et sur ClickHouse, puis compare les résultats : la CI le joue sur les trois versions à chaque changement et avant chaque release.
 
@@ -429,7 +429,7 @@ Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc diffé
 | Entrées et sorties | Kafka en entrée et en sortie (SASL, TLS, clés de message, compression) ; aussi `beats`, `tcp`, `udp`, `http`, `file`, `elasticsearch`, `stdout` |
 | Conditions Logstash | `if` / `else if` / `else`, `and`, `or`, `xor`, `nand`, `not`, `in`, `not in`, `=~`, `!~`, comparaisons |
 
-**Limites connues.** Dans une requête, les boucles Painless ne sont pas traduites. Dans un pipeline d’ingestion, les scripts sont traduits avec leurs boucles `for`, lambdas, expressions régulières, ensembles, dates et fonctions récursives (bornées en profondeur) ; `while`, le tri d’une liste, `stream()`, `DateTimeFormatter` et une fonction qui modifie son argument sont à reprendre. Une requête `nested` dont la corrélation entre sous-champs compte doit être réécrite avec `arrayExists`. Les filtres `ruby` et `aggregate` sont signalés « à reprendre », avec le code d’origine recopié en commentaire et la piste à suivre dans Vector.
+**Limites connues.** Dans une requête, les boucles Painless ne sont pas traduites. Dans un pipeline d’ingestion, les scripts sont traduits avec leurs boucles (`for`, `while`, bornées), lambdas, flux `stream()`, expressions régulières, références vers les objets de `ctx`, tris, dates et fonctions récursives (bornées en profondeur) ; une anticipation dans une expression régulière, `DateTimeFormatter`, `TreeSet` ou une variable rattachée à des objets différents au fil d’une boucle sont à reprendre. Les filtres `ruby` et `aggregate` sont signalés « à reprendre », avec le code d’origine recopié en commentaire et la piste à suivre dans Vector.
 
 </details>
 

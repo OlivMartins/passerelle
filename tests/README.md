@@ -147,7 +147,7 @@ VECTOR_BIN=vector node tests/ingest/painless.mjs                    # scripts Pa
 
 `painless.mjs` rejoue dans Vector les cas de `tests/ingest/cas/` (expressions régulières, lambdas, ensembles, dates, bits, `throw`, fonction récursive) et compare chaque champ à ce que Java donnerait. La CI le joue dans le job `ingest`.
 
-Couverture sur les 1 154 data streams des intégrations Elastic (clone épinglé de la CI), mesurée par `corpus.mjs` : **224 prêts, 635 à vérifier, 293 à reprendre**, 5 flux sans pipeline lisible. Avant l’extension du traducteur Painless : 224 prêts, 447 à vérifier, 481 à reprendre. Un flux « à vérifier » est traduit avec des écarts signalés (`corpus.mjs` en donne les causes) ; seul « prêt » promet des documents identiques.
+Couverture sur les 1 154 data streams des intégrations Elastic (clone épinglé de la CI, pipelines partagés `.yml.link` compris), mesurée par `corpus.mjs` : **225 prêts, 811 à vérifier, 118 à reprendre**. Avant l’extension du traducteur Painless : 224 prêts, 447 à vérifier, 481 à reprendre (sans les pipelines partagés). Un flux « à vérifier » est traduit avec des écarts signalés (`corpus.mjs` en donne les causes) ; seul « prêt » promet des documents identiques. Sur les flux qui ont des tests de pipeline, `integration.mjs` mesure la part de documents identiques à ceux d’Elasticsearch.
 
 `PASSERELLE_INGEST_WORK` choisit le dossier de travail (par défaut, un dossier temporaire).
 

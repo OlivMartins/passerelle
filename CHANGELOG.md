@@ -13,7 +13,7 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
 - **Inventaire Kibana** (`passerelle kibana`, `POST /v1/inventory/kibana`) : lit un export d’objets sauvegardés (NDJSON) et dresse le catalogue de ce qui se traduit (index patterns, recherches, visualisations, Lens, cartes, tableaux de bord, alertes, règles de sécurité, connecteurs, canvas, graphes), objet par objet, en `md`, `html`, `csv` ou `json`. Les requêtes DSL, KQL et Lucene qu’ils portent sont traduites en SQL.
 - **Tableaux de bord Grafana** (`passerelle grafana`, `POST /v1/translate/grafana`) : les panneaux à source Elasticsearch deviennent des requêtes SQL ClickHouse, avec un rapport par panneau et le tableau de bord réécrit.
 - **Schéma** (`passerelle schema ddl`, `schema pull`) : `CREATE TABLE` ClickHouse déduit d’un mapping Elasticsearch, avec les préréglages OpenTelemetry `otel` (Map) et `otel-json` (colonnes JSON typées) ; `schema pull` lit les tables déjà présentes pour que les traductions s’y adaptent.
-- **Pipelines d’ingestion Elasticsearch** (`passerelle ingest`, `POST /v1/translate/ingest`) : les pipelines d’ingestion deviennent des étapes VRL. Processeurs pris en charge : `append`, `bytes`, `community_id`, `convert`, `csv`, `date`, `dissect`, `dot_expander`, `drop`, `fail`, `fingerprint`, `foreach`, `geoip`, `grok`, `gsub`, `html_strip`, `join`, `json`, `kv`, `lowercase`, `pipeline`, `registered_domain`, `remove`, `rename`, `reroute`, `script` (Painless), `set`, `split`, `terminate`, `trim`, `uppercase`, `uri_parts`, `urldecode`, `user_agent`. Un pipeline appelé par un autre est résolu parmi les fichiers donnés.
+- **Pipelines d’ingestion Elasticsearch** (`passerelle ingest`, `POST /v1/translate/ingest`) : les pipelines d’ingestion deviennent des étapes VRL. Processeurs pris en charge : `append`, `bytes`, `community_id`, `convert`, `csv`, `date`, `dissect`, `dot_expander`, `drop`, `fail`, `fingerprint`, `foreach`, `geoip`, `grok`, `gsub`, `html_strip`, `join`, `json`, `kv`, `lowercase`, `pipeline`, `registered_domain`, `remove`, `rename`, `reroute`, `script` (Painless), `set`, `sort`, `split`, `terminate`, `trim`, `uppercase`, `uri_parts`, `urldecode`, `user_agent`. Un pipeline appelé par un autre est résolu parmi les fichiers donnés.
 - **Sortie ClickHouse** : avec `vector.elasticsearch_output: clickhouse`, la sortie `elasticsearch` d’un pipeline Logstash devient un puits ClickHouse (table, colonnes inconnues ignorées signalées).
 - **Plusieurs pipelines** : `pipelines.yml` est lu (`passerelle ls2vector pipelines.yml`, `POST /v1/translate/logstash/pipelines`), les pipelines qui s’appellent entre eux sont reliés.
 - **Analyseurs personnalisés** (`passerelle schema analyzers`) : un analyseur Elasticsearch (char_filters, tokenizers, filtres) devient une colonne `MATERIALIZED` et un index plein texte ClickHouse, avec l’aperçu des termes produits et la requête de recherche correspondante. Voir [docs/ANALYSEURS.md](docs/ANALYSEURS.md).
@@ -23,17 +23,20 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
 - **Interface** : deux nouvelles sections, « Ingestion » et « Autres sources » (Kibana, Grafana, schéma, analyseurs), avec dépôt de fichiers par type ; l’API et la ligne de commande y sont listées.
 - **CI** : le job `ingest` compile avec `vector validate` (0.59.0) le VRL de la traduction des exemples, des cas de `tests/ingest/cas/` et d’une sélection de data streams des intégrations Elastic, pour les sorties console et ClickHouse (`npm run test:ingest`). Le banc ClickHouse exécute aussi la chaîne complète des analyseurs, et le job `interface` ouvre la page assemblée dans Chromium (`npm run test:ui`) : chaque section traduit son exemple, sans erreur de page.
 
-- **Scripts Painless d’ingestion** : le traducteur reprend davantage de constructions, ce qui fait passer les data streams des intégrations Elastic « à reprendre » de 481 à 293 sur 1 154 (voir `tests/README.md`) :
-  - littéraux d’expression régulière `/…/` partout, `Pattern.compile`, `matcher(…).replaceAll`, `replaceFirst`, `matches`, `find` (`$1` de Java devient `${1}`) ;
-  - lambdas de `forEach` (liste ou table), `removeIf` (liste, `entrySet()`) ; affectation `ctx.a[clé] = v` à clé calculée ;
-  - `HashSet`/`LinkedHashSet` (sans doublons), `StringBuilder`, `subList`, `String.join`, `Integer.toString`, `Json.dump`, `Long.decode`, `Integer.toOctalString`/`toHexString`, `sha1()`, `decodeBase64()`, `Character.isUpperCase`, `isLowerCase`, `isDigit`, `toLowerCase`… ;
-  - `x++`, `--x`, boucles `for (int i = A; i < liste.size() - K; i++)` sur une liste ou sur les caractères d’un texte ;
-  - `x & masque` (masque constant), littéraux hexadécimaux ;
-  - dates : `ZonedDateTime.parse`, `Instant.parse`, `ofEpochMilli`, `toInstant`, `toEpochSecond`/`toEpochMilli`, `plusDays`… , `isAfter`/`isBefore`, `ChronoUnit.X.between` ;
-  - `throw` : le processeur échoue avec le message de l’exception ;
-  - `ctx.remove('champ')` en expression ;
-  - fonctions récursives : recopiées sur un nombre borné de niveaux (en pratique 3 ou 4 tables ou listes imbriquées : au-delà, Vector consommerait plusieurs gigaoctets à compiler), le processeur échoue au lieu de traiter de travers un document plus profond ; signalé « à vérifier » ;
-  - `gsub` de `(..)(?!$)` (adresses MAC), sans anticipation.
+- **Scripts Painless d’ingestion** : le traducteur reprend la plupart des constructions des intégrations Elastic. Sur les 1 154 data streams, les « à reprendre » passent de 481 à 118 (voir `tests/README.md`) :
+  - **références** : une variable qui désigne un objet de `ctx` (`def x = ctx.a`, `x.get('b')`, l’élément d’une boucle, une entrée de `entrySet()`, un argument de fonction) le modifie comme en Java ; un rattachement qui dépend de la branche suivie est suivi par un indicateur, un rattachement qui change au fil d’une boucle est à reprendre avec la raison ;
+  - expressions régulières : littéraux `/…/` partout, `Pattern.compile`, `matcher(…).replaceAll`, `replaceFirst`, `matches`, `find` ; Matcher gardé dans une variable (`while (m.find())`, `group(n|nom)`, `start()`/`end()` de la première correspondance) ; `Pattern.split` ;
+  - lambdas de `forEach` (liste ou table) et de `removeIf` (liste, `values()`, `entrySet()`), à une expression ou à plusieurs instructions ; `stream()` avec `filter`, `map`, `anyMatch`/`allMatch`/`noneMatch`, `collect(toList | toSet | joining)`, `distinct`, `count`, `limit`, `skip`, `findFirst().orElse()`, `sorted` ;
+  - collections : `HashSet` (sans doublons), `StringBuilder`, `subList`, `toArray`, `new T[n]`, `new T[] { … }`, `Arrays.asList`, `List.of`, `Collections.emptyList`/`singletonList`, `list.set(i, v)`, `entry.setValue(v)`, `m.remove(k)` et `l.remove(i)` en expression, `put`/`remove` à clé calculée, `ctx.a[clé] = v` ;
+  - tri : `Collections.sort`, `list.sort(null)`, comparateur `(a, b) -> clé(a).compareTo(clé(b))` et ordre inverse (tri par insertion stable ; valeurs non comparables : le processeur échoue) ;
+  - boucles : `for` à trois clauses (nombre de tours calculé à l’entrée quand c’est possible), `while`, `x++`/`--x` ; une boucle qui tournerait plus de 1 024 fois fait échouer le processeur ;
+  - fonctions : récursion, y compris croisée (`handleMap` ↔ `handleList`), recopiée sur un nombre borné de niveaux (8, ou 5 quand la fonction s’appelle plusieurs fois) ; au-delà, le processeur échoue au lieu de traiter de travers un document plus profond ; signalé « à vérifier » ;
+  - texte et nombres : `String.format` (`%s`, `%d`, `%x`, `%X`, largeur, zéros), `String.split` selon Java (éléments vides de fin retirés, limite), `String.join`, `Json.dump`, `Long.decode`, `Integer.toOctalString`/`toHexString`, `Integer.parseUnsignedInt`, `Boolean.parseBoolean`, `sha1()`, `decodeBase64()`, `Character.isUpperCase`/`isLowerCase`/`isDigit`/`toLowerCase`… ; conversions vers une classe Java (`(Number) x`) ;
+  - bits : `&` avec un masque constant, `>>`, `>>>`, `<<` avec un décalage constant, littéraux hexadécimaux ;
+  - dates : `ZonedDateTime.parse`, `Instant.parse`, `ofEpochMilli`, `ofEpochSecond`, `toInstant`, `toEpochSecond`/`toEpochMilli`, `plusDays`…, `isAfter`/`isBefore`, `ChronoUnit.X.between`, `Instant.toString` au format ISO ;
+  - `throw` : le processeur échoue avec le message de l’exception.
+- Processeur `sort` (`order`, `target_field`) ; `kv` et `split` acceptent un séparateur `X(?=Y)` (quand aucun `X` ne peut commencer dans `Y`) ou `(?<!\\)c` ; `gsub` de `(..)(?!$)` (adresses MAC).
+- `passerelle ingest` et les bancs lisent les fichiers `.yml.link` d’elastic-package (pipelines partagés).
 - Un banc (`tests/ingest/painless.mjs`, job `ingest`) rejoue ces cas dans Vector et compare chaque champ à ce que Java donnerait.
 
 ### Sécurité
@@ -44,6 +47,10 @@ Horizon 2 : au-delà des requêtes et des pipelines Logstash, Passerelle lit dé
 ### Corrigé
 
 - Pipelines d’ingestion :
+  - Painless : une variable qui désignait un objet de `ctx` en était une copie : `def x = ctx.a; x.put('b', 1)` ne modifiait pas le document, sans aucun signalement. Les modifications sont maintenant recopiées vers l’origine.
+  - `rename` ou `remove` de `_ingest._value` dans un `foreach` échouaient (« cannot remove ») ; `_ingest._key` dans un `foreach` sur une liste rendait le processeur intraduisible (Elasticsearch le rend vide).
+  - grok : un nom de groupe `(?'nom'…)` et un `%{` sans accolade fermante faisaient refuser la configuration par Vector.
+  - Painless : `String.split` gardait les éléments vides de fin, que Java retire.
   - Painless : le reste de la division (`%`) produisait un VRL invalide (VRL n’a pas cet opérateur) ; il utilise `mod()`.
   - Painless : `for (int i = 0; i < texte.length(); i++)` parcourait un texte comme une liste vide ; il parcourt maintenant ses caractères.
   - `dot_expander` concaténait des tableaux avec `+`, que VRL refuse (E110) ; il utilise `append()`.
