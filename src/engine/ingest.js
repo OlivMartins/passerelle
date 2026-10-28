@@ -1019,6 +1019,11 @@ class IngestGen {
       this.close();
       return;
     }
+    // _ingest._value ou _ingest._key dans un foreach : la valeur est retirée (un rename vers _ingest._value.data la recrée)
+    if (r.kind === 'var' && !r.readonly) {
+      if (!ignoreMissing) this.emit(`if ${r.vrl} == null { fail = ${vq(`field [${r.path}] not present as part of path [${r.path}]`)} }`);
+      this.emit(`${r.vrl} = parse_json!("null")`); return;
+    }
     this.emit(`fail = ${vq(`cannot remove [${r.path}]`)}`);
   }
 
@@ -1113,7 +1118,13 @@ Object.assign(IngestGen.prototype, {
   plS(e) { if (e.t === 'str') return e.c; const x = /^\w+$/.test(e.c) ? e.c : this.plTmp(e.c).c; return this.plTmp(`if is_string(${x}) { string!(${x}) } else { "" }`, 'str').c; },
   plA(e) { if (e.t === 'list') return e.c; const x = /^\w+$/.test(e.c) ? e.c : this.plTmp(e.c).c; return this.plTmp(`if is_array(${x}) { array!(${x}) } else { [] }`, 'list').c; },
   plO(e) { if (e.t === 'map') return e.c; const x = /^\w+$/.test(e.c) ? e.c : this.plTmp(e.c).c; return this.plTmp(`if is_object(${x}) { object!(${x}) } else { {} }`, 'map').c; },
-  plStr(e) { return e.t === 'str' ? e.c : e.t === 'null' ? '""' : ['int', 'num', 'bool'].includes(e.t) ? `to_string(${e.c})` : this.plTmp(`if is_string(${e.c}) { string!(${e.c}) } else if is_null(${e.c}) { "" } else { encode_json(${e.c}) }`, 'str').c; },
+  plStr(e) {
+    if (e.t === 'str') return e.c;
+    if (e.t === 'null') return '""';
+    if (['int', 'num', 'bool'].includes(e.t)) return `to_string(${e.c})`;
+    const x = /^[\w.]+$/.test(e.c) ? e.c : this.plTmp(e.c).c;
+    return this.plTmp(`if is_string(${x}) { string!(${x}) } else if is_null(${x}) { "" } else { encode_json(${x}) }`, 'str').c;
+  },
   plBool(e) { return e.t === 'bool' ? e.c : `(${e.c} == true)`; },
   // Opération sur deux valeurs de type inconnu : entiers entre eux restent entiers, sinon flottants, sinon `other`. Écrite
   // avec des assertions (!) plutôt qu’une fusion d’erreur (?? null), que VRL refuse (E651) quand il connaît déjà les types
@@ -1167,7 +1178,8 @@ Object.assign(IngestGen.prototype, {
         return { c: `{ ${e.items.map(([k, v]) => { if (k.k !== 'str') throw new Error('clé de table non littérale'); return `${vq(k.v)}: ${X(v).c}`; }).join(', ')} }`, t: 'map' };
       }
       case 'id': {
-        if (e.v === 'ctx') return { c: '.', t: 'map' };
+        // object!(.) : VRL ne tient pas la racine pour une table, les fonctions qui en exigent une seraient faillibles
+        if (e.v === 'ctx') return { c: 'object!(.)', t: 'map' };
         if (env.locals.has(e.v)) {
           if (env.locals.get(e.v) === 're') throw new Error('expression régulière employée hors de matcher()');
           if (env.locals.get(e.v) === 'matcher') throw new Error('Matcher employé autrement que par ses méthodes');
@@ -1297,7 +1309,12 @@ Object.assign(IngestGen.prototype, {
     if (['-', '*', '/', '%'].includes(op)) {
       if (op === '/') env.division = true;
       // VRL n’a pas d’opérateur % : le reste est la fonction mod()
-      if (op === '%') return { c: `(mod(${a.c}, ${b.c}) ?? null)`, t: 'any' };
+      if (op === '%') {
+        // Entiers connus et diviseur littéral non nul : mod() ne peut pas échouer, une fusion d’erreur serait refusée (E651)
+        if (a.t === 'int' && e.r.k === 'num' && e.r.int && Number(e.r.v) !== 0) return { c: `mod(${a.c}, ${b.c})`, t: 'int' };
+        const A = this.plTmp(a.c).c; const B = this.plTmp(b.c).c;
+        return this.plTmp(`if is_integer(${A}) && is_integer(${B}) && int!(${B}) != 0 { mod(int!(${A}), int!(${B})) ?? null } else if (is_integer(${A}) || is_float(${A})) && (is_integer(${B}) || is_float(${B})) { mod(to_float!(${A}), to_float!(${B})) ?? null } else { null }`);
+      }
       return known && op !== '/' ? { c: `(${a.c} ${op} ${b.c})`, t: a.t === 'int' && b.t === 'int' ? 'int' : 'num' } : { c: `((${a.c} ${op} ${b.c}) ?? null)`, t: 'any' };
     }
     throw new Error(`opérateur « ${op} » non pris en charge`);
@@ -1532,7 +1549,12 @@ Object.assign(IngestGen.prototype, {
         const parts = this.plTmp(`split(${sv.c}, ${xv.c})`, 'list');
         return this.plTmp(`if length(${parts.c}) > 1 { strlen(${sv.c}) - strlen(${xv.c}) - strlen(string(${parts.c}[-1]) ?? "") } else { -1 }`, 'any');
       }
-      case 'charAt': return { c: `(slice(${this.plS(r)}, ${a[0].c}, ${a[0].c} + 1) ?? null)`, t: 'any' };
+      case 'charAt': {
+        // Indice rangé dans un entier que VRL connaît comme tel : ni fusion d’erreur inutile, ni argument faillible
+        const c0 = this.plTmp(this.plCast('int', a[0]).c);
+        const i = this.plTmp(`if is_integer(${c0.c}) { int!(${c0.c}) } else { 0 }`, 'int');
+        return { c: `(slice(${this.plS(r)}, ${i.c}, ${i.c} + 1) ?? null)`, t: 'any' };
+      }
       case 'intValue': case 'longValue': return this.plCast('int', r);
       case 'getOrDefault': return this.plTmp(`if (get(${r.c}, [${a[0].c}]) ?? null) != null { get(${r.c}, [${a[0].c}]) ?? null } else { ${a[1].c} }`);
     }
@@ -1587,6 +1609,7 @@ Object.assign(IngestGen.prototype, {
     }
     if (name) env.locals.set(name, 'any');
     const trip = this.plTripCount(s, env);
+    if (trip) env.locals.set(name, 'int');
     env.loops = env.loops || [];
     const loop = { brk: this.tmp('brk'), cnt: this.tmp('cnt') };
     const rng = this.plRng(LOOP_MAX);
@@ -2046,6 +2069,13 @@ Object.assign(IngestGen.prototype, {
   // opt.mutation : le contenu de la cible change (removeIf, tri), c’est toujours le même objet ; opt.wb : recopie d’une
   // variable vers son origine (opt.wb est le nom de la variable recopiée)
   plAssign(target, v, env, opt = {}) {
+    // ctx tout entier modifié par référence (handleMap(ctx)) : la copie redevient le document
+    if (target.k === 'id' && target.v === 'ctx') {
+      if (!(opt.wb || opt.mutation)) throw new Error('ctx ne peut pas être remplacé');
+      this.emit(`if is_object(${v.c}) { . = object!(${v.c}) }`);
+      this.plEvent({ root: 'ctx', segs: [] }, 'wb', env, opt.wb);
+      return;
+    }
     const path = this.plPath(target);
     if (path) {
       if (path.unsafe) env.unsafe = true;
@@ -2175,7 +2205,9 @@ Object.assign(IngestGen.prototype, {
           keep.push(leaf);
           if (kind === 'replace' && r === 'maybe') continue;
           if (!e.locals.has(name)) continue;
+          // Relue, la variable n’a plus de type connu de VRL
           this.plUnder(leaf.conds, () => this.emit(`p_${name} = ${this.plExpr(leaf.lv, leaf.env).c}`));
+          e.locals.set(name, 'any');
         }
         if (keep.length !== o.leaves.length) { if (keep.length) e.origins.set(name, { leaves: keep }); else e.origins.delete(name); }
       }
@@ -2206,7 +2238,7 @@ Object.assign(IngestGen.prototype, {
       const start0 = this.lines.length; const ind = this.ind; const outer = this.inlineBudget; const h0 = this.hoisted || 0;
       // Les indicateurs déclarés en tête du script décalent le début de la copie
       const startNow = () => start0 + (this.hoisted || 0) - h0;
-      for (let d = g.sites <= 1 ? 12 : 7; d >= 1; d--) {
+      for (let d = g.sites <= 1 ? 8 : 5; d >= 1; d--) {
         g.limit = d;
         const start = startNow();
         this.inlineBudget = { start, max: INLINE_LINES };
@@ -2921,6 +2953,8 @@ Object.assign(IngestGen.prototype, {
     };
     let compiled;
     try { compiled = pats.map(x => expand(x, 0)); } catch (e) { return this.ko(label, e.message); }
+    // « %{ » sans accolade fermante : du texte pour Elasticsearch, une erreur pour le grok de VRL ; on l’écrit littéral
+    compiled = compiled.map(x => String(x).replace(/%\{(?![^{}]*\})/g, '%\\{'));
     const ignore = this.bool(o.ignore_missing, false);
     this.read(r, 'v', ignore);
     this.open('if fail == null');
@@ -2933,7 +2967,8 @@ Object.assign(IngestGen.prototype, {
       // Un motif vide correspond à tout texte, sans capture
       if (x === '') this.emit(`m = {}`), this.emit(`gi = ${vq(String(k))}`);
       else {
-        this.emit(`m, err = parse_grok(string!(v), ${vraw(x, 's')})`);
+        // (?'nom'…) d’Oniguruma s’écrit (?<nom>…) : l’apostrophe ne peut pas figurer dans une chaîne brute s'…' de VRL
+        this.emit(`m, err = parse_grok(string!(v), ${vraw(String(x).replace(/\(\?'([^']+)'/g, '(?<$1>'), 's')})`);
         this.emit(`if err == null { gi = ${vq(String(k))} } else { m = null }`);
       }
       this.close();
