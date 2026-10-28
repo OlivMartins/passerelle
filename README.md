@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.5.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.5.0"></a>
+  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.6.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.6.0"></a>
   <a href="https://github.com/OlivMartins/passerelle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/OlivMartins/passerelle/ci.yml?branch=main&style=flat-square&label=tests&labelColor=1B2A33" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache%202.0-1E7A68?style=flat-square&labelColor=1B2A33" alt="Licence Apache 2.0"></a>
   <img src="https://img.shields.io/badge/Linux-x86__64-53636B?style=flat-square&labelColor=1B2A33" alt="Linux x86_64">
@@ -243,6 +243,41 @@ transforms:
 
 </details>
 
+## Prouver l’équivalence sur vos données
+
+Le banc différentiel de Passerelle prouve la traduction sur un jeu de données de test. `passerelle verify` rejoue la même preuve sur **vos** données : chaque requête est jouée sur votre Elasticsearch, sa traduction sur votre ClickHouse, sur une fenêtre de temps close, et les deux résultats sont comparés ligne à ligne (clés, comptes, mesures, ordre).
+
+```bash
+# Un rapport daté, une ligne par requête (Markdown, HTML, CSV et JSON dans rapport/)
+passerelle verify queries requetes/ --index 'logs-*' --out rapport/
+
+# Les pipelines : un échantillon du topic Kafka d’entrée, rejoué dans votre Logstash et dans le Vector traduit
+passerelle verify pipelines pipelines/web.conf --sample echantillon.ndjson \
+  --logstash-bin /usr/share/logstash/bin/logstash --out rapport/
+```
+
+Chaque requête ou pipeline reçoit un état : **identique**, **différent** (avec l’écart et les deux valeurs), **non concluant** (pas de quoi conclure), **non comparé** (traduction à reprendre, point-in-time, pipeline relié à d’autres) ou **en erreur**. Rien n’est jamais « identique » sans preuve : deux résultats vides, une réponse partielle d’Elasticsearch ou un échantillon qui ne produit aucun événement sont signalés comme tels. Pour un rapport qui quitte l’organisation, `--no-values` retire toute valeur des données (clés de groupe, identifiants, champs, nom du cluster) et ne garde que des comptes.
+
+Les deux moteurs ne sont lus qu’en lecture seule : Elasticsearch ne reçoit que `GET /` et `POST /<index>/_search`, ClickHouse que des `SELECT` sous `readonly = 1`. Les comptes conseillés sont décrits dans le [guide d’installation](docs/INSTALL.md#équivalence-sur-vos-données).
+
+## Aide aux cas à reprendre
+
+Quand un filtre `ruby` de Logstash ou un script Painless n’a pas d’équivalent connu, la traduction laisse un commentaire et le code d’origine. `passerelle assist` prépare une **proposition** pour chacun de ces cas, la fait compiler par Vector, puis la **rejoue avec le banc** de `passerelle verify` : l’échantillon passe par votre moteur d’origine et par Vector avec la proposition, et les événements sont comparés champ par champ.
+
+```bash
+# Filtres ruby : des règles couvrent un sous-ensemble de Ruby (event.get, set, remove, tag, cancel, conditions, texte, nombres, boucles)
+passerelle assist ruby pipelines/web.conf --sample echantillon.ndjson \
+  --logstash-bin /usr/share/logstash/bin/logstash --out aide/
+
+# Scripts Painless : un modèle qui tourne sur ce poste, en option, et les documents que votre Elasticsearch produit
+passerelle assist painless ingest/ --local-model --model-name qwen2.5-coder:14b \
+  --sample documents.ndjson --reference attendus.ndjson --out aide/
+```
+
+Une proposition n’est jamais une traduction : elle va dans un fichier à part (`aide/web.propositions.yaml`), chaque bloc marqué « PROPOSITION À VÉRIFIER » avec son origine, le code d’origine en commentaire. Le rapport donne un état par pipeline : **confirmée sur l’échantillon** (identique à la référence, ce qui ne dit rien des événements que l’échantillon ne contient pas), **différente** (avec l’écart), **non concluante**, **non rejouée** (compilée seulement, faute d’échantillon ou de référence), **sans proposition** ou **en erreur**. Un pipeline dont un cas n’a pas de proposition n’est jamais déclaré confirmé.
+
+Le modèle est **en option et reste sur le poste** : sans `--local-model`, aucune connexion n’est ouverte, même si une adresse est configurée. Avec, seule la boucle locale est admise (`127.0.0.1`, `::1`, `localhost`), refusée avant toute connexion sinon. Il reçoit le code du cas et la raison donnée par le traducteur, jamais un événement de l’échantillon ni la configuration ; une proposition qui lit l’environnement ou appelle le réseau (`get_env_var`, `http_request`…) est écartée. Le rejeu de Vector n’a ni source Kafka ni sortie réseau : des fichiers. Détails et limites dans le [guide d’installation](docs/INSTALL.md#aide-aux-cas-à-reprendre).
+
 ## Au-delà des requêtes : Kibana, Grafana, schéma, ingestion
 
 Une migration ne se limite pas aux requêtes. Passerelle lit aussi ce qui les entoure, avec les mêmes verdicts (prête, à vérifier, à reprendre, non reconnue).
@@ -358,8 +393,8 @@ Téléchargez [`passerelle.html`](https://github.com/OlivMartins/passerelle/rele
 ### Sur un serveur Linux
 
 ```bash
-curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.5.0/passerelle-1.5.0-linux-x86_64.tar.gz
-tar xzf passerelle-1.5.0-linux-x86_64.tar.gz && cd passerelle-1.5.0-linux-x86_64
+curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.6.0/passerelle-1.6.0-linux-x86_64.tar.gz
+tar xzf passerelle-1.6.0-linux-x86_64.tar.gz && cd passerelle-1.6.0-linux-x86_64
 sudo ./install.sh
 ```
 
@@ -395,11 +430,37 @@ curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
 | `POST /v1/validate/sql` | `EXPLAIN indexes = 1` sur votre ClickHouse, en lecture seule, après contrôle des tables lues |
 | `POST /v1/validate/vector` | Compilation complète de la configuration et du VRL par `vector validate` |
 
+## Exploiter le service
+
+`passerelle serve` s’exploite comme le reste de votre parc, sans agent à poser à côté :
+
+- **Métriques Prometheus** sur `/metrics` : requêtes, durées, refus, verdicts des traductions, validations, rechargements. Les étiquettes sont en nombre fixe (une route inconnue est « autre »), jamais tirées de la requête.
+- **Traces OpenTelemetry** (OTLP/HTTP) : un span par requête, un span enfant par appel à ClickHouse ou à Vector. Un `traceparent` entrant est repris, et ClickHouse reçoit le sien. Aucun span ne contient de requête ni de SQL.
+- **Identifiant de requête** : chaque réponse porte un `X-Request-Id`, repris dans le journal, l’audit et les spans. Celui d’un reverse proxy de confiance est adopté ; celui d’un autre client est gardé à part.
+- **Journal d’audit** : une ligne JSON par appel à l’API, refusés compris, avec le jeton, l’identité, l’action et l’empreinte du corps. **Jamais le contenu de la requête.** Rotation prise en compte au rechargement (`SIGHUP`).
+- **Jetons multiples à portée** : un jeton par client, chacun limité à `translate`, `validate` ou `metrics`. Le service refuse de démarrer quand la variable d’un jeton est vide.
+- **Identité du reverse proxy** : l’utilisateur que votre SSO a authentifié (`X-Forwarded-User`) entre dans le journal et l’audit, mais seulement quand il vient d’un proxy déclaré de confiance.
+
+```yaml
+server:
+  tokens:
+    - { name: ci, token: '${PASSERELLE_TOKEN_CI}', scopes: [translate, validate] }
+    - { name: prometheus, token: '${PASSERELLE_TOKEN_PROMETHEUS}', scopes: [metrics] }
+  trusted_proxies: [127.0.0.1]
+  identity_header: X-Forwarded-User
+  audit_log: /var/log/passerelle/audit.jsonl
+  tracing: { endpoint: 'http://collecteur:4318/v1/traces' }
+```
+
+Tout est détaillé dans le [guide d’installation](docs/INSTALL.md#jetons-à-portée-identité-et-audit).
+
 ## Sécurité et confidentialité
 
 - **Vos requêtes restent chez vous.** L’interface traduit dans le navigateur, hors ligne, sans police ni script externe ni télémétrie.
 - **Service durci.** Utilisateur dédié sans privilège, système de fichiers en lecture seule, filtre seccomp vérifié sur les appels système réellement utilisés. Score `systemd-analyze security` : 1.2, « OK ».
-- **API sobre.** Jeton comparé en temps constant, requêtes intersites refusées, politique CSP stricte, corps limités à 2 Mio. La validation SQL n’accepte qu’un `SELECT` sur les tables de la configuration, vérifiées par `EXPLAIN AST` avant toute exécution, en `readonly`. Le compte ClickHouse conseillé est décrit dans le [guide d’installation](docs/INSTALL.md#compte-clickhouse-de-validation).
+- **API sobre.** Jetons comparés en temps constant et limités à une portée, journal d’audit sans contenu de requête, requêtes intersites refusées, politique CSP stricte, corps limités à 2 Mio. La validation SQL n’accepte qu’un `SELECT` sur les tables de la configuration, vérifiées par `EXPLAIN AST` avant toute exécution, en `readonly`. Le compte ClickHouse conseillé est décrit dans le [guide d’installation](docs/INSTALL.md#compte-clickhouse-de-validation).
+- **Lecture seule chez vous.** `passerelle verify` n’envoie à Elasticsearch que des `_search` et à ClickHouse que des `SELECT` en `readonly`, et `--no-values` garde les données du client hors du rapport.
+- **Aide locale.** `passerelle assist` n’appelle un modèle qu’avec `--local-model`, seulement sur la boucle locale, et ne lui envoie que le code des cas à reprendre : ni événement, ni configuration. Ses propositions sont marquées « à vérifier » et rejouées avant toute confiance.
 - **Secrets hors des fichiers.** Par défaut, les mots de passe sont des références `${VARIABLE}`, aussi bien dans la configuration de Passerelle que dans les configurations Vector qu’il génère.
 
 Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
@@ -445,7 +506,7 @@ npm run build:server     # interface et dist/passerelle.cjs, sans binaire (image
 npm run build            # interface, binaire Linux x86_64 et archive de release
 ```
 
-Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction (assemblé dans l’ordre donné par `scripts/engine.mjs`), `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur.
+Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction (assemblé dans l’ordre donné par `scripts/engine.mjs`), `src/node/` pour les entrées-sorties de la ligne de commande (assemblé après le moteur), `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur.
 
 ## Licence
 

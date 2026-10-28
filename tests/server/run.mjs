@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
-import { engineSource } from '../../scripts/engine.mjs';
+import { engineSource, serverSource } from '../../scripts/engine.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const rd = p => readFileSync(join(ROOT, p), 'utf8');
@@ -25,7 +25,7 @@ const check = (ok, label, detail) => {
 
 /* ---------- Montage ---------- */
 const BIN = join(TMP, 'passerelle.cjs');
-writeFileSync(BIN, "'use strict';\n" + engineSource() + rd('src/server.js'));
+writeFileSync(BIN, "'use strict';\n" + engineSource() + serverSource());
 const UI = join(TMP, 'passerelle.html');
 writeFileSync(UI, '<!doctype html><html><body><script>void 0;</script></body></html>');
 // Faux Vector : recopie son environnement dans sa sortie, que l'API renvoie au client

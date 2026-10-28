@@ -770,9 +770,13 @@ class IngestGen {
   }
   comment(c) { String(c).split('\n').forEach(l => this.emit('# ' + l)); }
   tmp(base) { return `${base}_${++this.t.k}`; }
-  note(level, title, detail) { this.t.notes.add(level, title, detail); }
+  note(level, title, detail, code) { this.t.notes.add(level, title, detail, code); }
   approx(title, detail) { this.t.stats.approx++; this.note('warn', title, detail); }
-  ko(where, why) { this.t.stats.ko++; this.t.todo = true; this.note('err', `${where} non traduit`, why); this.comment(`À REPRENDRE : ${why}`); }
+  // code : la source d'un script, recopiée en commentaire sous l'avertissement (passerelle assist la retrouve à cet endroit)
+  ko(where, why, code) {
+    this.t.stats.ko++; this.t.todo = true; this.note('err', `${where} non traduit`, why, code); this.comment(`À REPRENDRE : ${why}`);
+    if (code) String(code).split('\n').forEach(l => this.comment('  ' + l));
+  }
 
   /* Référence de champ (« a.b.c », « _ingest._value », « _index », « {{nom}} ») */
   ref(name) {
@@ -3249,7 +3253,7 @@ Object.assign(IngestGen.prototype, {
       this.plStmts(prog, env);
     } catch (e) {
       this.lines.length = start; this.ind = ind; this.flagHome = home;
-      return this.ko(label, `script Painless : ${e.message}`);
+      return this.ko(label, `script Painless : ${e.message}`, o.source);
     }
     this.flagHome = home;
     // params lus sans être déclarés : une table vide, comme dans Painless

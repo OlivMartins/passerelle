@@ -2,6 +2,46 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [1.6.0] - 2026-10-28
+
+### Ajouté
+
+- **Équivalence sur les données du client** (`passerelle verify queries`, `passerelle verify pipelines`). Le comparateur du banc différentiel et celui du banc des pipelines sortent des bancs (`src/engine/equivalence.js`, `src/engine/replay.js`) : la commande les branche sur l’Elasticsearch et le ClickHouse du client, pour un rapport d’équivalence daté, une ligne par requête ou par pipeline, en `md`, `html`, `csv` ou `json`.
+  - **Requêtes** : chaque requête DSL (fichiers `.json`, `.txt`, `.es`, ou export Kibana `.ndjson`) est jouée sur Elasticsearch, sa traduction sur ClickHouse, sur une fenêtre de temps close (par défaut 1 h se terminant 10 min avant le lancement, ou `--from`/`--to`). `now` est figé à la fin de la fenêtre pour les deux moteurs : deux moteurs alimentés en parallèle n’ont pas les mêmes dernières minutes. Les agrégations `composite` sont paginées jusqu’au bout des deux côtés.
+  - **Pipelines** : un échantillon d’événements (`--sample`, un export du topic Kafka d’entrée) est rejoué dans le Logstash du client (`--logstash-bin`) et dans le Vector que produit Passerelle, ou comparé aux événements déjà produits (`--reference`). Les événements sont comparés champ par champ, types compris.
+  - **Lecture seule des deux côtés** : Elasticsearch ne reçoit que `GET /` et `POST /<index>/_search` (jamais de scroll ni de point-in-time, `allow_partial_search_results=false`), ClickHouse que des `SELECT` sous `readonly = 1`. Les identifiants viennent de `ES_USER`, `ES_PASSWORD` ou `ES_API_KEY`, et de `CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD`.
+  - **Rien d’égal sans preuve** : deux résultats vides, une réponse partielle d’Elasticsearch (délai dépassé, shard en échec), une instruction que le comparateur ne sait pas lire ou un échantillon qui ne produit aucun événement ne sont jamais « identiques » : ils sont « non concluants » ou « en erreur ». Un écart sur un `terms` dont Elasticsearch annonce une marge d’erreur le dit.
+  - **`--no-values`** : le rapport ne cite ni clé de groupe, ni identifiant, ni champ, ni nom de cluster, seulement des comptes, pour qu’il quitte la machine du client.
+  - Codes de sortie : `0` tout est identique, `2` au moins un écart (ou un résultat non concluant avec `--strict`), `1` au moins une erreur.
+  - Nouvelles sections de configuration : `elasticsearch` (`endpoint`, `user`, `password`, `api_key`) et `verify` (`time_field`, `window`, `tolerance`, `examples`, `timeout`).
+- **Exploitation du service** (`passerelle serve`), nouveau code dans `src/node/ops.js`.
+  - **`/metrics`** au format texte de Prometheus : requêtes par méthode, route et statut, durées (histogramme), requêtes en cours, refus par raison, traductions par verdict, validations par résultat, rechargements, audit, export des traces, processus. Les étiquettes sont en nombre fixe : une route inconnue est comptée « autre ». `server.metrics: false` retire la route.
+  - **Jetons multiples à portée** (`server.tokens`) : chaque jeton a un nom et des portées `translate`, `validate`, `metrics`. `PASSERELLE_TOKEN` reste valable, avec les trois portées, sous le nom `principal`. Un jeton sans la portée d'une route reçoit 403. Le service refuse de démarrer, ou de recharger, quand la variable d'un jeton est vide, quand deux jetons ont la même valeur ou quand une portée est inconnue ; `check-config` signale un jeton écrit en clair.
+  - **Identifiant de requête** : `X-Request-Id` dans chaque réponse, repris dans le journal (`request_id`), l'audit et les spans. Celui d'un reverse proxy de confiance (`server.trusted_proxies`) est adopté ; celui d'un autre client est gardé à part (`client_request_id`).
+  - **Identité transmise par le reverse proxy** (`server.identity_header`) : reprise dans le journal et l'audit seulement quand elle vient d'un proxy de confiance, avec l'adresse du client lue dans `X-Forwarded-For` en partant de la droite.
+  - **Journal d'audit** (`server.audit_log`) : une ligne JSON par appel à l'API et par refus sur `/metrics`, avec jeton, identité, action, issue, durée, taille et empreinte du corps. Jamais le contenu ni la chaîne de requête. Fichier en `0600`, rouvert par `SIGHUP` pour la rotation ; le service ne démarre pas sans lui. Sans fichier, l'audit passe par le journal du service.
+  - **Traces OpenTelemetry** (`server.tracing`, OTLP/HTTP en JSON, sans bibliothèque) : un span par requête, des spans enfants pour ClickHouse et Vector, `traceparent` entrant repris et transmis à ClickHouse, taux d'échantillonnage, envoi par lots et à l'arrêt. Aucune requête ni SQL dans les spans ; un collecteur en panne ne gêne pas le service.
+  - L'unité systemd crée `/var/log/passerelle` (`LogsDirectory=`) pour l'audit. `tests/ops/run.mjs` (lancé par `npm test`) éprouve l'ensemble contre un faux ClickHouse et un faux collecteur.
+- **Aide aux cas « à reprendre »** (`passerelle assist ruby`, `passerelle assist painless`), nouveau code dans `src/engine/assist.js` et `src/node/assist.js`. Pour chaque filtre `ruby` de Logstash (« À TRADUIRE ») ou script Painless (« À REPRENDRE ») que la traduction laisse en commentaire, la commande prépare une **proposition**, la fait compiler par Vector (`vector validate`, sur la configuration où elle a pris la place du commentaire), puis la rejoue avec le banc de `passerelle verify` et compare à la référence.
+  - **Propositions** : des règles traduisent un sous-ensemble de Ruby en VRL (`event.get`, `set`, `remove`, `tag`, `cancel`, `if`/`elsif`/`else`, variables locales, texte, nombres, listes, expressions régulières, `each`, `map`, `select`, `reject`). Ce qui sort du sous-ensemble n'a pas de proposition : jamais de demi-traduction. Pour Painless, et pour le Ruby que les règles ne savent pas, un **modèle local** peut proposer, avec `--local-model` seulement ; la sortie du compilateur de Vector lui est rendue entre deux essais (`assist.model.max_attempts`).
+  - **Jamais une traduction** : une proposition va dans un fichier à part (`--out`, `<pipeline>.propositions.yaml`), chaque bloc marqué « PROPOSITION À VÉRIFIER » avec son origine et le code d'origine en commentaire. `passerelle ls2vector`, `ingest` et le service ne produisent jamais de proposition.
+  - **Rejouée par le banc** : états `confirmée sur l'échantillon`, `différente`, `non concluante`, `non rejouée`, `sans proposition`, `rien à reprendre`, `en erreur`. Un pipeline dont un cas n'a pas de proposition n'est jamais confirmé. Pour Ruby, la référence est le Logstash du client (`--logstash-bin`) ou des événements déjà produits (`--reference`) ; pour Painless, les documents que produit Elasticsearch (`--reference`). `--ignore CHAMP` écarte un champ des deux côtés, `--no-values` retire toute valeur du rapport, `--strict` fait échouer ce qui n'est pas confirmé. Codes de sortie : `0`, `2` au moins un écart, `1` au moins une erreur.
+  - **Sans envoi de données hors du poste** : le modèle est joint seulement avec `--local-model`, seulement sur la boucle locale (`127.0.0.1`, `::1`, `localhost`, en `http://`, refusé avant toute connexion sinon, sans proxy), et ne reçoit que le code du cas et la raison du traducteur, jamais un événement ni la configuration. Une proposition qui appelle `get_env_var`, `get_secret`, `http_request`, `dns_lookup`, `exec` ou une fonction du même ordre est écartée. Vector rejoue l'échantillon avec une entrée standard et des sorties en fichiers.
+  - Nouvelle section de configuration `assist.model` (`endpoint`, `api` : `ollama` ou `openai`, `model`, `timeout`, `max_attempts`) ; `check-config` signale une adresse hors de la boucle locale ; `/v1/config` ne la diffuse pas.
+  - Les règles Ruby → VRL sont éprouvées contre un vrai Ruby et un vrai VRL (`npm run test:assist`, `tests/assist/ruby.mjs`, 44 cas : 34 comparés événement par événement, 10 refus attendus) : le banc a trouvé des défauts réels des règles avant qu'elles ne servent. `tests/assist/run.mjs` (lancé par `npm test`) éprouve la commande avec de faux Vector, Logstash et modèle.
+- Les bancs `tests/differential` et `tests/pipelines` emploient les comparateurs du moteur, plus leur propre copie. `tests/verify/run.mjs` (lancé par `npm test`) vérifie, contre une copie figée de l’ancien code, que l’extraction rend exactement les mêmes écarts, puis éprouve la commande contre un faux Elasticsearch, un faux ClickHouse, un faux Vector et un faux Logstash.
+
+### Modifié
+
+- Le script Painless que la traduction ne sait pas lire laisse désormais son code en commentaire sous « À REPRENDRE » (`passerelle assist` le retrouve à cet endroit), comme le filtre ruby de Logstash le faisait déjà.
+- Le code propre à Node.js (entrées-sorties de la ligne de commande) se range dans `src/node/`, assemblé entre le moteur et `src/server.js`.
+- Chaque ligne de journal « requête » porte `request_id` (et `token`, `identity`, `trace_id` quand ils existent). Son `ip` est l'adresse du client, lue derrière un proxy de confiance (`peer` donne alors celle du proxy).
+- Le message sans jeton nomme aussi `server.tokens`. La section `server` n'est jamais diffusée par `/v1/config` ni par l'interface.
+
+### Corrigé
+
+- La configuration YAML accepte une liste de tables (`- name: …` suivi de ses clés), qu'elle lisait comme des textes.
+
 ## [1.5.0] - 2026-10-28
 
 ### Ajouté
@@ -332,6 +372,7 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
+[1.6.0]: https://github.com/OlivMartins/passerelle/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/OlivMartins/passerelle/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/OlivMartins/passerelle/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/OlivMartins/passerelle/compare/v1.2.0...v1.3.0

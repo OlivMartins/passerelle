@@ -49,11 +49,7 @@ async function esWithPit(dsl) {
   try { return await es('/_search', Object.assign({}, dsl, { pit: { id: open.body.id, keep_alive: '1m' } })); }
   finally { await es('/_pit', { id: open.body.id }, 'DELETE'); }
 }
-function esError(r) {
-  const e = r.body.error || {};
-  const cause = (e.root_cause && e.root_cause[0]) || e;
-  return `HTTP ${r.status} ${cause.type || ''} : ${String(cause.reason || '').slice(0, 160)}`;
-}
+const esError = E.eqEsError;
 
 // Le fuseau du serveur ClickHouse est simulé par la variable TZ.
 function clickhouse(dir, argv, tz) {
@@ -97,245 +93,20 @@ function loadClickHouse(docs, variant) {
   return dir;
 }
 
-/* ---------- Normalisation des résultats ---------- */
-const isDate = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}(T[\d:.]+Z)?$/.test(v);
-const normKey = v => (v === undefined ? null : isDate(v) ? Date.parse(v) : v);
-function same(a, b, tol) {
-  if (a === undefined) a = null;
-  if (b === undefined) b = null;
-  if (isDate(b)) b = Date.parse(b);
-  if (a === null || b === null) return a === b;
-  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => same(x, b[i], tol));
-  if (typeof a === 'number' && typeof b === 'number') return Math.abs(a - b) <= (tol || 1e-9) * Math.max(1, Math.abs(a), Math.abs(b));
-  return a === b;
-}
-const BUCKET_FIELDS = new Set(['key', 'key_as_string', 'doc_count', 'from', 'to', 'from_as_string', 'to_as_string', 'doc_count_error_upper_bound', 'sum_other_doc_count', 'meta']);
-
-// Colonnes attendues côté ClickHouse pour une mesure Elasticsearch (null : ce n’est pas une mesure)
-function metricColumns(name, a, type) {
-  if (a === null || typeof a !== 'object') return {};
-  if ('buckets' in a) return null;
-  if ('values' in a) {
-    const keys = Object.keys(a.values);
-    if (type === 'percentile_ranks') return Object.fromEntries(keys.map(k => [`${name}_${String(Number(k)).replace(/\W/g, '_')}`, a.values[k]]));
-    return { [name]: keys.map(k => a.values[k]) };
-  }
-  if ('count' in a && 'min' in a && 'avg' in a) {
-    const o = { [`${name}_count`]: a.count, [`${name}_min`]: a.min, [`${name}_max`]: a.max, [`${name}_avg`]: a.avg, [`${name}_sum`]: a.sum };
-    if ('variance' in a) Object.assign(o, { [`${name}_variance`]: a.variance, [`${name}_std_deviation`]: a.std_deviation, [`${name}_sum_of_squares`]: a.sum_of_squares });
-    return o;
-  }
-  if ('value' in a) {
-    const o = { [name]: a.value };
-    if (Array.isArray(a.keys)) o[`${name}_key`] = a.keys[0];
-    return o;
-  }
-  // top_metrics avec une seule mesure : la valeur, ou la liste des valeurs quand size > 1
-  if (Array.isArray(a.top)) {
-    const vals = a.top.map(t => Object.values(t.metrics)[0]);
-    return { [name]: vals.length === 1 ? vals[0] : vals };
-  }
-  if ('hits' in a || 'doc_count' in a) return null;
-  return {};
-}
-function leafMetrics(bucket, defs) {
-  const typeOf = n => { const d = defs && defs[n]; return d ? Object.keys(d).find(k => k !== 'aggs' && k !== 'aggregations') : null; };
-  const m = {};
-  for (const [name, a] of Object.entries(bucket)) {
-    if (BUCKET_FIELDS.has(name)) continue;
-    const cols = metricColumns(name, a, typeOf(name));
-    if (cols) { Object.assign(m, cols); continue; }
-    // Sous-filtre sans regroupement : la traduction le fusionne en colonnes <nom>_doc_count, <nom>_<mesure>
-    if (a && typeof a === 'object' && !('buckets' in a) && !('hits' in a) && 'doc_count' in a) {
-      m[`${name}_doc_count`] = a.doc_count;
-      for (const [sub, v] of Object.entries(a)) {
-        if (BUCKET_FIELDS.has(sub)) continue;
-        const c = metricColumns(`${name}_${sub}`, v, null);
-        if (c) Object.assign(m, c);
-      }
-    }
-  }
-  return m;
-}
-const subAggs = def => (def && (def.aggs || def.aggregations)) || {};
-// Parcourt l’arbre d’agrégations d’Elasticsearch le long d’un chemin et appelle onLeaf(bucket, clés, définitions enfants).
-// Renvoie true si un niveau a des groupes nommés (filters) : ils forment un objet JSON, dont l’ordre ne porte pas de sens.
-function walkBuckets(aggs, defs, path, onLeaf) {
-  let keyed = false;
-  (function walk(cur, curDefs, i, keys, labels) {
-    const name = path[i];
-    const a = cur && cur[name];
-    if (!a) return;
-    const children = subAggs(curDefs && curDefs[name]);
-    let buckets;
-    if (Array.isArray(a.buckets)) buckets = a.buckets.map(b => [b.key, b]);
-    else if (a.buckets && typeof a.buckets === 'object') { buckets = Object.entries(a.buckets); keyed = true; }
-    else buckets = [[undefined, a]];
-    for (const [k, b] of buckets) {
-      const next = Object.assign({}, keys);
-      const nextLabels = Object.assign({}, labels);
-      const multi = curDefs && curDefs[name] && curDefs[name].multi_terms;
-      if (k !== undefined) {
-        if (k !== null && typeof k === 'object' && !Array.isArray(k)) Object.assign(next, k);
-        // multi_terms : une clé tableau, une colonne <nom>_<champ> par terme côté ClickHouse
-        else if (multi && Array.isArray(k)) multi.terms.forEach((t, j) => { next[`${name}_${t.field}`] = k[j]; });
-        else { next[name] = k; if (typeof b.key_as_string === 'string') nextLabels[name] = b.key_as_string; }
-      }
-      if (i < path.length - 1) walk(b, children, i + 1, next, nextLabels);
-      else onLeaf(b, next, children, nextLabels);
-    }
-  })(aggs, defs, 0, {}, {});
-  return keyed;
-}
-function esBucketRows(aggs, defs, path) {
-  const rows = [];
-  rows.keyed = walkBuckets(aggs, defs, path, (b, keys, children, labels) => rows.push({ keys, labels, doc_count: b.doc_count, m: leafMetrics(b, children) }));
-  return rows;
-}
-const short = v => { const s = JSON.stringify(v === undefined ? null : v); return s.length > 120 ? s.slice(0, 120) + '…' : s; };
-
-// Compare des lignes Elasticsearch { keys, doc_count, m } aux lignes ClickHouse ; renvoie la liste des écarts
-function compareRows(esRows, chRows, tol, unordered) {
-  const keyNames = [...new Set(esRows.flatMap(r => Object.keys(r.keys)))];
-  const metricNames = [...new Set(esRows.flatMap(r => Object.keys(r.m)))];
-  const keyOf = get => JSON.stringify(keyNames.map(k => normKey(get(k))));
-  // Une agrégation qui porte le nom d’une colonne citée par la requête est suffixée _agg par la traduction
-  const col = (row, name) => (name in row || !(`${name}_agg` in row) ? row[name] : row[`${name}_agg`]);
-  // Semaine, mois, année : ClickHouse renvoie une date sans heure. Elle se compare au jour écrit par
-  // Elasticsearch dans key_as_string, qui est déjà exprimé dans le fuseau de l’agrégation.
-  const byDay = new Set(keyNames.filter(k => chRows.some(r => /^\d{4}-\d{2}-\d{2}$/.test(String(col(r, k)))) && esRows.some(r => r.labels && r.labels[k])));
-  const esKeys = esRows.map(r => JSON.stringify(keyNames.map(k => (byDay.has(k) ? String(r.labels[k]).slice(0, 10) : normKey(r.keys[k])))));
-  const chKeys = chRows.map(r => JSON.stringify(keyNames.map(k => (byDay.has(k) ? col(r, k) : normKey(col(r, k))))));
-  const chByKey = new Map(chKeys.map((k, i) => [k, chRows[i]]));
-  const esSet = new Set(esKeys);
-  const missing = esKeys.filter(k => !chByKey.has(k));
-  const extra = chKeys.filter(k => !esSet.has(k));
-  const diffs = [];
-  esRows.forEach((r, i) => {
-    const c = chByKey.get(esKeys[i]);
-    if (!c) return;
-    if (!same(r.doc_count, c.doc_count)) diffs.push(`${esKeys[i]} doc_count ES ${r.doc_count} / CH ${c.doc_count}`);
-    for (const m of metricNames) if (!same(r.m[m], col(c, m), tol)) diffs.push(`${esKeys[i]} ${m} ES ${short(r.m[m])} / CH ${short(col(c, m))}`);
-  });
-  const common = new Set(esKeys.filter(k => chByKey.has(k)));
-  const sameOrder = JSON.stringify(esKeys.filter(k => common.has(k))) === JSON.stringify(chKeys.filter(k => common.has(k)));
-  const out = [];
-  if (esRows.length !== chRows.length) out.push(`ES ${esRows.length} lignes / CH ${chRows.length}`);
-  if (missing.length) out.push(`${missing.length} absentes côté CH, ex. ${missing.slice(0, 3).join(' ')}`);
-  if (extra.length) out.push(`${extra.length} en trop côté CH, ex. ${extra.slice(0, 3).join(' ')}`);
-  if (diffs.length) out.push(`${diffs.length} valeurs ≠, ex. ${diffs.slice(0, 2).join(' ; ')}`);
-  if (!sameOrder && !unordered) out.push('ordre différent');
-  return out;
-}
-function compareIds(label, esIds, chIds) {
-  if (JSON.stringify(esIds) === JSON.stringify(chIds)) return [];
-  const sameSet = esIds.length === chIds.length && [...esIds].sort().join() === [...chIds].sort().join();
-  return [`[${label}] ${sameSet ? 'mêmes documents, ordre différent' : 'documents différents'} : ES ${esIds.slice(0, 6).join(',')}… / CH ${chIds.slice(0, 6).join(',')}…`];
-}
-
-/* ---------- Exécution d’un cas ---------- */
-async function runComposite(c, ctx) {
-  const name = c.composite;
-  const sources = c.dsl.aggs[name].composite.sources.map(s => Object.keys(s)[0]);
-  const size = c.dsl.aggs[name].composite.size;
-  const page = after => { const d = structuredClone(c.dsl); if (after) d.aggs[name].composite.after = after; return d; };
-  // Mode « export complet » : une seule requête côté ClickHouse, comparée à l’ensemble des pages d’Elasticsearch, sans ordre
-  const stream = !!(c.config && c.config.clickhouse && c.config.clickhouse.composite_mode === 'stream');
-
-  const esRows = [];
-  for (let p = 0, after; p < 500; p++) {
-    const r = await es(`/${INDEX}/_search`, page(after));
-    if (r.status !== 200) return { verdict: 'ES✗', detail: esError(r) };
-    const a = r.body.aggregations[name];
-    a.buckets.forEach(b => esRows.push({ keys: b.key, doc_count: b.doc_count, m: leafMetrics(b, subAggs(c.dsl.aggs[name])) }));
-    if (!a.after_key || !a.buckets.length) break;
-    after = a.after_key;
-  }
-
-  const chRows = [];
-  let t = null; let pages = 0; let firstKey = null;
-  for (let p = 0, after; p < 500; p++) {
-    t = ctx.translate(page(after));
-    if (t.error) return { verdict: 'TR✗', detail: t.error };
-    const r = query(ctx.dir, t.statements[0].sql, ctx.tz);
-    if (r.error) return { verdict: 'CH✗', detail: r.error, t };
-    pages++;
-    if (!r.rows.length) break;
-    const key = JSON.stringify(sources.map(s => r.rows[0][s]));
-    if (p > 0 && key === firstKey) return { verdict: '≠', detail: `pagination bouclée : la page ${p + 1} recommence à la première clé ${key}`, t };
-    if (p === 0) firstKey = key;
-    chRows.push(...r.rows);
-    // Le client reprend les clés de la dernière ligne, au format d’Elasticsearch (dates en epoch millis)
-    const last = r.rows[r.rows.length - 1];
-    after = Object.fromEntries(sources.map(s => [s, normKey(last[s])]));
-    if (stream || r.rows.length < size) break;
-  }
-  const diffs = compareRows(esRows, chRows, c.tol, stream);
-  return { verdict: diffs.length ? '≠' : '=', detail: `${diffs.join(' | ')} (${esRows.length} groupes ES, ${pages} pages CH)`, t };
-}
-
-async function runCase(c, ctx) {
-  if (c.composite) return runComposite(c, ctx);
-  const t = ctx.translate(c.dsl);
+/* ---------- Comparaison et exécution d’un cas ---------- */
+// Le comparateur est celui de « passerelle verify » (src/engine/equivalence.js) : le banc l’alimente avec son jeu de
+// données, la commande avec les données du client. Le banc ne fournit que l’accès à ses deux moteurs.
+const runCase = (c, ctx) => E.eqRunCase(c, {
+  translate: ctx.translate,
+  search: dsl => es(`/${INDEX}/_search`, dsl),
+  searchPit: dsl => esWithPit(dsl),
+  sql: sql => query(ctx.dir, sql, ctx.tz),
   // Listes nommées : la table et ses lignes sont créées avant la requête, comme le fera l’utilisateur
-  for (const list of t.lists || []) {
-    try { clickhouse(ctx.dir, ['--multiquery', '--query', list.sql]); }
-    catch (e) { return { verdict: 'CH✗', detail: `liste ${list.name} : ${String(e.stderr || e.message).slice(0, 200)}`, t }; }
+  setup: list => {
+    try { clickhouse(ctx.dir, ['--multiquery', '--query', list.sql]); return null; }
+    catch (e) { return String(e.stderr || e.message).slice(0, 200); }
   }
-  const r = c.pit ? await esWithPit(c.dsl) : await es(`/${INDEX}/_search`, c.dsl);
-  if (t.error) return { verdict: r.status === 200 ? 'TR✗' : '=', detail: `traducteur : ${t.error}${r.status === 200 ? '' : ` ; Elasticsearch refuse aussi (${esError(r)})`}` };
-  if (r.status !== 200) {
-    // Elasticsearch refuse la requête : la traduction doit le signaler (« à reprendre »), pas produire un SQL silencieux
-    return t.stats.ko ? { verdict: '=', detail: `refusée des deux côtés : ${esError(r)}`, t } : { verdict: 'ES✗', detail: `${esError(r)} — la traduction produit pourtant du SQL sans rien signaler`, t };
-  }
-  if (c.unsupported) {
-    // Construction hors de portée : la traduction doit la déclarer « à reprendre » et le SQL doit s’arrêter
-    // sur le message de Passerelle, au lieu de renvoyer un résultat.
-    const errors = t.statements.map(s => query(ctx.dir, s.sql, ctx.tz).error || '');
-    const stopped = t.stats.ko > 0 && errors.some(e => /Passerelle : .* à traduire/.test(e));
-    return { verdict: stopped ? '=' : '≠', detail: stopped ? 'déclarée à reprendre, le SQL s’arrête' : `attendu : à reprendre et SQL arrêté ; obtenu ko=${t.stats.ko}, ${errors.join(' | ') || 'exécution sans erreur'}`, t };
-  }
-  const defs = c.dsl.aggs || c.dsl.aggregations || {};
-  const diffs = [];
-  let failed = false;
-  for (const s of t.statements) {
-    const q = query(ctx.dir, s.sql, ctx.tz);
-    if (q.error) { failed = true; diffs.push(`[${s.title}] ClickHouse : ${q.error}`); continue; }
-    let m;
-    if ((m = /^Agrégation (.+)$/.exec(s.title))) {
-      const esRows = esBucketRows(r.body.aggregations, defs, m[1].split(' › '));
-      const d = compareRows(esRows, q.rows, c.tol, esRows.keyed);
-      if (d.length) diffs.push(`[${m[1]}] ${d.join(' | ')}`);
-    } else if ((m = /^Top hits (.+)$/.exec(s.title))) {
-      // Les documents sont comparés groupe par groupe, dans l’ordre ; l’ordre des groupes entre eux
-      // est celui du regroupement parent, déjà vérifié par sa propre requête.
-      const path = m[1].split(' › ');
-      const keyNames = path.slice(0, -1);
-      const esGroups = new Map();
-      walkBuckets(r.body.aggregations, defs, keyNames, (b, keys) => esGroups.set(JSON.stringify(Object.values(keys).map(normKey)), b[path[path.length - 1]].hits.hits.map(h => h._id)));
-      const chGroups = new Map();
-      for (const x of q.rows) {
-        const k = JSON.stringify(keyNames.filter(n => n in x).map(n => normKey(x[n])));
-        if (!chGroups.has(k)) chGroups.set(k, []);
-        chGroups.get(k).push(x._id);
-      }
-      for (const k of new Set([...esGroups.keys(), ...chGroups.keys()])) diffs.push(...compareIds(`${m[1]} ${k}`, esGroups.get(k) || [], chGroups.get(k) || []));
-    } else if (s.title === 'Mesures globales') {
-      const d = compareRows([{ keys: {}, m: leafMetrics(r.body.aggregations, defs) }], q.rows, c.tol);
-      if (d.length) diffs.push(`[mesures] ${d.join(' | ')}`);
-    } else if ((m = /^Pipeline (.+)$/.exec(s.title))) {
-      const d = compareRows([{ keys: {}, m: metricColumns(m[1], r.body.aggregations[m[1]], null) || {} }], q.rows, c.tol);
-      if (d.length) diffs.push(`[${m[1]}] ${d.join(' | ')}`);
-    } else if (s.title === 'Documents') {
-      diffs.push(...compareIds('documents', r.body.hits.hits.map(h => h._id), q.rows.map(x => x._id)));
-    } else if (/^Total|^Comptage/.test(s.title)) {
-      const row = q.rows[0] || {};
-      const n = row.total !== undefined ? row.total : row.count;
-      if (r.body.hits.total.value !== n) diffs.push(`[total] ES ${r.body.hits.total.value} / CH ${n}`);
-    }
-  }
-  return { verdict: failed ? 'CH✗' : diffs.length ? '≠' : '=', detail: diffs.join(' || '), t };
-}
+});
 
 function knownFor(c, variant, tz) {
   const k = c.known;
