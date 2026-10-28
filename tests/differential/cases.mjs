@@ -389,7 +389,9 @@ export const CASES = [
   // Tri sur un champ multivalué : Elasticsearch prend le minimum en croissant ; un document sans valeur va à la fin
   { id: 'audit_tri_tableau', dsl: { size: 10, sort: [{ nums: 'asc' }, { [TS]: 'asc' }] } },
   { id: 'audit_tri_tableau_desc', dsl: { size: 10, sort: [{ nums: 'desc' }, { [TS]: 'asc' }] } },
-  { id: 'audit_top_metrics_size_croissant', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { t: { top_metrics: { metrics: { field: 'bytes' }, sort: { latency_ms: 'asc' }, size: 2 } } } } } } },
+  // Tri sur l’horodatage, unique dans le jeu de données : sur latency_ms, deux documents de payment sont ex æquo
+  // (10 ms) ; Elasticsearch ne définit pas leur ordre (il dépend des segments), le cas échouait au hasard
+  { id: 'audit_top_metrics_size_croissant', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { t: { top_metrics: { metrics: { field: 'bytes' }, sort: { [TS]: 'asc' }, size: 2 } } } } } } },
   // Tri en liste d’un seul élément, comme l’envoie Grafana : même sens que l’objet
   { id: 'audit_top_metrics_tri_liste', dsl: { size: 0, aggs: { svc: { terms: { field: 'service' }, aggs: { t: { top_metrics: { metrics: [{ field: 'status' }], sort: [{ [TS]: 'desc' }], size: '1' } } } } } } },
   // Script de valeur : _value est la valeur du champ (scripts en ligne de Grafana et de Kibana)
