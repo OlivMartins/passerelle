@@ -8,15 +8,14 @@
  */
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { E, INTEGRATIONS, needs, play, flat } from './commun.mjs';
+import { E, INTEGRATIONS, needs, play, flat, pipelineInputs } from './commun.mjs';
 
 needs('ELASTIC_INTEGRATIONS', INTEGRATIONS);
 const [ds, ...flags] = process.argv.slice(2);
 if (!ds) { console.error('usage : node tests/ingest/integration.mjs packages/<paquet>/data_stream/<flux>'); process.exit(2); }
 const root = join(INTEGRATIONS, ds);
 const pdir = join(root, 'elasticsearch', 'ingest_pipeline');
-const inputs = readdirSync(pdir).filter(f => /\.(yml|yaml|json)$/.test(f))
-  .map(f => ({ name: f === 'default.yml' ? 'default' : f.replace(/\.(yml|yaml|json)$/, ''), text: readFileSync(join(pdir, f), 'utf8') }));
+const inputs = pipelineInputs(pdir);
 const r = E.translateIngest(inputs, E.DEFAULT_CONFIG);
 if (r.error) { console.error(`Erreur : ${r.error}`); process.exit(1); }
 console.log(r.pipelines.map(p => `${p.name} : ${p.verdict}, ${p.stats.ok} ok, ${p.stats.approx} approx, ${p.stats.ko} ko`).join('\n'));

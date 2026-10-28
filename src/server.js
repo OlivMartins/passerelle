@@ -569,10 +569,17 @@ function ingestConvert(o) {
   formatFor(o, ['yaml', 'toml'], 'ingest');
   const cfg = loadCfgOrFail(o);
   const fmt = o.format || cfg.vector.format;
-  const files = collect(o._, /\.(ya?ml|json)$/i);
+  const files = collect(o._, /\.(ya?ml|json)(\.link)?$/i);
   if (!files.length) fail('aucun fichier .yml, .yaml ou .json trouvé');
-  // Les pipelines d’un même dossier s’appellent entre eux (processeur pipeline) : ils sont lus ensemble
-  const inputs = files.map(f => ({ name: path.basename(f).replace(/\.(ya?ml|json)$/i, ''), text: fs.readFileSync(f, 'utf8') }));
+  // Les pipelines d’un même dossier s’appellent entre eux (processeur pipeline) : ils sont lus ensemble. Un fichier
+  // « .yml.link » d’une intégration Elastic (elastic-package) désigne un pipeline partagé : on lit le fichier désigné.
+  const inputs = files.map(f => {
+    const name = path.basename(f).replace(/\.(ya?ml|json)(\.link)?$/i, '');
+    if (!/\.link$/i.test(f)) return { name, text: fs.readFileSync(f, 'utf8') };
+    const target = path.resolve(path.dirname(f), fs.readFileSync(f, 'utf8').trim().split(/\s+/)[0] || '');
+    if (!fs.existsSync(target)) fail(`${f} désigne ${target}, introuvable`);
+    return { name, text: fs.readFileSync(target, 'utf8') };
+  });
   const r = translateIngest(inputs, cfg);
   const MARK = { ready: '✓', review: '~', todo: '!', unrecognized: '✗' };
   if (r.error) { r.notes.forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`)); fail(`aucun pipeline traduit : ${r.error}`); }

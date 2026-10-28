@@ -15,7 +15,7 @@ import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, rmSync
 import { execFileSync } from 'node:child_process';
 import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { E, VECTOR, WORK, INTEGRATIONS, geoPath } from './commun.mjs';
+import { E, VECTOR, WORK, INTEGRATIONS, geoPath, pipelineInputs } from './commun.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const flags = process.argv.slice(2);
@@ -44,7 +44,7 @@ if (INTEGRATIONS) {
     if (re && !re.test(ds)) continue;
     const pd = join(INTEGRATIONS, 'packages', ds.split('/')[0], 'data_stream', ds.split('/')[1], 'elasticsearch', 'ingest_pipeline');
     if (!existsSync(pd)) { console.log(`✗ ${ds} — introuvable dans ELASTIC_INTEGRATIONS`); process.exitCode = 1; continue; }
-    jobs.push({ name: ds, inputs: readdirSync(pd).filter(f => /\.(yml|yaml|json)$/.test(f)).map(f => ({ name: f.replace(/\.(yml|yaml|json)$/, ''), text: readFileSync(join(pd, f), 'utf8') })) });
+    jobs.push({ name: ds, inputs: pipelineInputs(pd) });
   }
 }
 

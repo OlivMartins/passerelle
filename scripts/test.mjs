@@ -238,6 +238,10 @@ snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut
     check(fn.pipelines[0].verdict !== 'todo' && /privee/.test(fn.yaml), 'ingest : les fonctions déclarées dans un script Painless sont recopiées sur place', JSON.stringify(fn.notes.filter(n => n.level === 'err').map(n => n.detail)));
     const rec = E.translateIngest([{ name: 'r', text: JSON.stringify({ processors: [{ script: { source: 'int f(int n) { return f(n); }\nctx.a = f(1);' } }] }) }], E.DEFAULT_CONFIG);
     check(rec.pipelines[0].verdict === 'review' && rec.notes.some(n => /récursion bornée/.test(n.title)), 'ingest : une fonction récursive est recopiée sur des niveaux bornés, à vérifier');
+    const amb = E.translateIngest([{ name: 'a', text: JSON.stringify({ processors: [{ script: { source: 'def z = ctx.a;\nfor (def e : ctx.l) { z = e; }\nz.put(\'b\', 1);' } }] }) }], E.DEFAULT_CONFIG);
+    check(amb.pipelines[0].verdict === 'todo' && amb.notes.some(n => /objet différent selon le chemin/.test(n.detail)), 'ingest : une variable rattachée à un objet différent selon les tours de boucle ne se modifie pas au hasard : à reprendre');
+    const alias = E.translateIngest([{ name: 'a', text: JSON.stringify({ processors: [{ script: { source: 'def x = ctx.a;\nx.put(\'b\', 1);' } }] }) }], E.DEFAULT_CONFIG);
+    check(/\.a = p_x/.test(alias.yaml), 'ingest : def x = ctx.a puis x.put() modifie ctx.a (référence, pas copie)', alias.yaml.split('\n').filter(l => /p_x/.test(l)).join(' | '));
     const recCond = E.translateIngest([{ name: 'r', text: JSON.stringify({ processors: [{ set: { field: 'a', value: 1, if: 'int f(int n) { return f(n); } f(1) == 1' } }] }) }], E.DEFAULT_CONFIG);
     check(recCond.pipelines[0].verdict === 'todo' && recCond.notes.some(n => /récursive/.test(n.detail)), 'ingest : une fonction récursive dans une condition est à reprendre avec sa raison');
   }

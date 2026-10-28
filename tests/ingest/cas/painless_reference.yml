@@ -1,0 +1,88 @@
+description: variables qui désignent un objet de ctx, arguments modifiés par une fonction, éléments de boucle, entrées de table
+processors:
+  - script:
+      lang: painless
+      source: |
+        void norm(def rules) {
+          for (def r : rules) {
+            def gs = r.get('groups');
+            for (int i = 0; i < gs.size(); i++) {
+              if (gs.get(i) == '') { gs.set(i, 'core'); }
+            }
+          }
+        }
+        void add(List out, def v) { if (!out.contains(v)) { out.add(v); } }
+        void appendUnique(Map container, String field, def value) {
+          def current = container[field];
+          if (current == null) {
+            container[field] = [value];
+          } else if (current instanceof List) {
+            if (!current.contains(value)) { current.add(value); }
+          } else if (current != value) {
+            container[field] = [current, value];
+          }
+        }
+        def x = ctx.a;
+        x.put('b', 1);
+        Map y = ctx.c;
+        y.d = 2;
+        for (def e : ctx.l) { e.f = 3; }
+        Map audit = ctx.audit;
+        def obj = audit.get('obj');
+        if (obj instanceof Map) { obj.put('g', 'core'); }
+        norm(ctx.rules);
+        List found = new ArrayList();
+        add(found, 'i-1');
+        add(found, 'i-1');
+        add(found, 'i-2');
+        ctx.found = found;
+        if (ctx.device == null) { ctx.device = [:]; }
+        appendUnique(ctx.device, 'id', 'a');
+        appendUnique(ctx.device, 'id', 'b');
+        appendUnique(ctx.device, 'id', 'a');
+        for (def v : ctx.m.values()) { if (v instanceof Map) { v.seen = true; } }
+        for (def en : ctx.n.entrySet()) { if (en.getValue() instanceof String) { en.setValue(en.getValue().toUpperCase()); } }
+        def w = ctx.r;
+        ctx.r = [:];
+        w.put('old', 1);
+        def big = ctx.s;
+        ctx.s.t = 5;
+        ctx.seen_t = big.t;
+        def p1 = ctx.u;
+        def p2 = p1;
+        p2.v = 7;
+        ctx.p1v = p1.v;
+  - script:
+      lang: painless
+      source: |
+        boolean drop(Object object) {
+          if (object == null || object == '') {
+            return true;
+          } else if (object instanceof Map) {
+            ((Map) object).values().removeIf(v -> drop(v));
+            return (((Map) object).size() == 0);
+          } else if (object instanceof List) {
+            ((List) object).removeIf(v -> drop(v));
+            return (((List) object).length == 0);
+          }
+          return false;
+        }
+        drop(ctx.o);
+  - script:
+      lang: painless
+      source: |
+        void handleMap(Map map) {
+          map.values().removeIf(v -> { if (v instanceof Map) { handleMap(v); } return v == null || v == "" || (v instanceof Map && v.size() == 0); });
+        }
+        handleMap(ctx.o2);
+  - script:
+      lang: painless
+      source: |
+        def z = new HashMap();
+        if (ctx.k == 1) { z = ctx.za; } else if (ctx.k == 2) { z = ctx.zc; }
+        z.put('b', 1);
+        def m = ctx.lg["details"];
+        if (!(m instanceof Map)) { m = new HashMap(); }
+        m['cle'] = 'valeur';
+        ctx.lg["details"] = m;
+        ctx.zlocal = z;

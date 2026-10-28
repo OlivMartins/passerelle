@@ -6,10 +6,10 @@
  *   MAXMIND_TEST_DATA          dossier test-data de github.com/maxmind/MaxMind-DB (bases GeoLite2-*-Test.mmdb)
  *   PASSERELLE_INGEST_WORK     dossier de travail (par défaut : un dossier temporaire)
  */
-import { writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { loadEngine } from '../../scripts/engine.mjs';
 
 export const E = loadEngine();
@@ -17,6 +17,16 @@ export const VECTOR = process.env.VECTOR_BIN || 'vector';
 export const WORK = process.env.PASSERELLE_INGEST_WORK || join(tmpdir(), 'passerelle-ingest');
 export const INTEGRATIONS = process.env.ELASTIC_INTEGRATIONS || '';
 const GEO = process.env.MAXMIND_TEST_DATA || '';
+
+// Pipelines d’un dossier ingest_pipeline d’une intégration ; un « .yml.link » (elastic-package) désigne un fichier partagé
+export function pipelineInputs(dir) {
+  return readdirSync(dir).filter(f => /\.(yml|yaml|json)(\.link)?$/.test(f)).sort().map(f => {
+    const name = f.replace(/\.(yml|yaml|json)(\.link)?$/, '');
+    if (!f.endsWith('.link')) return { name, text: readFileSync(join(dir, f), 'utf8') };
+    const target = resolve(dir, readFileSync(join(dir, f), 'utf8').trim().split(/\s+/)[0]);
+    return { name, text: existsSync(target) ? readFileSync(target, 'utf8') : '' };
+  }).filter(x => x.text);
+}
 
 export function needs(name, value) {
   if (!value) { console.error(`${name} n’est pas défini : voir l’en-tête de tests/ingest/commun.mjs`); process.exit(2); }

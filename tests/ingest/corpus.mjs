@@ -5,9 +5,9 @@
  *
  *   ELASTIC_INTEGRATIONS=… node tests/ingest/corpus.mjs [--only=regex]
  */
-import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readdirSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { E, INTEGRATIONS, WORK, needs } from './commun.mjs';
+import { E, INTEGRATIONS, WORK, needs, pipelineInputs } from './commun.mjs';
 
 needs('ELASTIC_INTEGRATIONS', INTEGRATIONS);
 const only = (process.argv.find(a => a.startsWith('--only=')) || '').slice(7);
@@ -20,7 +20,7 @@ for (const pkg of readdirSync(base).sort()) {
   for (const ds of readdirSync(dsd).sort()) {
     if (ONLY && !ONLY.test(`${pkg}/${ds}`)) continue;
     const pd = join(dsd, ds, 'elasticsearch', 'ingest_pipeline'); if (!existsSync(pd)) continue;
-    const inputs = readdirSync(pd).filter(f => /\.(yml|yaml|json)$/.test(f)).map(f => ({ name: f.replace(/\.(yml|yaml|json)$/, ''), text: readFileSync(join(pd, f), 'utf8') }));
+    const inputs = pipelineInputs(pd);
     streams++;
     let r;
     try { r = E.translateIngest(inputs, E.DEFAULT_CONFIG); } catch (e) { errors.push(`${pkg}/${ds} : exception ${e.stack.split('\n').slice(0, 3).join(' | ')}`); continue; }

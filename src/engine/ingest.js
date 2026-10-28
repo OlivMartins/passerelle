@@ -1,9 +1,40 @@
 /* Passerelle — moteur partie 5 : ingest pipelines Elasticsearch → VRL */
 
 // VRL ne lit pas la notation 1e18 : le flottant est écrit en décimal
-// Plafond de niveaux recopiés en ligne pour une fonction récursive (la taille réelle du code produit le réduit : INLINE_LINES)
+// Plafond de lignes recopiées pour un groupe de fonctions récursives : au-delà, Vector consomme des gigaoctets à compiler
 const INLINE_LINES = 2500;
-function recursionLimit(fn, name) { return fn.rec <= 1 ? 12 : 7; }
+class InlineTooBig extends Error {}
+// Groupes de fonctions récursives d’un script : composantes fortement connexes du graphe des appels (Tarjan). Chaque
+// fonction d’un cycle reçoit fn.group = { sites } : nombre d’appels internes au groupe, qui fixe la profondeur recopiable.
+function plRecursion(fns) {
+  if (fns.analysed) return; fns.analysed = true;
+  const calls = new Map();
+  for (const [name, fn] of fns) {
+    const out = [];
+    const walk = x => { if (Array.isArray(x)) x.forEach(walk); else if (x && typeof x === 'object') { if (x.k === 'call' && fns.has(x.name)) out.push(x.name); Object.values(x).forEach(walk); } };
+    walk(fn.body); calls.set(name, out);
+  }
+  let index = 0; const idx = new Map(); const low = new Map(); const stack = []; const on = new Set();
+  const strong = v => {
+    idx.set(v, index); low.set(v, index); index++; stack.push(v); on.add(v);
+    for (const w of new Set(calls.get(v))) {
+      if (!idx.has(w)) { strong(w); low.set(v, Math.min(low.get(v), low.get(w))); } else if (on.has(w)) low.set(v, Math.min(low.get(v), idx.get(w)));
+    }
+    if (low.get(v) === idx.get(v)) {
+      const comp = []; let w; do { w = stack.pop(); on.delete(w); comp.push(w); } while (w !== v);
+      const members = new Set(comp);
+      const sites = comp.reduce((n, m) => n + calls.get(m).filter(c => members.has(c)).length, 0);
+      if (sites > 0) { const g = { sites }; for (const m of comp) fns.get(m).group = g; }
+    }
+  };
+  for (const name of fns.keys()) if (!idx.has(name)) strong(name);
+}
+// Types Painless sans identité d’objet : une variable de ces types n’est jamais une référence
+const PL_SCALAR = new Set(['str', 'int', 'num', 'bool', 'null', 're', 'ts', 'tok', 'cidr']);
+// Chemin dont la base (une conversion de type) est remplacée par l’expression convertie
+// Origine de x = x.a.b : le chemin relatif à x, posé sur l’ancienne origine de x
+function rebaseLv(lv, name, base) { if (lv.k === 'member' || lv.k === 'index') return Object.assign({}, lv, { obj: rebaseLv(lv.obj, name, base) }); return lv.k === 'id' && lv.v === name ? base : lv; }
+function rebase(t, inner) { return t.k === 'member' || t.k === 'index' ? Object.assign({}, t, { obj: rebase(t.obj, inner) }) : inner; }
 function vrlExp(lit) {
   const n = Number(lit);
   if (!Number.isFinite(n)) return lit;
@@ -1083,6 +1114,8 @@ Object.assign(IngestGen.prototype, {
         return { c: `{ "t": ${toks}, "i": 0 }`, t: 'tok' };
       }
       case 'cidr': { const a = X(e.arg); return { c: this.plStr(a), t: 'cidr' }; }
+      case 'vrl': return { c: e.c, t: e.t || 'any' };
+      case 'lambdaValue': return this.plLambdaValue(e.lam, env);
       case 'lambda': throw new Error('lambda hors de forEach ou removeIf');
       case 'exc': throw new Error('exception employée hors de throw');
       case 'incdec': throw new Error('++ et -- ne sont pris en charge qu’en instruction');
@@ -1322,20 +1355,26 @@ Object.assign(IngestGen.prototype, {
     if (g.length && s.k !== 'nop') { this.open(`if ${g.join(' && ')}`); this.plStmtInner(s, env); this.close(); if (s.k === 'let') env.locals.set(s.name, 'any'); }
     else this.plStmtInner(s, env);
   },
-  plLoop(s, env, listCode, idx, guard) {
+  // origin(iv) : origine de la variable de boucle (référence vers l’élément parcouru), selon le nom de l’indice VRL
+  plLoop(s, env, listCode, idx, guard, origin) {
     env.loops = env.loops || [];
     const loop = { brk: this.tmp('brk'), cnt: this.tmp('cnt') };
     const prev = env.locals.get(s.name);
     env.locals.set(s.name, idx ? 'int' : 'any');
+    const iv = this.tmp('_i');
     this.emit(`${loop.brk} = false`);
-    this.open(`for_each(${listCode}) -> |${idx ? `p_${s.name}, _v` : `_i, p_${s.name}`}|`);
+    this.open(`for_each(${listCode}) -> |${idx ? `p_${s.name}, _v` : `${iv}, p_${s.name}`}|`);
     this.emit(`${loop.cnt} = false`);
+    const mk = this.plMark(env);
+    if (origin) this.plBind(s.name, origin(iv), env);
     env.loops.push(loop);
     this.open(`if !${loop.brk}${guard ? ` && ${guard}` : ''}`);
     this.plStmt(s.body, env);
     this.close();
     env.loops.pop();
+    this.plMerge(env, mk, [{ st: this.plRestore(env, mk), v: 0 }, { st: mk.o, v: 0 }], null);
     this.close();
+    this.plUnbind(s.name, env);
     if (prev === undefined) env.locals.delete(s.name); else env.locals.set(s.name, prev);
   },
   plStmtInner(s, env) {
@@ -1349,14 +1388,50 @@ Object.assign(IngestGen.prototype, {
         if (sv && sv.k === 're') { (env.reLocals = env.reLocals || new Map()).set(s.name, sv); env.locals.set(s.name, 're'); return; }
         if (sv && sv.k === 'sbnew') (env.sbs = env.sbs || new Set()).add(s.name);
         if (sv && sv.k === 'list' && sv.set) (env.sets = env.sets || new Set()).add(s.name);
-        const v = s.v ? this.plExpr(s.v, env) : { c: 'null', t: 'null' }; env.locals.set(s.name, v.t === 'null' ? 'any' : v.t); /* null d’un type opaque : VRL ne doit pas déduire « null » pour une variable que la boucle réaffecte */ this.emit(`p_${s.name} = ${v.t === 'null' ? 'parse_json!("null")' : v.c}`); return; }
-      case 'set': return this.plAssign(s.target, this.plExpr(s.v, env), env);
+        const v = s.v ? this.plExpr(s.v, env) : { c: 'null', t: 'null' }; env.locals.set(s.name, v.t === 'null' ? 'any' : v.t); /* null d’un type opaque : VRL ne doit pas déduire « null » pour une variable que la boucle réaffecte */ this.emit(`p_${s.name} = ${v.t === 'null' ? 'parse_json!("null")' : v.c}`);
+        // def x = ctx.a : x désigne le même objet que ctx.a ; ses modifications y seront recopiées
+        this.plUnbind(s.name, env);
+        if (s.v && !PL_SCALAR.has(v.t)) { const lv = this.plLv(s.v, env); if (lv) this.plBind(s.name, lv, env); }
+        return; }
+      case 'set': {
+        const v = this.plExpr(s.v, env);
+        let lv = s.target.k === 'id' && s.v.k !== 'bin' && !PL_SCALAR.has(v.t) ? this.plLv(s.v, env) : null;
+        // x = x.get('a') : la nouvelle origine se calcule sur l’ancienne, avant que x ne change
+        let derived = null;
+        if (lv && this.plDesc(lv).root === s.target.v) {
+          const old = this.plOrigin(s.target.v, env); const name = s.target.v; const own = lv;
+          const literal = !JSON.stringify(own).includes('"k":"id","v":"') || !JSON.stringify(own).replace(`"k":"id","v":"${name}"`, '').includes('"k":"id"');
+          derived = !old ? null : old.ambiguous || old.leaves.some(l => l.env !== env && !literal) ? { ambiguous: true }
+            : { leaves: old.leaves.map(l => ({ conds: l.conds, lv: rebaseLv(own, name, l.lv), env: l.env })) };
+          lv = null;
+        }
+        this.plAssign(s.target, v, env);
+        if (derived) (env.origins = env.origins || new Map()).set(s.target.v, derived);
+        else if (lv) this.plBind(s.target.v, lv, env);
+        return;
+      }
       case 'if': {
         const c = this.plExpr(s.c, env);
+        const at = this.lines.length; const ind0 = this.ind;
         this.open(`if ${this.plBool(c)}`);
         const before = env.retPossible;
+        // Une variable rattachée à un autre objet dans une branche : un indicateur retient la branche suivie
+        const mk = this.plMark(env); const flag = this.tmp('al'); let used = false;
+        const differs = st => [...mk.l].some(k => st.get(k) !== mk.o.get(k));
         this.plStmt(s.th, env);
-        if (s.el) { this.close('} else {'); this.ind++; this.plStmt(s.el, env); }
+        const e1 = env.origins || new Map(); const f1 = differs(e1);
+        if (f1) { this.emit(`${flag} = 1`); used = true; }
+        this.plRestore(env, mk);
+        let e2 = mk.o; let f2 = false;
+        if (s.el) {
+          this.close('} else {'); this.ind++; this.plStmt(s.el, env);
+          e2 = env.origins || new Map(); f2 = differs(e2) || f1;
+          if (f2) { this.emit(`${flag} = 2`); used = true; }
+          this.plRestore(env, mk);
+        }
+        // L’indicateur est déclaré en tête du script : une branche imbriquée le lit après la fin du bloc qui l’a posé
+        if (used) { const home = this.flagHome || { at, ind: ind0 }; this.lines.splice(home.at, 0, '  '.repeat(home.ind) + `${flag} = 0`); this.hoisted = (this.hoisted || 0) + 1; }
+        this.plMerge(env, mk, [{ st: e1, v: f1 ? 1 : 0 }, { st: e2, v: f2 ? 2 : 0 }], used ? flag : null);
         this.close();
         if (env.retPossible && !before) env.retPossible = true;
         return;
@@ -1375,7 +1450,22 @@ Object.assign(IngestGen.prototype, {
           if (s.trim > 0) guards.push(`p_${s.name} < length(${src}) - ${s.trim}`);
           return this.plLoop(s, env, src, true, guards.join(' && '));
         }
-        return this.plLoop(s, env, this.plA(l), false);
+        // Variable de boucle : référence vers l’élément (liste, values() d’une table, entrySet())
+        const L = s.list;
+        if (L.k === 'mcall' && L.name === 'values' && !L.args.length) {
+          const mlv = this.plLv(L.obj, env);
+          if (mlv) {
+            const ks = this.plTmp(`keys(${this.plO(this.plExpr(L.obj, env))})`, 'list');
+            return this.plLoop(s, env, this.plA(l), false, null, iv => ({ k: 'index', obj: mlv, idx: { k: 'vrl', c: `string!(get!(${ks.c}, [${iv}]))`, t: 'str' } }));
+          }
+        }
+        if (L.k === 'mcall' && L.name === 'entrySet' && !L.args.length) {
+          const mlv = this.plLv(L.obj, env);
+          if (mlv) { (env.entries = env.entries || new Map()).set(s.name, mlv); }
+          return this.plLoop(s, env, this.plA(l), false);
+        }
+        const llv = L.k === 'mcall' ? null : this.plLv(L, env);
+        return this.plLoop(s, env, this.plA(l), false, null, llv ? iv => ({ k: 'index', obj: llv, idx: { k: 'vrl', c: iv, t: 'int' } }) : null);
       }
       case 'throw': {
         // throw : le script s’arrête et le processeur échoue avec le message de l’exception
@@ -1419,6 +1509,13 @@ Object.assign(IngestGen.prototype, {
             throw new Error(`StringBuilder.${e.name} non pris en charge`);
           }
         }
+        // liste.set(i, v) : affectation de l’élément ; entry.setValue(v) : affectation dans la table parcourue
+        if (e.k === 'mcall' && e.name === 'set' && e.args.length === 2) return this.plAssign({ k: 'index', obj: e.obj, idx: e.args[0] }, this.plExpr(e.args[1], env), env);
+        if (e.k === 'mcall' && e.name === 'setValue' && e.args.length === 1 && e.obj.k === 'id' && env.entries && env.entries.has(e.obj.v)) {
+          const v = this.plTmp(this.plExpr(e.args[0], env).c);
+          this.emit(`p_${e.obj.v} = set!(p_${e.obj.v}, ["value"], ${v.c})`);
+          return this.plAssign(this.plEntryLv(e.obj.v, env), v, env);
+        }
         if (e.k === 'mcall' && e.name === 'forEach' && e.args.length === 1 && e.args[0].k === 'lambda') return this.plForEach(e, env);
         if (e.k === 'mcall' && e.name === 'removeIf' && e.args.length === 1 && e.args[0].k === 'lambda') return this.plRemoveIf(e, env);
         if (e.k === 'mcall' && ['add', 'put', 'remove', 'addAll', 'clear', 'putAll'].includes(e.name)) return this.plMutate(e, env);
@@ -1438,100 +1535,249 @@ Object.assign(IngestGen.prototype, {
     const src = two ? (this.plO(o)) : (this.plA(o));
     const prev = lam.params.map(n => env.locals.get(n));
     lam.params.forEach((n, i) => env.locals.set(n, two && i === 0 ? 'str' : 'any'));
-    this.open(`for_each(${src}) -> |${two ? `p_${lam.params[0]}, p_${lam.params[1]}` : `_i, p_${lam.params[0]}`}|`);
+    const iv = this.tmp('_i'); const olv = this.plLv(e.obj, env); const mk = this.plMark(env);
+    this.open(`for_each(${src}) -> |${two ? `p_${lam.params[0]}, p_${lam.params[1]}` : `${iv}, p_${lam.params[0]}`}|`);
+    if (olv) this.plBind(two ? lam.params[1] : lam.params[0], { k: 'index', obj: olv, idx: two ? { k: 'vrl', c: `p_${lam.params[0]}`, t: 'str' } : { k: 'vrl', c: iv, t: 'int' } }, env);
     this.plStmts(lam.body, env);
+    this.plMerge(env, mk, [{ st: this.plRestore(env, mk), v: 0 }, { st: mk.o, v: 0 }], null);
     this.close();
-    lam.params.forEach((n, i) => { if (prev[i] === undefined) env.locals.delete(n); else env.locals.set(n, prev[i]); });
+    lam.params.forEach((n, i) => { this.plUnbind(n, env); if (prev[i] === undefined) env.locals.delete(n); else env.locals.set(n, prev[i]); });
   },
   // liste.removeIf(x -> condition) : la liste est reconstruite sans les éléments qui vérifient la condition
+  // Condition d’une lambda : une expression, ou un bloc dont le return donne la valeur
+  plLambdaValue(lam, env) {
+    const b = lam.body;
+    const single = b.length === 1 ? (b[0].k === 'expr' ? b[0].e : b[0].k === 'ret' ? b[0].v : null) : null;
+    if (single) return this.plExpr(single, env);
+    if (/"k":"(break|continue|throw)"/.test(JSON.stringify(b))) throw new Error('lambda avec break, continue ou throw non prise en charge');
+    const sub = Object.assign({}, env, { res: this.tmp('res'), retVar: this.tmp('ret'), retPossible: false, loops: [], cond: undefined });
+    this.emit(`${sub.res} = null`); this.emit(`${sub.retVar} = false`);
+    this.plStmts(b, sub);
+    if (sub.usesParams) env.usesParams = true;
+    if (sub.unsafe) env.unsafe = true;
+    return { c: sub.res, t: 'any' };
+  },
   plRemoveIf(e, env) {
-    const lam = e.args[0]; const b = lam.body;
-    const cond = lam.params.length === 1 && b.length === 1 ? (b[0].k === 'expr' ? b[0].e : b[0].k === 'ret' ? b[0].v : null) : null;
-    if (!cond) throw new Error('removeIf : seule une lambda à une condition est prise en charge');
-    if (e.obj.k === 'mcall' && e.obj.name === 'entrySet' && !e.obj.args.length) {
-      // table.entrySet().removeIf(e -> …) : la table est reconstruite sans les entrées qui vérifient la condition
-      const m = this.plExpr(e.obj.obj, env); const n = lam.params[0]; const out = this.tmp('p');
+    const lam = e.args[0];
+    if (lam.params.length !== 1) throw new Error('removeIf : lambda à un paramètre attendue');
+    const cond = { k: 'lambdaValue', lam };
+    const n = lam.params[0]; const prev = env.locals.get(n); env.locals.set(n, 'any');
+    const restore = () => { this.plUnbind(n, env); if (env.entries) env.entries.delete(n); if (prev === undefined) env.locals.delete(n); else env.locals.set(n, prev); };
+    if (e.obj.k === 'mcall' && (e.obj.name === 'entrySet' || e.obj.name === 'values') && !e.obj.args.length) {
+      // table.entrySet().removeIf(e -> …), table.values().removeIf(v -> …) : la table est reconstruite sans les entrées
+      // qui vérifient la condition ; une valeur que la condition modifie (fonction qui la nettoie) est gardée modifiée
+      const ent = e.obj.name === 'entrySet';
+      const m = this.plExpr(e.obj.obj, env); const out = this.tmp('p');
       this.emit(`${out} = {}`);
-      const prev = env.locals.get(n); env.locals.set(n, 'any');
       this.open(`for_each(${this.plO(m)}) -> |_k, _v|`);
-      this.emit(`p_${n} = { "key": _k, "value": _v }`);
+      if (ent) { this.emit(`p_${n} = { "key": _k, "value": _v }`); (env.entries = env.entries || new Map()).set(n, { k: 'member', obj: { k: 'id', v: n }, name: 'value', self: true }); }
+      else this.emit(`p_${n} = _v`);
       const c = this.plExpr(cond, env);
-      this.emit(`if !${this.plBool(c)} { ${out} = set!(${out}, [_k], _v) }`);
+      this.emit(`if !${this.plBool(c)} { ${out} = set!(${out}, [_k], ${ent ? `p_${n}.value` : `p_${n}`}) }`);
       this.close();
-      if (prev === undefined) env.locals.delete(n); else env.locals.set(n, prev);
-      this.plAssign(e.obj.obj, { c: out, t: 'map' }, env);
-      return;
+      restore();
+      return this.plAssign(e.obj.obj, { c: out, t: 'map' }, env, { mutation: true });
     }
-    const cur = this.plExpr(e.obj, env); const out = this.tmp('p'); const n = lam.params[0];
+    const cur = this.plExpr(e.obj, env); const out = this.tmp('p');
     this.emit(`${out} = []`);
-    const prev = env.locals.get(n); env.locals.set(n, 'any');
     this.open(`for_each(${this.plA(cur)}) -> |_i, p_${n}|`);
     const c = this.plExpr(cond, env);
     this.emit(`if !${this.plBool(c)} { ${out} = push(${out}, p_${n}) }`);
     this.close();
-    if (prev === undefined) env.locals.delete(n); else env.locals.set(n, prev);
-    this.plAssign(e.obj, { c: out, t: 'list' }, env);
+    restore();
+    this.plAssign(e.obj, { c: out, t: 'list' }, env, { mutation: true });
   },
-  plAssign(target, v, env) {
+  // opt.mutation : le contenu de la cible change (removeIf, tri), c’est toujours le même objet ; opt.wb : recopie d’une
+  // variable vers son origine (opt.wb est le nom de la variable recopiée)
+  plAssign(target, v, env, opt = {}) {
     const path = this.plPath(target);
-    if (path) { if (path.unsafe) env.unsafe = true; return this.set(this.plRef(path.segs), v.c); }
+    if (path) {
+      if (path.unsafe) env.unsafe = true;
+      this.set(this.plRef(path.segs), v.c);
+      this.plEvent({ root: 'ctx', segs: path.segs }, opt.wb || opt.mutation ? 'wb' : 'replace', env, opt.wb);
+      return;
+    }
     if (target.k === 'id') {
       if (target.v === 'ctx') throw new Error('ctx ne peut pas être remplacé');
       // Un type n’est gardé que si chaque valeur affectée le respecte : sinon la variable devient inconnue (« any »)
       if (!env.locals.has(target.v)) env.locals.set(target.v, v.t === 'null' ? 'any' : v.t);
       else if (env.locals.get(target.v) !== v.t) env.locals.set(target.v, 'any');
-      this.emit(`p_${target.v} = ${v.c}`); return;
+      this.emit(`p_${target.v} = ${v.c}`);
+      if (opt.mutation || opt.wb) return this.plLocalMutated(target.v, env, [], opt.wb, true);
+      // x = autre chose : x ne désigne plus le même objet ; ce qui désignait une partie de l’ancien objet s’en détache
+      this.plUnbind(target.v, env);
+      this.plEvent({ root: target.v, segs: [] }, 'replace', env, null);
+      return;
     }
+    let y = target; const parts = []; const desc = [];
+    while (y.k === 'member' || y.k === 'index') {
+      if (y.k === 'member') { parts.unshift(vq(y.name)); desc.unshift(y.name); }
+      else if (y.idx.k === 'num' && y.idx.int) { parts.unshift(String(Number(y.idx.v))); desc.unshift(Number(y.idx.v)); }
+      else if (y.idx.k === 'str') { parts.unshift(vq(y.idx.v)); desc.unshift(y.idx.v); }
+      else { const iv = this.plExpr(y.idx, env); parts.unshift(iv.t === 'int' ? iv.c : this.plStr(iv)); desc.unshift('*'); }
+      y = y.obj;
+    }
+    if (y.k === 'cast') return this.plAssign(rebase(target, y.e), v, env, opt);
     // ctx.a[clé] = v avec une clé calculée : chemin construit à l’exécution
-    {
-      let y = target; const parts = [];
-      while (y.k === 'member' || y.k === 'index') { parts.unshift(y.k === 'member' ? vq(y.name) : y.idx.k === 'num' && y.idx.int ? String(Number(y.idx.v)) : this.plStr(this.plExpr(y.idx, env))); y = y.obj; }
-      if (y.k === 'id' && y.v === 'ctx' && parts.length) {
-        if (INGEST_META.some(m => parts[0] === vq(m))) throw new Error('affectation à une métadonnée par une clé calculée non prise en charge');
-        env.unsafe = true;
-        this.emit(`. = set!(., [${parts.join(', ')}], ${v.c})`); return;
+    if (y.k === 'id' && y.v === 'ctx' && parts.length) {
+      if (INGEST_META.some(m => parts[0] === vq(m))) throw new Error('affectation à une métadonnée par une clé calculée non prise en charge');
+      env.unsafe = true;
+      this.emit(`. = set!(., [${parts.join(', ')}], ${v.c})`);
+      this.plEvent({ root: 'ctx', segs: desc }, opt.wb || opt.mutation ? 'wb' : 'replace', env, opt.wb);
+      return;
+    }
+    // Variable locale de type table ou liste : m.k = v, m['k'] = v, l[0] = v, m[clé] = v
+    if (y.k === 'id' && env.locals.has(y.v) && parts.length) {
+      this.emit(`p_${y.v} = set!(p_${y.v}, [${parts.join(', ')}], ${v.c})`);
+      return this.plLocalMutated(y.v, env, desc, opt.wb, opt.mutation);
+    }
+    throw new Error('affectation non prise en charge');
+  },
+
+  /* ---------- Références ----------
+   * Une variable Painless désigne un objet ; la traduction en tient une copie. Chaque variable qui désigne une partie
+   * d’un autre objet (ctx.a, x.get('b'), l[i], un argument de fonction, l’élément d’une boucle) garde son origine :
+   * modifier la variable recopie sa valeur vers l’origine, de proche en proche jusqu’à ctx ; modifier l’origine relit
+   * les variables qui en désignent une partie ; réaffecter la variable, ou remplacer son origine, la détache. */
+  plLv(e, env) {
+    switch (e.k) {
+      case 'id': return e.v === 'ctx' || (env.locals.has(e.v) && env.locals.get(e.v) !== 're') ? e : null;
+      case 'member': { const b = this.plLv(e.obj, env); return b ? { k: 'member', obj: b, name: e.name, safe: e.safe } : null; }
+      case 'index': { const b = this.plLv(e.obj, env); return b ? { k: 'index', obj: b, idx: this.plFreeze(e.idx) } : null; }
+      case 'cast': return this.plLv(e.e, env);
+      case 'mcall':
+        if (e.name === 'get' && e.args.length === 1) { const b = this.plLv(e.obj, env); return b ? { k: 'index', obj: b, idx: this.plFreeze(e.args[0]) } : null; }
+        if (e.name === 'getValue' && !e.args.length && e.obj.k === 'id' && env.entries && env.entries.has(e.obj.v)) return this.plEntryLv(e.obj.v, env);
+        return null;
+    }
+    return null;
+  },
+  // Valeur d’une entrée de entrySet() : la case de la table parcourue (dans removeIf, la valeur de l’entrée elle-même)
+  plEntryLv(name, env) {
+    const m = env.entries.get(name);
+    if (m.self) return m;
+    return { k: 'index', obj: m, idx: { k: 'vrl', c: `string!(p_${name}.key)`, t: 'str' } };
+  },
+  // Une clé calculée est réévaluée au moment de la recopie (une variable VRL créée dans un bloc n’existe plus à sa sortie)
+  plFreeze(idx) { return idx; },
+  // Les origines créées dans un bloc (branche de if, corps de boucle, lambda) disparaissent avec lui, comme ses variables
+  // Une variable rattachée autrement selon la branche suivie (ou selon que la boucle a tourné) devient « ambiguë » :
+  // la modifier ensuite est refusé plutôt que recopié au mauvais endroit
+  plMark(env) { return { o: new Map(env.origins || []), e: new Map(env.entries || []), l: new Set(env.locals.keys()) }; },
+  plRestore(env, m) { const end = env.origins || new Map(); env.origins = new Map(m.o); env.entries = new Map(m.e); return end; },
+  plMerge(env, m, ends, flag) {
+    for (const k of m.l) {
+      const before = m.o.get(k);
+      if (ends.every(x => x.st.get(k) === before)) continue;
+      if (!flag || ends.some(x => x.st.get(k) && x.st.get(k).ambiguous)) { env.origins.set(k, { ambiguous: true }); continue; }
+      const seen = new Set(); const leaves = [];
+      for (const x of ends) {
+        if (seen.has(x.v)) continue; seen.add(x.v);
+        const o = x.st.get(k); if (!o) continue;
+        for (const l of o.leaves) leaves.push({ conds: l.conds.concat([[flag, x.v]]), lv: l.lv, env: l.env });
+      }
+      if (leaves.length) env.origins.set(k, { leaves }); else env.origins.delete(k);
+    }
+  },
+  // Code émis sous les conditions d’une origine (indicateurs de branche)
+  plUnder(conds, fn) {
+    if (!conds.length) return fn();
+    this.open(`if ${conds.map(([f, v]) => `${f} == ${v}`).join(' && ')}`); fn(); this.close();
+  },
+  plBind(name, lv, env) {
+    if (lv.k === 'id' && lv.v === name) return;
+    (env.origins = env.origins || new Map()).set(name, { leaves: [{ conds: [], lv, env }] });
+  },
+  plUnbind(name, env) { if (env.origins) env.origins.delete(name); },
+  plOrigin(name, env) { for (let e = env; e; e = e.parent) if (e.origins && e.origins.has(name)) return e.origins.get(name); return null; },
+  // Racine (ctx ou une variable) et cases d’une origine ; « * » pour une clé calculée
+  plDesc(lv) {
+    const segs = []; let x = lv;
+    while (x.k === 'member' || x.k === 'index') {
+      segs.unshift(x.k === 'member' ? x.name : x.idx.k === 'str' ? x.idx.v : x.idx.k === 'num' && x.idx.int ? Number(x.idx.v) : '*');
+      x = x.obj;
+    }
+    return { root: x.v === 'ctx' ? 'ctx' : x.v, segs };
+  },
+  // La case (racine, segs) vient de changer. 'replace' (une autre valeur) : ce qui désignait l’ancienne valeur ou une de
+  // ses parties s’en détache, ce qui la contient est relu. 'wb' (même objet, contenu changé) : tout ce qui la touche est relu.
+  plEvent(desc, kind, env, except) {
+    const rel = (Q, P) => {
+      for (let i = 0; i < Math.min(Q.length, P.length); i++) { if (Q[i] === '*' || P[i] === '*') return 'maybe'; if (Q[i] !== P[i]) return 'none'; }
+      return Q.length === P.length ? 'eq' : Q.length > P.length ? 'under' : 'above';
+    };
+    for (let e = env; e; e = e.parent) {
+      if (!e.origins) continue;
+      for (const [name, o] of [...e.origins]) {
+        if (name === except || o.ambiguous) continue;
+        const keep = [];
+        for (const leaf of o.leaves) {
+          const Q = this.plDesc(leaf.lv);
+          const r = Q.root !== desc.root ? 'none' : rel(Q.segs, desc.segs);
+          if (r === 'none') { keep.push(leaf); continue; }
+          if (kind === 'replace' && (r === 'eq' || r === 'under')) continue;
+          keep.push(leaf);
+          if (kind === 'replace' && r === 'maybe') continue;
+          if (!e.locals.has(name)) continue;
+          this.plUnder(leaf.conds, () => this.emit(`p_${name} = ${this.plExpr(leaf.lv, leaf.env).c}`));
+        }
+        if (keep.length !== o.leaves.length) { if (keep.length) e.origins.set(name, { leaves: keep }); else e.origins.delete(name); }
       }
     }
-    // Variable locale de type table ou liste : m.k = v, m['k'] = v, l[0] = v
-    let x = target; const segs = [];
-    while (x.k === 'member' || x.k === 'index') { segs.unshift(x.k === 'member' ? vq(x.name) : this.plExpr(x.idx, env).c); x = x.obj; }
-    if (x.k === 'id' && env.noMutate && env.noMutate.has(x.v)) throw new Error('fonction qui modifie un de ses arguments (passage par référence non pris en charge)');
-    if (x.k === 'id' && env.locals.has(x.v)) { this.emit(`p_${x.v} = set!(p_${x.v}, [${segs.join(', ')}], ${v.c})`); return; }
-    throw new Error('affectation non prise en charge');
+  },
+  // La variable name (ou sa partie segs) vient d’être modifiée : recopie vers son origine
+  plLocalMutated(name, env, segs, except, whole) {
+    this.plEvent({ root: name, segs }, except || whole ? 'wb' : 'replace', env, except);
+    const o = this.plOrigin(name, env);
+    if (!o) return;
+    if (o.ambiguous) throw new Error(`la variable « ${name.replace(/_f\d+$/, '')} » désigne un objet différent selon le chemin suivi : la modifier n’est pas pris en charge`);
+    this.wbDepth = (this.wbDepth || 0) + 1;
+    if (this.wbDepth > 64) throw new Error('chaîne de références trop longue');
+    try {
+      for (const leaf of o.leaves) this.plUnder(leaf.conds, () => this.plAssign(leaf.lv, { c: `p_${name}`, t: env.locals.get(name) || 'any' }, leaf.env, { wb: name }));
+    } finally { this.wbDepth--; }
   },
   // Appel d’une fonction déclarée dans le script : son corps est recopié sur place, variables renommées
   plInline(e, env) {
     const fn = env.fns && env.fns.get(e.name);
     if (!fn) throw new Error(`fonction « ${e.name} » non prise en charge`);
-    // Appel d’une fonction récursive depuis le script : on garde le plus grand nombre de niveaux dont la copie reste de taille raisonnable
-    if (!(env.stack || []).includes(e.name) && fn.rec === undefined) {
-      let sites = 0;
-      const walk = x => { if (Array.isArray(x)) x.forEach(walk); else if (x && typeof x === 'object') { if (x.k === 'call' && x.name === e.name) sites++; Object.values(x).forEach(walk); } };
-      walk(fn.body); fn.rec = sites;
-    }
-    if (fn.rec && !(env.stack || []).includes(e.name)) {
+    plRecursion(env.fns);
+    // Entrée dans un groupe de fonctions récursives (une fonction qui s’appelle, ou plusieurs qui s’appellent entre elles) :
+    // on garde le plus grand nombre de niveaux dont la copie reste de taille raisonnable
+    const g = fn.group;
+    if (g && !(env.stack || []).some(n => env.fns.get(n).group === g)) {
       if (!env.canFail) throw new Error(`fonction « ${e.name} » récursive : non prise en charge hors d’un script de processeur`);
-      const start = this.lines.length; const ind = this.ind; const t0 = this.t.k;
-      for (let d = recursionLimit(fn, e.name); d >= 1; d--) {
-        fn.limit = d;
-        const r = this.plInline1(e, env);
-        if (this.lines.length - start <= INLINE_LINES || d === 1) { if (this.lines.length - start > INLINE_LINES) throw new Error(`fonction « ${e.name} » récursive : copie trop volumineuse`); return r; }
-        this.lines.length = start; this.ind = ind;
+      const start0 = this.lines.length; const ind = this.ind; const outer = this.inlineBudget; const h0 = this.hoisted || 0;
+      // Les indicateurs déclarés en tête du script décalent le début de la copie
+      const startNow = () => start0 + (this.hoisted || 0) - h0;
+      for (let d = g.sites <= 1 ? 12 : 7; d >= 1; d--) {
+        g.limit = d;
+        const start = startNow();
+        this.inlineBudget = { start, max: INLINE_LINES };
+        try {
+          const r = this.plInline1(e, env);
+          if (this.lines.length - startNow() <= INLINE_LINES) { this.inlineBudget = outer; return r; }
+        } catch (err) { if (!(err instanceof InlineTooBig)) { this.inlineBudget = outer; throw err; } }
+        this.lines.length = startNow(); this.ind = ind;
       }
+      this.inlineBudget = outer;
+      throw new Error(`fonction « ${e.name} » récursive : copie trop volumineuse`);
     }
     return this.plInline1(e, env);
   },
   plInline1(e, env) {
     const fn = env.fns.get(e.name);
-    const inStack = (env.stack || []).filter(x => x === e.name).length;
+    if (this.inlineBudget && this.lines.length - this.inlineBudget.start > this.inlineBudget.max + 200) throw new InlineTooBig();
+    // Profondeur : nombre de fonctions du même groupe récursif déjà en cours de recopie
+    const inStack = fn.group ? (env.stack || []).filter(x => env.fns.get(x).group === fn.group).length : 0;
     let terminal = !!env.terminal; let limitGuard = null;
     if (inStack > 0) {
       // Appel récursif : la fonction est recopiée sur un nombre borné de niveaux ; au-delà, un conteneur (table ou liste) fait
       // échouer le processeur, un texte ou un nombre passe par une dernière copie où tout nouvel appel récursif échoue.
       if (!env.canFail) throw new Error(`fonction « ${e.name} » récursive : non prise en charge hors d’un script de processeur`);
-      const msg = `fonction ${e.name} : document plus profond que les ${fn.limit} niveaux traduits`;
+      const msg = `fonction ${e.name} : document plus profond que les ${fn.group.limit} niveaux traduits`;
       if (terminal) { this.emit(`fail = ${vq(msg)}`); return { c: 'null', t: 'null' }; }
-      if (inStack >= fn.limit) { terminal = true; limitGuard = msg; }
+      if (inStack >= fn.group.limit) { terminal = true; limitGuard = msg; }
       this.approx('Painless : récursion bornée', `Une fonction récursive du script est recopiée sur un nombre borné de niveaux d’imbrication (une table ou une liste dans une autre). Au-delà, le processeur échoue au lieu de traiter le document : une donnée plus profonde est refusée, jamais traitée de travers.`);
     }
     if (e.args.length !== fn.params.length) throw new Error(`fonction « ${e.name} » appelée avec ${e.args.length} argument(s) pour ${fn.params.length} attendu(s)`);
@@ -1543,7 +1789,7 @@ Object.assign(IngestGen.prototype, {
       ? Object.fromEntries(Object.entries(x).map(([k, v]) => [k, (k === 'v' && x.k === 'id' && names.has(v)) || (k === 'name' && ['let', 'for', 'forIdx'].includes(x.k) && names.has(v)) ? `${v}_f${n}` : ren(v)]))
       : x;
     const body = ren(fn.body);
-    const env2 = { locals: new Map(), retVar: this.tmp('ret'), res: this.tmp('res'), fns: env.fns, stack: (env.stack || []).concat(e.name), loops: [], canFail: env.canFail, terminal, noMutate: new Set(fn.params.map(x => `${x}_f${n}`)) };
+    const env2 = { locals: new Map(), retVar: this.tmp('ret'), res: this.tmp('res'), fns: env.fns, stack: (env.stack || []).concat(e.name), loops: [], canFail: env.canFail, terminal, parent: env, sbs: env.sbs, sets: env.sets };
     this.emit(`${env2.res} = null`); this.emit(`${env2.retVar} = false`);
     if (limitGuard) {
       const subject = this.plTmp(args[0] ? args[0].c : 'null');
@@ -1551,7 +1797,11 @@ Object.assign(IngestGen.prototype, {
       this.emit(`fail = ${vq(limitGuard)}`);
       this.close('} else {'); this.ind++;
     }
-    fn.params.forEach((x, i) => { env2.locals.set(`${x}_f${n}`, args[i].t === 'null' ? 'any' : args[i].t); this.emit(`p_${x}_f${n} = ${args[i].c}`); });
+    fn.params.forEach((x, i) => {
+      env2.locals.set(`${x}_f${n}`, args[i].t === 'null' ? 'any' : args[i].t); this.emit(`p_${x}_f${n} = ${args[i].c}`);
+      // Un objet passé en argument est le même objet dans la fonction : ses modifications sont recopiées vers l’argument
+      if (!PL_SCALAR.has(args[i].t)) { const lv = this.plLv(e.args[i], env); if (lv) env2.origins = (env2.origins || new Map()).set(`${x}_f${n}`, { leaves: [{ conds: [], lv, env }] }); }
+    });
     this.plStmts(body, env2);
     if (limitGuard) this.close();
     if (env2.usesParams) env.usesParams = true;
@@ -1559,34 +1809,67 @@ Object.assign(IngestGen.prototype, {
     return { c: env2.res, t: 'any' };
   },
   plMutate(e, env) {
-    if (e.obj.k === 'id' && env.noMutate && env.noMutate.has(e.obj.v)) throw new Error('fonction qui modifie un de ses arguments (passage par référence non pris en charge)');
     const a = e.args.map(x => this.plExpr(x, env));
-    const path = this.plPath(e.obj);
-    const isRoot = e.obj.k === 'id' && e.obj.v === 'ctx';
-    const local = e.obj.k === 'id' && env.locals.has(e.obj.v) ? `p_${e.obj.v}` : null;
-    if (!path && !isRoot && !local) throw new Error(`${e.name} sur une expression qui n’est ni un champ ni une variable`);
+    let obj = e.obj; while (obj.k === 'cast') obj = obj.e;
+    const path = this.plPath(obj);
+    const isRoot = obj.k === 'id' && obj.v === 'ctx';
+    const local = obj.k === 'id' && env.locals.has(obj.v) ? `p_${obj.v}` : null;
+    const key = e.args[0] && e.args[0].k === 'str' ? e.args[0].v : e.args[0] && e.args[0].k === 'num' && e.args[0].int ? Number(e.args[0].v) : '*';
+    if (!path && !isRoot && !local) {
+      // Partie d’une variable (x.liste.add(v), m[k].put(…)) ou chemin de ctx à clé calculée : la valeur est lue, modifiée,
+      // puis remise à sa place
+      const lv = this.plLv(obj, env);
+      if (!lv) throw new Error(`${e.name} sur une expression qui n’est ni un champ ni une variable`);
+      const cur = this.plTmp(this.plExpr(lv, env).c);
+      const nv = this.plMutValue(e.name, cur, a);
+      return this.plAssign(lv, nv, env, { mutation: true });
+    }
     const segs = path ? path.segs : [];
     const target = local || (isRoot ? '.' : this.vpath(segs));
+    // Une clé calculée sur un chemin de ctx : même traitement, par la valeur
+    if (path && !local && ['put', 'remove'].includes(e.name) && key === '*') {
+      const cur = this.plTmp(this.get(this.plRef(segs)));
+      return this.plAssign(obj, this.plMutValue(e.name, cur, a), env, { mutation: true });
+    }
+    const done = (whole) => {
+      if (local) return this.plLocalMutated(obj.v, env, whole ? [] : [key], undefined, whole);
+      this.plEvent({ root: 'ctx', segs: whole ? segs : segs.concat(key) }, whole ? 'wb' : 'replace', env, null);
+    };
     switch (e.name) {
-      case 'add': { if (isRoot) break; const cur = this.plTmp(local || this.get(this.plRef(segs))); const arr = this.tmp('p'); this.emit(`${arr} = if is_array(${cur.c}) { array!(${cur.c}) } else { [] }`); this.emit(`${target} = ${local && env.sets && env.sets.has(e.obj.v) ? `if includes(${arr}, ${a[0].c}) { ${arr} } else { push(${arr}, ${a[0].c}) }` : `push(${arr}, ${a[0].c})`}`); return; }
-      case 'addAll': { if (isRoot) break; const cur = this.plTmp(local || this.get(this.plRef(segs))); const arr = this.tmp('p'); const add = this.tmp('p'); this.emit(`${arr} = if is_array(${cur.c}) { array!(${cur.c}) } else { [] }`); this.emit(`${add} = if is_array(${a[0].c}) { array!(${a[0].c}) } else { [] }`); this.emit(`${target} = ${local && env.sets && env.sets.has(e.obj.v) ? `unique(append(${arr}, ${add}))` : `append(${arr}, ${add})`}`); return; }
-      case 'clear': if (isRoot) break; this.emit(`${target} = if is_array(${target}) { [] } else { {} }`); return;
+      case 'add': { if (isRoot) break; const cur = this.plTmp(local || this.get(this.plRef(segs))); const arr = this.tmp('p'); this.emit(`${arr} = if is_array(${cur.c}) { array!(${cur.c}) } else { [] }`); this.emit(`${target} = ${local && env.sets && env.sets.has(obj.v) ? `if includes(${arr}, ${a[0].c}) { ${arr} } else { push(${arr}, ${a[0].c}) }` : `push(${arr}, ${a[0].c})`}`); return done(true); }
+      case 'addAll': { if (isRoot) break; const cur = this.plTmp(local || this.get(this.plRef(segs))); const arr = this.tmp('p'); const add = this.tmp('p'); this.emit(`${arr} = if is_array(${cur.c}) { array!(${cur.c}) } else { [] }`); this.emit(`${add} = if is_array(${a[0].c}) { array!(${a[0].c}) } else { [] }`); this.emit(`${target} = ${local && env.sets && env.sets.has(obj.v) ? `unique(append(${arr}, ${add}))` : `append(${arr}, ${add})`}`); return done(true); }
+      case 'clear': if (isRoot) break; this.emit(`${target} = if is_array(${target}) { [] } else { {} }`); return done(true);
       case 'put': {
-        if (local) { this.emit(`${local} = set!(${local}, [${this.plStr(a[0])}], ${a[1].c})`); return; }
-        if (e.args[0].k !== 'str') throw new Error('put avec une clé calculée non pris en charge');
-        return this.set(this.plRef(segs.concat(e.args[0].v)), a[1].c);
+        if (local) { this.emit(`${local} = set!(${local}, [${this.plStr(a[0])}], ${a[1].c})`); return done(false); }
+        this.set(this.plRef(segs.concat(e.args[0].v)), a[1].c); return done(false);
       }
-      case 'putAll': if (local) { this.emit(`${local} = merge(${local}, ${this.plO(a[0])})`); return; } this.emit(`${target} = merge(object(${this.get(this.plRef(segs))}) ?? {}, object(${a[0].c}) ?? {})`); return;
+      case 'putAll': if (local) { this.emit(`${local} = merge(${local}, ${this.plO(a[0])})`); return done(true); } this.emit(`${target} = merge(object(${this.get(this.plRef(segs))}) ?? {}, object(${a[0].c}) ?? {})`); return done(true);
       case 'remove': {
-        if (local) { this.emit(`${local} = remove!(${local}, [${a[0].c}])`); return; }
-        if (e.args[0].k !== 'str') throw new Error('remove avec une clé calculée non pris en charge');
-        this.emit(`del(${this.vpath(segs.concat(e.args[0].v))})`); return;
+        if (local) { this.emit(`${local} = remove!(${local}, [${a[0].c}])`); return done(false); }
+        this.emit(`del(${this.vpath(segs.concat(e.args[0].v))})`); return done(false);
       }
     }
     throw new Error(`${e.name} sur ctx non pris en charge`);
   },
+  // Nouvelle valeur d’une table ou d’une liste après add, addAll, clear, put, putAll ou remove
+  plMutValue(name, cur, a) {
+    const arr = () => this.plA(cur); const obj = () => this.plO(cur);
+    switch (name) {
+      case 'add': return this.plTmp(`push(${arr()}, ${a[0].c})`, 'list');
+      case 'addAll': return this.plTmp(`append(${arr()}, ${this.plA(a[0])})`, 'list');
+      case 'clear': return this.plTmp(`if is_array(${cur.c}) { [] } else { {} }`);
+      case 'put': return this.plTmp(`set!(${obj()}, [${this.plStr(a[0])}], ${a[1].c})`, 'map');
+      case 'putAll': return this.plTmp(`merge(${obj()}, ${this.plO(a[0])})`, 'map');
+      case 'remove': return this.plTmp(`remove!(${cur.c}, [${a[0].t === 'int' ? a[0].c : this.plStr(a[0])}])`);
+    }
+    throw new Error(`${name} non pris en charge`);
+  },
   // Condition « if » d’un processeur : expression ou script, rendue dans une variable booléenne
   plCondition(src) {
+    const home = this.flagHome; this.flagHome = { at: this.lines.length, ind: this.ind };
+    try { return this.plCondition1(src); } finally { this.flagHome = home; }
+  },
+  plCondition1(src) {
     const prog = ingPainless(src);
     const env = { locals: new Map(), cond: this.tmp('cond'), retVar: this.tmp('ret'), fns: prog.fns };
     const single = prog.length === 1 && prog[0].k === 'expr' ? prog[0].e : prog.length === 1 && prog[0].k === 'ret' && prog[0].v ? prog[0].v : null;
@@ -2402,15 +2685,17 @@ Object.assign(IngestGen.prototype, {
     if (idiom && this.pruneIdiom(idiom, label)) { this.t.stats.ok++; return; }
     const env = { locals: new Map(), retVar: this.tmp('ret'), canFail: true };
     const start = this.lines.length; const ind = this.ind;
+    const home = this.flagHome; this.flagHome = { at: start, ind };
     try {
       const prog = ingPainless(o.source); env.fns = prog.fns;
       if (isObj(o.params)) this.emit(`p_params = ${this.valueSource(o.params)}`);
       this.emit(`${env.retVar} = false`);
       this.plStmts(prog, env);
     } catch (e) {
-      this.lines.length = start; this.ind = ind;
+      this.lines.length = start; this.ind = ind; this.flagHome = home;
       return this.ko(label, `script Painless : ${e.message}`);
     }
+    this.flagHome = home;
     // params lus sans être déclarés : une table vide, comme dans Painless
     if (env.usesParams && !isObj(o.params)) this.lines.splice(start, 0, '  '.repeat(ind) + 'p_params = {}');
     this.condNotes(env);
