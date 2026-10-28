@@ -12,7 +12,7 @@
  * compare, signale et se tait comme elle le dit. Linux seulement (les faux binaires sont des scripts exécutables).
  *   node tests/verify/run.mjs
  */
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, chmodSync, existsSync, readdirSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, chmodSync, existsSync, readdirSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -353,12 +353,22 @@ function fakeChAnswer(sql) {
   if (/^SELECT\s+\*\s+FROM/.test(sql)) return rows.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts)).slice(0, limit).map(d => ({ _id: d._id, timestamp: d.ts, 'service.name': d.svc }));
   throw new Error(`faux ClickHouse : requête non prévue\n${sql}`);
 }
+const cluster = { mode: 'query', watches: [] };
 const readBody = req => new Promise(r => { let b = ''; req.setEncoding('utf8'); req.on('data', d => { b += d; }); req.on('end', () => r(b)); });
 const esServer = http.createServer(async (req, res) => {
   const body = await readBody(req);
   esLog.push({ method: req.method, url: req.url, headers: req.headers, body });
   res.setHeader('content-type', 'application/json');
   if (req.method === 'GET' && req.url === '/') { res.end(J({ name: 'es-1', cluster_name: 'es-prod-cluster-SECRET2', version: { number: '8.15.1' } })); return; }
+  // Watches du cluster (passerelle watcher pull) : pagination de _query/watches, ou index .watches avant 7.11
+  if (req.method === 'POST' && req.url === '/_watcher/_query/watches') {
+    if (cluster.mode !== 'query') { res.statusCode = cluster.mode === 'forbidden' ? 403 : 400; res.end(J({ error: { type: cluster.mode === 'forbidden' ? 'security_exception' : 'illegal_argument_exception', reason: 'refus du faux moteur' }, status: res.statusCode })); return; }
+    const q = JSON.parse(body || '{}'); const from = q.from || 0; const size = q.size === undefined ? 10 : q.size;
+    res.end(J({ count: cluster.watches.length, watches: cluster.watches.slice(from, from + size) })); return;
+  }
+  if (req.method === 'POST' && /^\/\.watches\/_search\?/.test(req.url) && cluster.mode === 'old') {
+    res.end(J({ hits: { total: cluster.watches.length, hits: cluster.watches.map(w => ({ _id: w._id, _source: Object.assign({ status: w.status }, w.watch) })) } })); return;
+  }
   if (req.method === 'POST' && /^\/logs-app\/_search\?/.test(req.url)) {
     try { res.end(J(fakeEsSearch(JSON.parse(body)))); } catch (e) { res.statusCode = 400; res.end(J({ error: { root_cause: [{ type: 'faux_moteur', reason: e.message }] }, status: 400 })); }
     return;
@@ -729,6 +739,32 @@ section('G. Les rapports');
   check(csv.startsWith('\ufeff') && csv.includes('\r\n') && csv.includes('a|b <script>alert(1)</script>.json;"x;y"') && csv.includes('"raison; ""citée"""') && csv.split('\r\n')[0] === '\ufefftitre;source;verdict_traduction;etat;documents;duree_ms;raison;ecarts', 'CSV : BOM, séparateur point-virgule, champs entre guillemets doublés', csv.split('\r\n').slice(0, 3).join(' ⏎ '));
   const hidden = E.eqReportMarkdown(Object.assign({}, rep, { values_hidden: true }));
   check(hidden.includes('masquées') && !hidden.includes('Relancez avec --no-values'), 'Markdown : la mention « valeurs masquées » remplace l’avertissement');
+}
+
+/* ---------- passerelle watcher pull : les watches lues sur le cluster ---------- */
+{
+  const ex = JSON.parse(readFileSync(join(ROOT, 'examples/watcher/watches.json'), 'utf8')).watches;
+  // 150 watches : deux pages de _query/watches
+  cluster.watches = ex.concat(Array.from({ length: 150 - ex.length }, (_, i) => ({ _id: `copie-${i}`, watch: ex[0].watch, status: ex[0].status })));
+  const OUT = join(TMP, 'watches');
+  esLog.length = 0;
+  let r = await cli(['watcher', 'pull', '--out', OUT], { ES_API_KEY: 'cle-es-31' });
+  const calls = esLog.map(c => `${c.method} ${c.url.split('?')[0]} ${c.body}`);
+  const exported = existsSync(join(OUT, 'export-watches.json')) ? readFileSync(join(OUT, 'export-watches.json'), 'utf8') : '';
+  check(r.code === 0 && /150 watch\(es\) lue\(s\)/.test(r.stderr) && JSON.parse(exported).watches.length === 150, 'watcher pull : toutes les watches lues, page par page', r.stderr);
+  check(calls.length === 3 && calls[0] === 'GET / ' && /^POST \/_watcher\/_query\/watches \{"from":0,"size":100\}$/.test(calls[1]) && /"from":100/.test(calls[2]) && esLog.every(c => c.headers.authorization === 'ApiKey cle-es-31'), 'watcher pull : GET / puis _query/watches seulement, avec la clé d’API', calls.join(' | '));
+  check(['md', 'html', 'csv', 'json'].every(f => existsSync(join(OUT, `rapport.${f}`))) && readdirSync(join(OUT, 'sql')).length >= 7 && /cluster es-prod-cluster-SECRET2/.test(readFileSync(join(OUT, 'rapport.md'), 'utf8')), 'watcher pull --out : rapports, un .sql par watch, provenance');
+  check(!/es_redacted/.test(exported) && /passerelle_masque/.test(exported) && (statSync(join(OUT, 'export-watches.json')).mode & 0o077) === 0, 'watcher pull : export relu hors ligne, secrets masqués, lisible par son seul propriétaire');
+  r = await cli(['watcher', join(OUT, 'export-watches.json'), '--format', 'csv']);
+  check(r.code === 0 && /^\ufeffIdentifiant;/.test(r.stdout) && r.stdout.split('\r\n').length > 150, 'watcher : l’export du cluster se relit comme un fichier', r.stderr);
+  cluster.mode = 'old'; cluster.watches = ex.slice(0, 3); esLog.length = 0;
+  r = await cli(['watcher', 'pull', '--format', 'json']);
+  check(r.code === 0 && json(r) && json(r).entries.length === 3 && esLog.some(c => /^\/\.watches\/_search/.test(c.url)), 'watcher pull, avant 7.11 : lecture de l’index .watches', r.stderr);
+  cluster.mode = 'forbidden';
+  r = await cli(['watcher', 'pull']);
+  check(r.code === 1 && /monitor_watcher/.test(r.stderr), 'watcher pull sans le privilège : refusé, avec le privilège à demander', r.stderr);
+  r = await cli(['watcher', 'pull', 'examples/watcher/watches.json']);
+  check(r.code === 1 && /lit le cluster, pas des fichiers/.test(r.stderr), 'watcher pull avec des fichiers : refusé', r.stderr);
 }
 
 /* ---------- Fin ---------- */

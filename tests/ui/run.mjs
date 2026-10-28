@@ -9,7 +9,7 @@
  * Ailleurs, PLAYWRIGHT_FROM désigne un dossier où « playwright » se résout.
  */
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -73,6 +73,7 @@ await p.click('[data-view="tools"]'); await p.waitForTimeout(500);
 for (const [tool, verdict, out, tab2] of [
   ['kibana', /objets à migrer/, /Inventaire de migration Kibana/, /^ ?Type;Identifiant/],
   ['grafana', /panneaux convertis/, /Conversion Grafana vers ClickHouse/, /"__inputs"/],
+  ['watcher', /watches à migrer, \d+ conditions traduites/, /Migration des watches Elasticsearch/, /AS declenchee/],
   ['schema', /table ClickHouse à créer/, /CREATE TABLE IF NOT EXISTS logs\.events/, /clickhouse:/],
   ['analyzers', /analyseurs à traduire/, /Analyseurs personnalisés/, /ALTER TABLE logs\.catalogue/]
 ]) {
@@ -82,6 +83,19 @@ for (const [tool, verdict, out, tab2] of [
   await p.locator('#view-tools [data-tab]').nth(1).click(); await p.waitForTimeout(150);
   const o2 = await text('#view-tools [data-role="out"]');
   check(tab2.test(o2), `autres sources, ${tool} : deuxième onglet`, o2.slice(0, 120));
+}
+// Des watches déposées sur la section Requêtes vont à l’outil Watcher, pas à la traduction DSL
+await p.click('[data-view="dsl"]'); await p.waitForTimeout(300);
+await p.evaluate(text => {
+  const dt = new DataTransfer(); dt.items.add(new File([text], 'console.txt', { type: 'text/plain' }));
+  window.dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+}, readFileSync(join(ROOT, 'examples', 'watcher', 'console.txt'), 'utf8'));
+await p.waitForTimeout(600);
+{
+  const visible = await p.locator('#view-tools').isVisible();
+  const pressed = await p.locator('#view-tools [data-tool="watcher"]').getAttribute('aria-pressed');
+  const v = await text('#view-tools [data-role="verdict"]');
+  check(visible && pressed === 'true' && /2 watches à migrer/.test(v), 'watches déposées sur Requêtes : aiguillées vers l’outil Watcher', `${visible} ${pressed} ${v.slice(0, 120)}`);
 }
 check(errs.length === 0, 'aucune erreur de page ni de console', errs.join(' | '));
 await browser.close();

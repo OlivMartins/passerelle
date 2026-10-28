@@ -184,6 +184,26 @@ WHERE timestamp >= parseDateTime64BestEffort({scheduled_time:String}, 3, 'UTC') 
 
 Sont reconnus les modèles de Watcher et des alertes Kibana (`{{…}}`) et les variables de Grafana (`$__timeFrom`, `${service}`, `[[service]]`, `$service`). La valeur se passe à l’exécution : `param_scheduled_time=…` en HTTP, `--param_scheduled_time=…` avec clickhouse-client. Un modèle placé là où ClickHouse exige une valeur fixe, comme une recherche plein texte, rend la requête « à reprendre ».
 
+### Watches Elasticsearch
+
+`passerelle watcher` lit des watches entières : un export `GET _watcher/_query/watches`, des `PUT _watcher/watch/<id>` copiés de la console, ou directement le cluster avec `passerelle watcher pull`. Pour chaque watch, la recherche est traduite en SQL et la condition devient une colonne `declenchee` calculée sur son résultat :
+
+```json
+"condition": { "array_compare": { "ctx.payload.aggregations.services.buckets": { "path": "latence.value", "gte": { "value": 500000000 } } } }
+```
+
+```sql
+SELECT
+    countIf(ifNull(latence >= 500000000, 0)) > 0 AS declenchee,
+    countIf(ifNull(latence >= 500000000, 0)) AS groupes_au_seuil,
+    count() AS groupes
+FROM ( /* la recherche traduite, regroupée par service */ )
+```
+
+La décision suit les règles de Watcher, lues dans son code : dans une watch, `hits.total` est un entier plafonné à 10 000, et `hits.total.value` y est vide, si bien qu’une condition écrite ainsi ne se déclenche jamais (signalé) ; une valeur absente ne satisfait que `not_eq` ; un seuil entre guillemets se compare en texte ; `all` est vrai sur une liste vide. Sont lus `compare`, `array_compare`, `always`, `never`, les scripts Painless courants (comparaison d’une valeur, taille d’une liste, boucle sur des groupes) et les seuils créés par l’interface Watcher de Kibana. Les valeurs connues dans la watch (`{{ctx.metadata.…}}`, paramètres d’un modèle de recherche) sont remplacées avant la traduction.
+
+La planification est traduite en clair et en cron à 5 champs (`interval`, `hourly`, `daily`, `weekly`, `monthly`, `yearly`, cron Quartz). Les actions (e-mail, Slack, webhook, PagerDuty, Jira, index, journal) sont listées avec ce qu’elles lisent du résultat : elles se recréent dans l’outil d’alerte cible. Une entrée `http`, un modèle de recherche stocké ou un script hors des formes reconnues rendent la watch « à reprendre » ; les alertes de Stack Monitoring sont « sans objet ». Un banc joue chaque watch de test sur Elasticsearch 7.17, 8.19 et 9.5 (`_execute`) et sur ClickHouse, et compare les deux décisions.
+
 ## Logstash vers Vector, Kafka compris
 
 <picture>
@@ -284,13 +304,14 @@ Une migration ne se limite pas aux requêtes. Passerelle lit aussi ce qui les en
 
 - **Inventaire Kibana** (`passerelle kibana export.ndjson`) : le catalogue des objets sauvegardés (index patterns, recherches, visualisations, Lens, cartes, tableaux de bord, alertes, règles de sécurité, connecteurs, canvas, graphes), objet par objet, en Markdown, HTML, CSV ou JSON. Les requêtes KQL, Lucene et DSL qu’ils portent sont traduites en SQL.
 - **Tableaux de bord Grafana** (`passerelle grafana tableau.json`) : les panneaux dont la source est Elasticsearch deviennent des requêtes ClickHouse, avec un rapport par panneau.
+- **Watches Elasticsearch** (`passerelle watcher watches.json`, ou `passerelle watcher pull` sur le cluster) : requête et condition en SQL, planification en cron, actions à recréer, verdict et effort par watch ([détails](#watches-elasticsearch)).
 - **Schéma** (`passerelle schema ddl mapping.json`) : le `CREATE TABLE` ClickHouse déduit d’un mapping Elasticsearch, y compris les préréglages OpenTelemetry `otel` (attributs en `Map`) et `otel-json` (colonnes `JSON` typées). `passerelle schema pull` lit les tables déjà créées pour que les traductions s’y adaptent.
 - **Pipelines d’ingestion Elasticsearch** (`passerelle ingest pipeline.yml`) : chaque processeur devient une étape VRL pour Vector (`append`, `convert`, `date`, `dissect`, `dot_expander`, `foreach`, `geoip`, `grok`, `gsub`, `json`, `kv`, `pipeline`, `rename`, `script` Painless, `set`, `user_agent`, et une vingtaine d’autres). Vector refuse toute la configuration si un seul VRL ne compile pas : la CI compile donc les traductions avec `vector validate`.
 - **Sortie ClickHouse** : avec `vector.elasticsearch_output: clickhouse`, la sortie `elasticsearch` d’un pipeline Logstash devient un puits ClickHouse. Il écrit avec son propre compte, `clickhouse.sink_user` ([compte de la sortie Vector](docs/INSTALL.md)).
 - **Plusieurs pipelines** : `passerelle ls2vector pipelines.yml` relie les pipelines qui s’appellent entre eux.
 - **Analyseurs personnalisés** (`passerelle schema analyzers mapping.json`) : un analyseur Elasticsearch devient une colonne de mots calculée et un index plein texte ClickHouse, avec l’aperçu des mots produits. [Ce qui est repris, et les écarts](docs/ANALYSEURS.md).
 
-Tout cela est aussi dans l’interface (sections « Ingestion », « Kibana » et « Autres sources » ; la section « Kibana » montre, panneau par panneau, les requêtes SQL d’un tableau de bord déposé), dans l’API (`/v1/schema/ddl` et `/v1/schema/analyzers` pour le schéma) et en ligne de commande.
+Tout cela est aussi dans l’interface (sections « Ingestion », « Kibana » et « Autres sources » ; la section « Kibana » montre, panneau par panneau, les requêtes SQL d’un tableau de bord déposé), dans l’API (`/v1/schema/ddl` et `/v1/schema/analyzers` pour le schéma, `/v1/translate/watcher` pour les watches) et en ligne de commande.
 
 ## Une configuration, versionnée avec votre code
 

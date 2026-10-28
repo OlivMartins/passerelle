@@ -2,6 +2,23 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Ajouté
+
+- **Watches Elasticsearch** (`passerelle watcher`, `POST /v1/translate/watcher`, outil « Watcher » de la section « Autres sources »), nouveau code dans `src/engine/watcher.js`.
+  - **Lecture** : réponse de `GET|POST _watcher/_query/watches`, de `GET _watcher/watch/<id>`, recherche sur l’index `.watches`, `PUT _watcher/watch/<id>` copiés de la console Kibana (`?active=false` compris, `"""` compris), définition seule ou NDJSON. Déposé n’importe où dans l’interface, un fichier de watches ouvre l’outil Watcher.
+  - **Requête** : la recherche de l’entrée (`search`, ou chaque entrée d’une chaîne) passe par la traduction DSL ; les valeurs connues dans la watch (`{{ctx.metadata.…}}`, `{{ctx.watch_id}}`, paramètres et `{{#toJson}}` d’un modèle de recherche) sont remplacées avant, celles de l’exécution (`scheduled_time`, `execution_time`) deviennent des paramètres ClickHouse. Index en date math (`<logs-{now/d}>`) lus comme un motif, signalés.
+  - **Condition → colonne `declenchee`** : `compare` (sur `hits.total`, une valeur d’agrégation, `doc_count` d’un `filter`, un centile, une statistique), `array_compare` (`some`, `all`) sur les groupes d’une agrégation ou sur `hits.hits`, `always`, `never`, scripts Painless courants (comparaison, `size()`, boucle sur des groupes), seuils de l’interface Watcher de Kibana (`metadata.watcherui`). Les règles de Watcher sont reprises de son code : `hits.total` entier et plafonné à 10 000 sans `track_total_hits`, `hits.total.value` vide (« à vérifier » : la condition d’origine ne se déclenche jamais), valeur absente (seul `not_eq` est vrai), seuil entre guillemets comparé en texte, `all` vrai sur une liste vide.
+  - **Planification** en clair et en cron à 5 champs (`interval`, `hourly`, `daily`, `weekly`, `monthly`, `yearly`, cron Quartz ; `L`, `W`, `#`, année et secondes multiples signalés), fuseau compris. **Actions** listées avec ce qu’elles lisent du résultat, sans adresse ni secret ; `index`, condition propre, `foreach` et transformation signalés.
+  - **Rapport** Markdown, HTML, CSV et JSON, un fichier SQL par watch, verdict et effort par watch ; alertes de Stack Monitoring « sans objet ». Entrée `http`, modèle de recherche stocké, référence à une entrée précédente et script hors des formes reconnues : « à reprendre ».
+- **`passerelle watcher pull`** : lecture des watches du cluster (`elasticsearch.endpoint` ou `--es`), page par page par `_watcher/_query/watches` (index `.watches` avant 7.11), en lecture seule ; privilège `monitor_watcher`. Avec `--out`, l’export lu est écrit en `0600`, secrets masqués, et se relit hors ligne.
+- **Bancs** : `tests/differential/watcher.mjs` (`npm run test:watcher`, job `differentiel`) joue chaque watch de test par `_execute` sur Elasticsearch 7.17, 8.19 et 9.5 et sa traduction sur ClickHouse, et compare `condition.met` à `declenchee` ; `es.sh` active la licence d’essai que demande Watcher. Le banc ClickHouse exécute les watches de l’exemple et recalcule chaque décision à la main.
+
+### Corrigé
+
+- Une borne de date fournie à l’exécution (`{{ctx.trigger.scheduled_time}}`) avec `"format": "strict_date_optional_time||epoch_millis"`, que l’interface Watcher de Kibana écrit, était lue comme un epoch : `toInt64('2026-…')` échouait à l’exécution. Le premier format décide, comme Elasticsearch qui les essaie dans l’ordre.
+
 ## [1.6.0] - 2026-10-28
 
 ### Ajouté

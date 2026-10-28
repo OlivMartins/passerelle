@@ -340,6 +340,8 @@ function handleFiles(files) {
     const savedObject = /"attributes"\s*:/.test(firstLine) && /"type"\s*:\s*"/.test(firstLine) && /"id"\s*:/.test(firstLine);
     const detectionRule = /"rule_id"\s*:/.test(firstLine) && /"(?:severity|risk_score)"\s*:/.test(firstLine);
     if (/\.ndjson$/i.test(f.name) || savedObject || detectionRule) return S.view === 'tools' ? 'kibana-tool' : 'kibana';
+    // Des watches (console, export _query/watches, définition) vont à l’outil Watcher, d’où qu’elles soient déposées
+    if (/^[ \t]*(?:PUT|POST)[ \t]+\/?_watcher\/watch\//m.test(f.text) || /"watches"\s*:\s*\[/.test(f.text) || (/"trigger"\s*:/.test(f.text) && /"input"\s*:/.test(f.text) && /"(?:condition|actions)"\s*:/.test(f.text))) return 'watcher';
     // Dans la vue « autres sources », un fichier .json ou .txt va à l’outil choisi (schéma, analyseurs), sauf un tableau Grafana reconnu
     if (S.view === 'tools' && /\.(json|txt|es)$/i.test(f.name) && !grafana) return 'tools';
     if (/\.(conf|cfg|logstash)$/i.test(f.name)) return 'ls';
@@ -354,7 +356,7 @@ function handleFiles(files) {
   for (const [k, list] of Object.entries(groups)) {
     if (k === 'tools') { S.tools.texts[S.tools.tool] = list[0].text; S.tools.ed.value = list[0].text; runTool(); last = 'tools'; }
     else if (k === 'kibana') { addKibanaFiles(list); last = 'kibana'; }
-    else if (k === 'kibana-tool' || k === 'grafana') { const t = k === 'grafana' ? 'grafana' : 'kibana'; S.tools.tool = t; S.tools.texts[t] = list[0].text; S.tools.ed && (S.tools.ed.value = list[0].text); runTool(); last = 'tools'; }
+    else if (k === 'kibana-tool' || k === 'grafana' || k === 'watcher') { const t = k === 'kibana-tool' ? 'kibana' : k; S.tools.tool = t; S.tools.texts[t] = list[0].text; S.tools.ed && (S.tools.ed.value = list[0].text); runTool(); last = 'tools'; }
     else { addFiles(k, list); last = k; }
   }
   if (last) show(last);
@@ -440,6 +442,7 @@ function renderAPI() {
         ['POST', '/v1/translate/logstash/pipelines', 'Traduit tout un parc de pipelines : pipelines.yml (ou { pipelines, files }) devient une seule configuration Vector, les sorties pipeline { send_to } reliées entre elles.'],
         ['POST', '/v1/translate/ingest?format=yaml', 'Traduit des pipelines d’ingestion Elasticsearch (YAML, JSON ou requête PUT _ingest/pipeline, ou { files }) en VRL, avec verdict par pipeline.'],
         ['POST', '/v1/inventory/kibana?format=json', 'Inventaire d’un export Kibana (.ndjson) : objets, requêtes traduites, verdict et effort par objet. Formats json, md, html, csv.'],
+        ['POST', '/v1/translate/watcher?format=json', 'Traduit des watches Elasticsearch (export _query/watches, GET _watcher/watch/<id> ou console) : requête SQL, décision de la condition, planification et actions à recréer, verdict et effort par watch. Formats json, md, html, csv.'],
         ['POST', '/v1/translate/grafana?format=md', 'Convertit un tableau de bord Grafana de la source Elasticsearch au plugin ClickHouse. Sans format, renvoie le tableau converti et son rapport.'],
         ['POST', '/v1/schema/ddl?preset=otel&format=sql', 'CREATE TABLE ClickHouse déduit d’un mapping ou d’un modèle d’index (ou { files }). Sans format, renvoie verdict, sql, profils par table et remarques.'],
         ['POST', '/v1/schema/analyzers?text=…&field=…', 'Plan ClickHouse des analyseurs personnalisés d’un mapping : colonne de mots, index, requêtes, et aperçu des mots pour le texte donné. format=md pour le rapport.'],
@@ -460,6 +463,8 @@ passerelle ls2vector pipelines/ --config passerelle.yaml --format ${cfg.vector.f
 passerelle ingest ingest_pipelines/ --config passerelle.yaml --out build/ingest --fail-on todo
 passerelle kibana export.ndjson --config passerelle.yaml --format md --out build/kibana
 passerelle grafana tableaux/ --config passerelle.yaml --out build/grafana
+passerelle watcher watches.json --config passerelle.yaml --out build/watcher
+passerelle watcher pull --config passerelle.yaml --out build/watcher
 passerelle schema ddl modeles/ --config passerelle.yaml --out build/schema
 passerelle schema analyzers modeles/catalogue.txt --text "Les téléviseurs d’été" --out build/analyseurs`, 'bash')}</section>
     <section><h2>Chaîne d’intégration continue</h2><p>Exemple GitLab CI : traduction, validation avec les vrais moteurs, puis déploiement de la configuration Vector par ConfigMap, repris par Argo CD.</p>${codeCard('.gitlab-ci.yml', `stages: [traduire, valider, deployer]
@@ -528,7 +533,7 @@ function renderArch() {
 }
 
 /* ---------- Navigation et événements ---------- */
-/* ---------- Autres sources : Kibana, Grafana, schéma, analyseurs ---------- */
+/* ---------- Autres sources : Kibana, Grafana, Watcher, schéma, analyseurs ---------- */
 // Rendu minimal d’un rapport Markdown : titres, listes, tableaux, blocs de code, gras, italique, code
 function mdInline(t) { return esc(t).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<i>$2</i>'); }
 function mdHTML(md) {
@@ -582,6 +587,20 @@ const TOOLS = {
         sentence: `${r.summary.panels} panneau${r.summary.panels > 1 ? 'x' : ''} converti${r.summary.panels > 1 ? 's' : ''} pour le plugin ClickHouse.`,
         tabs: [['rapport', 'Rapport', 'md', md], ['json', 'Tableau converti', 'json', json]],
         files: [{ name: 'grafana/tableau-clickhouse.json', content: json }, { name: 'grafana/rapport.md', content: md }], copy: json };
+    }
+  },
+  watcher: {
+    label: 'Watcher', title: 'Watches Elasticsearch', file: 'watches.json', hint: 'Fichiers .json ou .txt : GET _watcher/_query/watches, GET _watcher/watch/<id> ou PUT _watcher/watch/<id> de la console',
+    run(text) {
+      const rep = watcherTranslate(text, cfg, {});
+      if (!rep.entries.length) return { error: `Aucune watch lisible${rep.source.errors.length ? ` (${rep.source.errors[0]})` : ''}.` };
+      const s = rep.summary; const b = s.byVerdict;
+      const md = watcherReportMarkdown(rep); const csv = watcherReportCSV(rep); const sqlFiles = watcherSQLFiles(rep);
+      const sql = sqlFiles.map(f => f.content).join('\n') || '-- aucune requête traduite';
+      return { verdict: s.watches ? worstOf(Object.keys(b).filter(k => b[k])) : 'ready', counts: { ok: b.ready, approx: b.review, ko: b.todo + b.unrecognized },
+        sentence: `${nb(s.watches, 'watch à migrer', 'watches à migrer')}, ${nb(s.conditions, 'condition traduite', 'conditions traduites')} en décision SQL. Effort estimé : ${frHours(s.effort.hours)}.${s.skipped ? ` ${nb(s.skipped, 'watch de Stack Monitoring', 'watches de Stack Monitoring')}, sans objet.` : ''}`,
+        tabs: [['rapport', 'Rapport', 'md', md], ['sql', 'SQL', 'sql', sql], ['csv', 'CSV', 'text', csv]],
+        files: [{ name: 'watcher/rapport.md', content: md }, { name: 'watcher/rapport.csv', content: csv }, { name: 'watcher/rapport.html', content: watcherReportHTML(rep, 'Watches Elasticsearch') }].concat(sqlFiles.map(f => ({ name: `watcher/sql/${f.name}`, content: f.content }))), copy: md };
     }
   },
   schema: {
@@ -645,7 +664,7 @@ function renderTools() {
 }
 function setupTools() {
   const view = $('#view-tools'); const st = S.tools;
-  st.ed = makeEditor($('[data-role="editor"]', view), 'json', 'Source à analyser', 'Collez ici un export Kibana, un tableau de bord Grafana, un modèle d’index ou la définition d’un index.', text => { st.texts[st.tool] = text; clearTimeout(setupTools.h); setupTools.h = setTimeout(runTool, 180); });
+  st.ed = makeEditor($('[data-role="editor"]', view), 'json', 'Source à analyser', 'Collez ici un export Kibana, un tableau de bord Grafana, des watches, un modèle d’index ou la définition d’un index.', text => { st.texts[st.tool] = text; clearTimeout(setupTools.h); setupTools.h = setTimeout(runTool, 180); });
   $('[data-role="tool-seg"]', view).innerHTML = Object.entries(TOOLS).map(([k, t]) => `<button type="button" data-tool="${k}" aria-pressed="false">${esc(t.label)}</button>`).join('');
   const sel = $('[data-act="example"]', view);
   const fillExamples = () => { sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES[st.tool].map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`; };

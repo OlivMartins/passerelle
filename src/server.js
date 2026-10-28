@@ -328,7 +328,7 @@ function serve(opts) {
       if (req.method === 'GET' && url.pathname === '/v1/config') return json(res, 200, publicConfig(cfg));
       if (req.method !== 'POST') return json(res, 405, { error: 'méthode non autorisée' });
       // Un export Kibana complet ou un gros tableau de bord dépassent vite 2 Mio : leurs routes acceptent davantage
-      const body = await readBody(req, url.pathname === '/v1/inventory/kibana' || url.pathname === '/v1/translate/grafana' || url.pathname === '/v1/translate/ingest' || url.pathname === '/v1/translate/logstash/pipelines' || url.pathname === '/v1/schema/ddl' || url.pathname === '/v1/schema/analyzers' ? INVENTORY_LIMIT : LIMIT);
+      const body = await readBody(req, url.pathname === '/v1/inventory/kibana' || url.pathname === '/v1/translate/watcher' || url.pathname === '/v1/translate/grafana' || url.pathname === '/v1/translate/ingest' || url.pathname === '/v1/translate/logstash/pipelines' || url.pathname === '/v1/schema/ddl' || url.pathname === '/v1/schema/analyzers' ? INVENTORY_LIMIT : LIMIT);
       opsBody(rq, body);
       switch (url.pathname) {
         case '/v1/translate/dsl': {
@@ -383,6 +383,16 @@ function serve(opts) {
           if (fmt === 'html') return send(res, 200, inventoryHTML(inv, 'Inventaire Kibana'), { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" });
           if (fmt === 'csv') return send(res, 200, inventoryCSV(inv), { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="inventaire.csv"' });
           return json(res, 200, inv);
+        }
+        case '/v1/translate/watcher': {
+          const fmt = url.searchParams.get('format') || 'json';
+          if (!['json', 'md', 'html', 'csv'].includes(fmt)) return json(res, 400, { error: `format inconnu « ${fmt} » (json, md, html ou csv)` });
+          const rep = watcherTranslate(body, cfg, {});
+          if (!rep.entries.length) return json(res, 422, { error: `aucune watch lisible${rep.source.errors.length ? ` (${rep.source.errors[0]})` : ''}` });
+          if (fmt === 'md') return send(res, 200, watcherReportMarkdown(rep), { 'content-type': 'text/markdown; charset=utf-8' });
+          if (fmt === 'html') return send(res, 200, watcherReportHTML(rep, 'Watches Elasticsearch'), { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" });
+          if (fmt === 'csv') return send(res, 200, watcherReportCSV(rep), { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': 'attachment; filename="watches.csv"' });
+          return json(res, 200, rep);
         }
         case '/v1/translate/grafana': {
           const r = grafanaDashboard(body, cfg, { index: url.searchParams.get('index') || '' });
@@ -469,6 +479,8 @@ Utilisation :
   passerelle schema analyzers <fichier|dossier>... [--config FICHIER] [--text TEXTE] [--field CHAMP] [--format md|json|sql] [--out DOSSIER] [--fail-on todo|review]
   passerelle kibana      <export.ndjson>... [--config FICHIER] [--timezone FUSEAU] [--format md|html|csv|json] [--out DOSSIER] [--fail-on todo|review]
   passerelle grafana     <tableau.json>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo|review]
+  passerelle watcher     <watches.json|dossier>... [--config FICHIER] [--format md|html|csv|json] [--out DOSSIER] [--fail-on todo|review]
+  passerelle watcher pull [--config FICHIER] [--es URL] [--format md|html|csv|json] [--out DOSSIER] [--fail-on todo|review]
   passerelle verify queries   <fichier|dossier|export.ndjson>... --index MOTIF [--config FICHIER] [--from DATE --to DATE | --last 1h --lag 10m] [--out DOSSIER] [--format md|html|csv|json] [--no-values] [--strict]
   passerelle verify pipelines <pipeline.conf|dossier>... --sample FICHIER (--logstash-bin CHEMIN | --reference FICHIER|DOSSIER) [--ecs v8|disabled] [--config FICHIER] [--out DOSSIER] [--no-values] [--strict]
   passerelle assist ruby     <pipeline.conf|dossier>... [--sample FICHIER (--logstash-bin CHEMIN | --reference FICHIER|DOSSIER)] [--local-model] [--ignore CHAMP]... [--out DOSSIER] [--no-values] [--strict]
@@ -822,6 +834,82 @@ function grafanaConvert(o) {
   if (failing) process.exit(2);
 }
 
+/* ---------- Watches Elasticsearch (passerelle watcher) ---------- */
+// Rapport d’un ensemble de watches : sur la sortie standard, ou dans --out (rapport, un .sql par watch, export lu)
+function watcherOutput(rep, o, exportText) {
+  const fmt = formatFor(o, ['md', 'html', 'csv', 'json'], 'watcher') || 'md';
+  const title = 'Watches Elasticsearch';
+  const render = f => (f === 'md' ? watcherReportMarkdown(rep) : f === 'html' ? watcherReportHTML(rep, title) : f === 'csv' ? watcherReportCSV(rep) : JSON.stringify(rep, null, 2) + '\n');
+  if (o.out) {
+    outDir(path.join(o.out, 'sql'));
+    for (const f of ['md', 'html', 'csv', 'json']) fs.writeFileSync(path.join(o.out, `rapport.${f}`), render(f));
+    const sqlFiles = watcherSQLFiles(rep);
+    for (const f of sqlFiles) fs.writeFileSync(path.join(o.out, 'sql', f.name), f.content);
+    // L’export lu sur le cluster, secrets masqués : il se relit hors ligne (passerelle watcher export-watches.json)
+    if (exportText) fs.writeFileSync(path.join(o.out, 'export-watches.json'), exportText, { mode: 0o600 });
+    process.stderr.write(`rapport → ${path.join(o.out, 'rapport.{md,html,csv,json}')}, ${sqlFiles.length} fichier(s) SQL dans ${path.join(o.out, 'sql')}${exportText ? `, export des watches dans ${path.join(o.out, 'export-watches.json')}` : ''}\n`);
+  } else process.stdout.write(render(fmt));
+  const s = rep.summary; const v = s.byVerdict;
+  process.stderr.write(`${s.watches} watch(es) : ${v.ready} prête(s), ${v.review} à vérifier, ${v.todo} à reprendre${v.unrecognized ? `, ${v.unrecognized} non reconnue(s)` : ''}${s.skipped ? ` ; ${s.skipped} de Stack Monitoring, sans objet` : ''}. Effort estimé : ${String(s.effort.hours).replace('.', ',')} h (${String(s.effort.days).replace('.', ',')} j).\n`);
+  rep.source.errors.forEach(e => process.stderr.write(`attention : ${e}\n`));
+  if (o['fail-on'] && rep.entries.some(x => !x.skipped && VERDICT_RANK[x.verdict] >= VERDICT_RANK[o['fail-on']])) process.exit(2);
+}
+function watcherFiles(o) {
+  if (!o._.length) fail('aucune watch à lire. Exemple : passerelle watcher watches.json --out watches/ (ou passerelle watcher pull pour lire le cluster)');
+  if (o.es !== undefined) fail('--es s’emploie avec passerelle watcher pull');
+  const cfg = loadCfgOrFail(o);
+  const files = collect(o._, /\.(json|txt|es|ndjson)$/i);
+  if (!files.length) fail('aucun fichier .json, .txt, .es ou .ndjson trouvé');
+  const rep = watcherTranslate(files.map(f => fs.readFileSync(f, 'utf8')), cfg, { names: files.map(f => path.basename(f)), origin: files.map(f => path.basename(f)).join(', ') });
+  if (!rep.entries.length) fail(`aucune watch lisible${rep.source.errors.length ? ` (${rep.source.errors[0]})` : ''}`);
+  watcherOutput(rep, o, null);
+}
+/*
+ * Lecture des watches d’un cluster : GET / puis POST _watcher/_query/watches page par page (Elasticsearch 7.11 et
+ * suivants, privilège monitor_watcher), en lecture seule. Avant 7.11, l’index .watches est lu par _search.
+ */
+async function watcherPull(o) {
+  if (o._.length) fail(`passerelle watcher pull lit le cluster, pas des fichiers (${o._.join(', ')}) : retirez-les, ou employez passerelle watcher <fichiers>`);
+  const cfg = loadCfgOrFail(o);
+  let es; try { es = esClient(cfg, o.es); } catch (e) { fail(e.message); }
+  const info = await es.info();
+  if (info.status !== 200) fail(`Elasticsearch ne répond pas sur ${es.endpoint} : ${eqEsError(info)}`);
+  const version = (info.body.version && info.body.version.number) || '?';
+  const PAGE = 100; const MAX = 10000;
+  const watches = [];
+  let total = null;
+  for (let from = 0; from < MAX; from += PAGE) {
+    const r = await es.queryWatches({ from, size: PAGE });
+    if (r.status !== 200) {
+      // Avant 7.11 : pas d’API _query/watches, l’index .watches se lit directement
+      if (from === 0 && (r.status === 400 || r.status === 404 || r.status === 405)) {
+        const old = await es.search('.watches', { size: MAX, query: { match_all: {} } });
+        if (old.status !== 200) fail(`lecture des watches impossible : ${eqEsError(r)} ; index .watches : ${eqEsError(old)}`);
+        for (const h of (old.body.hits && old.body.hits.hits) || []) { const x = watchFromSource(h._source || {}); watches.push({ _id: h._id, watch: x.watch, status: x.status }); }
+        total = watches.length;
+        break;
+      }
+      fail(`lecture des watches impossible (page ${from / PAGE + 1}) : ${eqEsError(r)}${r.status === 403 ? ' — le compte doit avoir le privilège de cluster monitor_watcher' : ''}`);
+    }
+    total = r.body.count;
+    const page = r.body.watches || [];
+    watches.push(...page);
+    if (page.length < PAGE || watches.length >= total) break;
+  }
+  if (total !== null && total > watches.length) process.stderr.write(`attention : ${total} watches sur le cluster, ${watches.length} lues (au-delà de ${MAX}, la pagination de _query/watches s’arrête)\n`);
+  const exported = { count: watches.length, watches: watches.map(w => ({ _id: w._id, watch: watcherScrub(w.watch), status: w.status || null })) };
+  const where = es.endpoint.replace(/\/\/[^/@]*@/, '//');
+  const origin = `cluster ${info.body.cluster_name || '?'} (${where}, Elasticsearch ${version}), lu le ${new Date().toISOString().replace(/\.\d+Z$/, 'Z')}`;
+  process.stderr.write(`${watches.length} watch(es) lue(s) sur ${where} (Elasticsearch ${version})\n`);
+  if (!watches.length) { process.stderr.write('aucune watch sur ce cluster\n'); return; }
+  const rep = watcherTranslate(JSON.stringify(exported), cfg, { names: ['cluster'], origin });
+  watcherOutput(rep, o, JSON.stringify(exported, null, 2) + '\n');
+}
+function watcherCommand(o) {
+  if (o._[0] === 'pull') { o._.shift(); return watcherPull(o).catch(e => fail(e.message)); }
+  return watcherFiles(o);
+}
+
 function main(argv) {
   const [cmd, ...rest] = argv; const o = parseArgs(rest);
   if (!cmd || cmd === 'help' || cmd === '-h' || cmd === '--help' || o.help) { process.stdout.write(HELP + '\n'); return; }
@@ -841,6 +929,7 @@ function main(argv) {
     case 'ingest': return ingestConvert(o);
     case 'kibana': return kibanaReport(o);
     case 'grafana': return grafanaConvert(o);
+    case 'watcher': return watcherCommand(o);
     case 'verify': return verifyCommand(o);
     case 'assist': return assistCommand(o);
     case 'check-config': {

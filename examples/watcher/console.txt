@@ -1,0 +1,61 @@
+# Watches écrites dans la console de Kibana (Outils de développement)
+
+PUT _watcher/watch/erreurs-paiement
+{
+  "trigger": { "schedule": { "cron": "0 0/5 8-19 ? * MON-FRI" } },
+  "input": {
+    "search": {
+      "request": {
+        "indices": ["<logs-web-{now/d}>"],
+        "body": {
+          "size": 0,
+          "query": {
+            "bool": {
+              "filter": [
+                { "term": { "url.path": "/api/paiement" } },
+                { "range": { "http.response.status_code": { "gte": 500 } } },
+                { "range": { "@timestamp": { "gte": "{{ctx.trigger.scheduled_time}}||-5m" } } }
+              ]
+            }
+          },
+          "aggs": { "duree_max": { "max": { "field": "event.duration" } } }
+        }
+      }
+    }
+  },
+  "condition": {
+    "script": {
+      "source": """
+        // Plus de 900 ms au pire sur les paiements en erreur
+        return ctx.payload.aggregations.duree_max.value >= params.limite;
+      """,
+      "params": { "limite": 900000000 }
+    }
+  },
+  "actions": {
+    "equipe_paiement": {
+      "webhook": { "method": "POST", "url": "https://hooks.exemple.fr/paiement?jeton=secret", "body": "{{ctx.payload.aggregations.duree_max.value}}" }
+    }
+  },
+  "metadata": { "name": "Erreurs lentes sur le paiement" }
+}
+
+PUT _watcher/watch/fin-de-mois?active=false
+{
+  "trigger": { "schedule": { "cron": "0 0 6 L * ?" } },
+  "input": {
+    "search": {
+      "request": {
+        "indices": ["logs-web-*"],
+        "template": { "id": "volumes-mensuels", "params": { "mois": "{{ctx.trigger.scheduled_time}}" } }
+      }
+    }
+  },
+  "condition": { "always": {} },
+  "actions": { "journal": { "logging": { "text": "Volumes du mois calculés" } } }
+}
+
+POST _watcher/watch/erreurs-paiement/_execute
+{
+  "trigger_data": { "scheduled_time": "now" }
+}

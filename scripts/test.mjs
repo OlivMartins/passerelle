@@ -36,6 +36,7 @@ const SOURCES = {
   ingest: t => E.translateIngest([{ name: 'exemple', text: t }], E.DEFAULT_CONFIG),
   kibana: t => E.kibanaInventory(t, E.DEFAULT_CONFIG, {}),
   grafana: t => E.grafanaDashboard(t, E.DEFAULT_CONFIG, { index: 'logs-*' }),
+  watcher: t => { const r = E.watcherTranslate(t, E.DEFAULT_CONFIG, {}); return r.entries.length && !r.source.errors.length ? r : { error: r.source.errors[0] || 'aucune watch' }; },
   schema: t => E.schemaFromElastic(t, E.DEFAULT_CONFIG, {}),
   analyzers: t => E.schemaFromElastic(t, E.DEFAULT_CONFIG, {})
 };
@@ -116,6 +117,12 @@ const grafanaCfg = E.mergeConfig(E.DEFAULT_CONFIG, E.parseYAMLConfig(rd('example
 const grafanaOut = E.grafanaDashboard(rd('examples/grafana/supervision_es.json'), grafanaCfg, { index: 'logs-web-*' });
 snapshot('grafana/supervision_es.clickhouse.json', JSON.stringify(grafanaOut.dashboard, null, 2) + '\n');
 snapshot('grafana/supervision_es.rapport.md', E.grafanaReportMarkdown(grafanaOut, 'supervision_es.json'));
+
+// Watches de l’exemple : le rapport (verdicts, planification, conditions, SQL de chaque watch) est figé ici ;
+// le banc ClickHouse exécute chaque requête et contrôle la décision de chaque condition
+const watcherCfg = E.mergeConfig(E.DEFAULT_CONFIG, E.parseYAMLConfig(rd('examples/watcher/passerelle.yaml')));
+const watcherRep = E.watcherTranslate([rd('examples/watcher/watches.json'), rd('examples/watcher/console.txt')], watcherCfg, { names: ['watches.json', 'console.txt'], origin: 'watches.json, console.txt' });
+snapshot('watcher/rapport.md', E.watcherReportMarkdown(watcherRep));
 
 // pipelines.yml : lecture, fichiers de path.config, liaisons pipeline { send_to }
 {
@@ -476,6 +483,109 @@ check(E.verdictOf(unknownCol) === 'review' && unknownCol.notes.some(n => /absent
 const declared = (engineSource() + serverSource()).match(/^(?:function|const|let|class) +[A-Za-z_$][\w$]*/gm).map(d => d.split(/ +/)[1]);
 const twice = [...new Set(declared.filter((d, i) => declared.indexOf(d) !== i))];
 check(!twice.length, 'aucun nom déclaré deux fois dans le binaire assemblé', twice.join(', '));
+
+/* ---------- Watches Elasticsearch ---------- */
+{
+  const W = (watch, id) => E.watcherTranslate(JSON.stringify({ watches: [{ _id: id || 'w', watch }] }), watcherCfg, {});
+  const one = (watch, id) => W(watch, id).entries[0];
+  const search = (body, extra) => ({ trigger: { schedule: { interval: '5m' } }, input: { search: { request: Object.assign({ indices: ['logs-web-*'], body }, extra || {}) } } });
+  const win = { range: { '@timestamp': { gte: '{{ctx.trigger.scheduled_time}}||-5m' } } };
+  const cond = (x, title) => (x.queries.find(q => q.title === (title || 'Condition')) || {}).sql || '';
+  const has = (x, label) => x.issues.some(i => i.label === label);
+  const byId = id => watcherRep.entries.find(x => x.id === id) || { issues: [], queries: [], schedule: { cron: [] } };
+
+  // Lecture : réponses d’API, console, index .watches, définition seule, NDJSON
+  const def = Object.assign(search({ size: 0, query: win }), { condition: { always: {} }, actions: {} });
+  const reads = [
+    ['GET _watcher/watch/<id>', JSON.stringify({ found: true, _id: 'a', watch: def, status: { state: { active: false } } }), ['a'], 1],
+    ['console, ?active=false, _execute ignoré', `PUT _watcher/watch/a?active=false\n${JSON.stringify(def)}\n\nPOST _watcher/watch/a/_execute\n{}\nPUT /_watcher/watch/b\n${JSON.stringify(def)}`, ['a', 'b'], 1],
+    ['recherche sur .watches', JSON.stringify({ hits: { hits: [{ _id: 'c', _source: Object.assign({ status: { state: { active: true } } }, def) }] } }), ['c'], 0],
+    ['définitions sans identifiant', JSON.stringify([def, def]), ['regles', 'regles-2'], 0],
+    ['NDJSON', `${JSON.stringify({ _id: 'n1', watch: def })}\n${JSON.stringify({ _id: 'n2', watch: def })}`, ['n1', 'n2'], 0]
+  ];
+  for (const [label, text, ids, inactive] of reads) {
+    const r = E.watcherTranslate(text, watcherCfg, { names: ['regles.json'] });
+    check(JSON.stringify(r.entries.map(x => x.id).sort()) === JSON.stringify(ids) && r.summary.inactive === inactive && !r.source.errors.length, `watches, lecture : ${label}`, `${r.entries.map(x => x.id)} ; ${r.summary.inactive} désactivée(s) ; ${r.source.errors}`);
+  }
+  check(E.watcherRead('{"query":{"match_all":{}}}', 'x').errors.length === 1, 'watches, lecture : une requête DSL n’est pas une watch');
+
+  // Planification : chaque forme de Watcher en clair et en cron à 5 champs
+  const sch = s => E.watchSchedule({ schedule: s });
+  const crons = [
+    [{ interval: '5m' }, '*/5 * * * *'], [{ interval: '2h' }, '0 */2 * * *'], [{ interval: 300 }, '*/5 * * * *'], [{ interval: '7m' }, ''], [{ interval: '30s' }, ''],
+    [{ hourly: { minute: [0, 30] } }, '0,30 * * * *'], [{ daily: { at: ['noon', '17:30'] } }, '0 12 * * * ; 30 17 * * *'], [{ daily: { at: { hour: [8, 18], minute: 15 } } }, '15 8,18 * * *'],
+    [{ weekly: [{ on: ['monday', 'fri'], at: '07:00' }] }, '0 7 * * 1,5'], [{ monthly: { on: [1, 15], at: 'midnight' } }, '0 0 1,15 * *'], [{ yearly: { in: 'march', on: 31, at: '23:59' } }, '59 23 31 3 *'],
+    [{ cron: '0 0/5 8-19 ? * MON-FRI' }, '*/5 8-19 * * MON-FRI'], [{ cron: '0 30 9 ? * 2-6' }, '30 9 * * 1-5'], [{ cron: '0 15 10 ? * 1' }, '15 10 * * 0'], [{ cron: '0 0 12 1/5 * ?' }, '0 12 */5 * *'], [{ cron: ['0 0 6 * * ?', '0 0 18 * * ?'] }, '0 6 * * * ; 0 18 * * *']
+  ];
+  for (const [s, want] of crons) { const r = sch(s); check(r.cron.join(' ; ') === want, `watches, planification ${JSON.stringify(s)} → ${want || 'pas de cron'}`, `${r.cron.join(' ; ')} (${r.text})`); }
+  for (const c of ['0 0 6 L * ?', '0 0 6 ? * 6#3', '*/10 * * * * ?', '0 0 6 * * ? 2027']) check(sch({ cron: c }).cron.length === 0 && sch({ cron: c }).issues.some(i => i.kind === 'review'), `watches, cron Quartz sans équivalent à 5 champs : ${c}`);
+  check(/Europe\/Paris/.test(sch({ daily: { at: '08:00' }, timezone: 'Europe/Paris' }).text), 'watches, fuseau de la planification affiché');
+
+  // Conditions → décision SQL
+  const total = (op, v, body, extra) => one(Object.assign(search(body || { size: 0, query: win }, extra), { condition: { compare: { 'ctx.payload.hits.total': { [op]: v } } }, actions: { l: { logging: { text: 'x' } } } }));
+  let x = total('gte', 5);
+  check(/count >= 5 AS declenchee/.test(cond(x)) && x.verdict === 'ready', 'watches, compare hits.total : décompte et seuil', cond(x));
+  x = total('gt', 5, { size: 20, query: win, post_filter: { term: { 'service.name': 'checkout' } }, aggs: { s: { terms: { field: 'host.name' } } } });
+  check(/count > 5 AS declenchee/.test(cond(x)) && /service\.name = 'checkout'/.test(cond(x)) && !/GROUP BY/.test(cond(x)), 'watches, hits.total compte le post_filter, sans les agrégations', cond(x));
+  x = total('gt', '5');
+  check(/toString\(count\) > '5'/.test(cond(x)) && has(x, 'seuil entre guillemets'), 'watches, seuil entre guillemets : comparé en texte, comme Watcher, et signalé', cond(x));
+  x = total('gt', 20000);
+  check(has(x, 'décompte plafonné') && x.verdict === 'review', 'watches, seuil au-delà de 10 000 sans track_total_hits : à vérifier');
+  x = total('gt', 20000, { size: 0, track_total_hits: true, query: win });
+  check(!has(x, 'décompte plafonné'), 'watches, track_total_hits: true : pas de plafond');
+  x = one(Object.assign(search({ size: 0, query: win }), { condition: { compare: { 'ctx.payload.hits.total.value': { gt: 0 } } }, actions: { l: { logging: { text: 'x' } } } }));
+  check(has(x, 'hits.total.value dans une watch') && x.verdict === 'review' && /count > 0/.test(cond(x)), 'watches, hits.total.value : vide dans une watch, signalé à vérifier');
+  x = one(Object.assign(search({ size: 0, query: win }, { rest_total_hits_as_int: false }), { condition: { compare: { 'ctx.payload.hits.total.value': { gt: 0 } } }, actions: { l: { logging: { text: 'x' } } } }));
+  check(!has(x, 'hits.total.value dans une watch'), 'watches, rest_total_hits_as_int: false : hits.total.value est le bon chemin');
+  x = one(Object.assign(search({ size: 0, query: win, aggs: { p: { percentiles: { field: 'event.duration', percents: [50, 99] } }, d: { avg: { field: 'event.duration' } } } }), { condition: { compare: { 'ctx.payload.aggregations.d.value': { eq: null } } }, actions: {} }));
+  check(/isNull\(d\) AS declenchee/.test(cond(x)), 'watches, compare à null : isNull, comme Watcher', cond(x));
+  x = one(Object.assign(search({ size: 0, query: win, aggs: { d: { avg: { field: 'event.duration' } } } }), { condition: { compare: { 'ctx.payload.aggregations.d.value': { not_eq: 5 } } }, actions: {} }));
+  check(/ifNull\(d != 5, 1\)/.test(cond(x)), 'watches, not_eq sur une valeur absente : vrai, comme Watcher', cond(x));
+  x = one(Object.assign(search({ size: 0, query: win, aggs: { p: { percentiles: { field: 'event.duration', percents: [50, 99] } } } }), { condition: { script: { source: "return ctx.payload.aggregations.p.values['99.0'] > 100;" } }, actions: {} }));
+  check(/ifNull\(p\[2\] > 100, 0\)/.test(cond(x)), 'watches, centile lu dans le script : élément du tableau des centiles', cond(x));
+  x = one(Object.assign(search({ size: 0, query: win, aggs: { err: { filter: { range: { 'http.response.status_code': { gte: 500 } } }, aggs: { lent: { max: { field: 'event.duration' } } } } } }), { condition: { compare: { 'ctx.payload.aggregations.err.doc_count': { gte: 3 } } }, actions: {} }));
+  check(/err_doc_count >= 3 AS declenchee/.test(cond(x)), 'watches, doc_count d’une agrégation filter', cond(x));
+  const arr = (q, extra) => one(Object.assign(search({ size: 0, query: win, aggs: { svc: { terms: { field: 'service.name' }, aggs: { lat: { avg: { field: 'event.duration' } } } } } }), { condition: { array_compare: { 'ctx.payload.aggregations.svc.buckets': Object.assign({ path: 'lat.value', gt: { value: 10, quantifier: q } }, extra || {}) } }, actions: {} }));
+  check(/countIf\(ifNull\(lat > 10, 0\)\) > 0 AS declenchee/.test(cond(arr('some'))), 'watches, array_compare some : au moins un groupe', cond(arr('some')));
+  check(/countIf\(NOT \(ifNull\(lat > 10, 0\)\)\) = 0 AS declenchee/.test(cond(arr('all'))), 'watches, array_compare all : vrai aussi sans aucun groupe, comme Watcher', cond(arr('all')));
+  x = one(Object.assign(search({ size: 0, query: win, aggs: { svc: { terms: { field: 'service.name' } } } }), { condition: { script: { source: 'for (def b : ctx.payload.aggregations.svc.buckets) {\n  if (b.doc_count >= params.n) { return true; }\n}\nreturn false;', params: { n: 7 } } }, actions: {} }));
+  check(/countIf\(doc_count >= 7\) > 0/.test(cond(x)), 'watches, boucle Painless sur les groupes : au moins un groupe', cond(x));
+  x = one(Object.assign(search({ size: 3, query: win }), { condition: { script: 'return ctx.payload.hits.hits.size() >= 3' }, actions: {} }));
+  check(/count\(\) >= 3 AS declenchee/.test(cond(x)) && /LIMIT 3/.test(cond(x)), 'watches, taille de hits.hits : documents renvoyés, limités par size', cond(x));
+  x = one(Object.assign(search({ size: 0, query: win }), { condition: { array_compare: { 'ctx.payload.hits.hits': { path: '_source.event.duration', gt: { value: 1 } } } }, actions: {} }));
+  check(/SELECT 0 AS declenchee/.test(cond(x)), 'watches, liste de documents avec size: 0 : toujours vide', cond(x));
+  x = one(Object.assign(search({ size: 0, query: win }), { condition: { compare: { 'ctx.payload.hits.total': { gt: '<{now-5m}>' } } }, actions: {} }));
+  check(x.verdict === 'todo' && has(x, 'date math dans la condition'), 'watches, date math dans la condition : à reprendre');
+  x = one(Object.assign(search({ size: 0, query: win }), { condition: { compare: { 'ctx.payload.hits.total': { gt: '{{ctx.payload._shards.total}}' } } }, actions: {} }));
+  check(x.verdict === 'todo' && has(x, 'valeur comparée lue dans le payload'), 'watches, valeur comparée lue dans le payload : à reprendre');
+  x = one(Object.assign(search({ size: 0, query: win }), { condition: { script: { source: 'def n = 0; for (h in ctx.payload.hits.hits) { n += h._score } return n > 3;' } }, actions: {} }));
+  check(x.verdict === 'todo' && has(x, 'condition Painless'), 'watches, script Painless hors des formes reconnues : à reprendre');
+  x = one(Object.assign(search({ size: 0, query: win }), { condition: { never: {} }, actions: {} }));
+  check(has(x, 'condition jamais vraie') && has(x, 'aucune action') && !x.queries.some(q => q.title === 'Condition'), 'watches, condition never et aucune action : signalées');
+
+  // Valeurs connues dans la watch : métadonnées, identifiant, paramètres d’un modèle de recherche
+  x = one({ trigger: { schedule: { interval: '1m' } }, metadata: { svc: 'checkout', n: 3, codes: [500, 503] }, input: { search: { request: { indices: ['logs-web-*'], template: { source: '{"size": {{taille}}, "query": {"bool": {"filter": [{"term": {"service.name": "{{ctx.metadata.svc}}"}}, {"terms": {"http.response.status_code": {{#toJson}}ctx.metadata.codes{{/toJson}}}}, {"term": {"host.name": "{{ctx.watch_id}}"}}]}}}', params: { taille: 0 } } } } }, condition: { compare: { 'ctx.payload.hits.total': { gte: '{{ctx.metadata.n}}' } } }, actions: {} }, 'web-1');
+  check(/service\.name = 'checkout'/.test(cond(x)) && /IN \(500, 503\)/.test(cond(x)) && /host\.name = 'web-1'/.test(cond(x)) && /count >= 3/.test(cond(x)), 'watches, metadata, watch_id et paramètres du modèle remplacés avant la traduction', cond(x));
+  x = one(Object.assign(search({ size: 0, query: { range: { '@timestamp': { gte: '{{ctx.trigger.scheduled_time}}', format: 'strict_date_optional_time||epoch_millis' } } } }), { condition: { always: {} }, actions: {} }));
+  check(/parseDateTime64BestEffort\(\{scheduled_time:String\}/.test(cond(x, 'Recherche')), 'modèle de date, format strict_date_optional_time||epoch_millis : le premier format décide', cond(x, 'Recherche'));
+  check(/fromUnixTimestamp64Milli\(toInt64\(\{t:String\}\)\)/.test(E.translateDSL(JSON.stringify({ query: { range: { '@timestamp': { gte: '{{t}}', format: 'epoch_millis||strict_date_optional_time' } } } }), E.DEFAULT_CONFIG, {}).sql), 'modèle de date, format epoch_millis en premier : lu en epoch');
+
+  // Seuil de l’interface Watcher : metadata.watcherui décrit la condition
+  const th = byId('6f1d0c2e-5b7a-4c1e-9e0d-3a2b1c4d5e6f');
+  check(th.kind === 'threshold' && th.verdict === 'ready' && /countIf\(ifNull\(metricAgg > 800000000, 0\)\) > 0/.test(cond(th)), 'watches, seuil de l’interface Watcher : condition lue dans watcherui', cond(th));
+  check(byId('kQ7fW3aZTGa0b1c2d3e4fA_elasticsearch_cluster_status').skipped && watcherRep.summary.skipped === 1, 'watches, alerte de Stack Monitoring : sans objet, hors du décompte');
+  check(byId('sante-cluster').verdict === 'todo' && byId('sante-cluster').issues.filter(i => i.kind === 'todo').length === 1, 'watches, entrée http : à reprendre une fois, la condition suit son entrée');
+  check(byId('echecs-de-connexion').verdict === 'todo' && has(byId('echecs-de-connexion'), 'référence à une entrée précédente'), 'watches, chaîne d’entrées : référence à la première entrée, à reprendre');
+  check(has(byId('erreurs-paiement'), 'index en date math') && byId('erreurs-paiement').queries.some(q => q.table === 'logs.web'), 'watches, index en date math : motif, table trouvée, à vérifier');
+  check(byId('fin-de-mois').verdict === 'todo' && has(byId('fin-de-mois'), 'modèle de recherche stocké') && !byId('fin-de-mois').active, 'watches, modèle de recherche stocké : à reprendre ; ?active=false lu');
+  check(watcherRep.summary.effort.hours === watcherRep.entries.reduce((n, e) => n + e.effort, 0), 'watches, effort total : somme des watches');
+
+  // Secrets : jamais dans le rapport, masqués dans un export
+  const md = E.watcherReportMarkdown(watcherRep) + E.watcherReportCSV(watcherRep) + E.watcherReportHTML(watcherRep, 't');
+  check(!/es_redacted|jeton=secret|exploitation@exemple\.fr/.test(md), 'watches, rapport : ni mot de passe, ni jeton d’URL, ni adresse e-mail');
+  const scrubbed = JSON.stringify(E.watcherScrub({ a: { webhook: { url: 'https://u:motdepasse@h.fr/x?canal=ops&token=abc123', auth: { basic: { username: 'u', password: 'p' } }, headers: { Authorization: 'Bearer t' } } } }));
+  check(!/motdepasse|"p"|Bearer t|abc123/.test(scrubbed) && /"username":"u"/.test(scrubbed) && /canal=ops/.test(scrubbed), 'watches, export : mots de passe, en-têtes d’autorisation et identifiants d’URL masqués', scrubbed);
+}
 
 process.stdout.write(failures ? `\n${failures} échec(s)\n` : '\nTous les tests passent.\n');
 process.exit(failures ? 1 : 0);

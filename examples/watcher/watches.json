@@ -1,0 +1,285 @@
+{
+  "count": 9,
+  "watches": [
+    {
+      "_id": "erreurs-5xx",
+      "watch": {
+        "trigger": { "schedule": { "interval": "5m" } },
+        "input": {
+          "search": {
+            "request": {
+              "indices": ["logs-web-*"],
+              "body": {
+                "size": 0,
+                "query": {
+                  "bool": {
+                    "filter": [
+                      { "range": { "@timestamp": { "gte": "{{ctx.trigger.scheduled_time}}||-5m", "lte": "{{ctx.trigger.scheduled_time}}" } } },
+                      { "range": { "http.response.status_code": { "gte": 500 } } },
+                      { "term": { "service.environment": "{{ctx.metadata.environnement}}" } }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "condition": { "compare": { "ctx.payload.hits.total": { "gt": "{{ctx.metadata.seuil}}" } } },
+        "actions": {
+          "equipe_ops": {
+            "throttle_period": "15m",
+            "email": {
+              "to": ["exploitation@exemple.fr"],
+              "subject": "{{ctx.payload.hits.total}} erreurs 5xx en 5 minutes",
+              "body": { "text": "Seuil : {{ctx.metadata.seuil}} erreurs." }
+            }
+          },
+          "canal_slack": {
+            "slack": { "message": { "to": ["#exploitation"], "text": "Erreurs 5xx : {{ctx.payload.hits.total}}" } }
+          }
+        },
+        "metadata": { "name": "Pic d’erreurs 5xx", "seuil": 20, "environnement": "production" }
+      },
+      "status": { "state": { "active": true }, "last_checked": "2026-10-28T19:55:00.000Z", "last_met_condition": "2026-10-27T08:10:00.000Z" }
+    },
+    {
+      "_id": "latence-par-service",
+      "watch": {
+        "trigger": { "schedule": { "cron": "0 0/10 * * * ?" } },
+        "input": {
+          "search": {
+            "request": {
+              "indices": ["logs-web-*"],
+              "body": {
+                "size": 0,
+                "query": { "range": { "@timestamp": { "gte": "{{ctx.trigger.scheduled_time}}||-15m", "lte": "{{ctx.trigger.scheduled_time}}" } } },
+                "aggs": {
+                  "services": {
+                    "terms": { "field": "service.name", "size": 10 },
+                    "aggs": { "latence": { "avg": { "field": "event.duration" } } }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "condition": {
+          "array_compare": {
+            "ctx.payload.aggregations.services.buckets": { "path": "latence.value", "gte": { "value": 500000000, "quantifier": "some" } }
+          }
+        },
+        "actions": {
+          "astreinte": {
+            "webhook": {
+              "scheme": "https", "host": "alertes.exemple.fr", "port": 443, "method": "post", "path": "/hooks/latence",
+              "auth": { "basic": { "username": "watcher", "password": "::es_redacted::" } },
+              "body": "{{#toJson}}ctx.payload.aggregations.services.buckets{{/toJson}}"
+            }
+          }
+        },
+        "metadata": { "name": "Latence moyenne par service" }
+      },
+      "status": { "state": { "active": true } }
+    },
+    {
+      "_id": "6f1d0c2e-5b7a-4c1e-9e0d-3a2b1c4d5e6f",
+      "watch": {
+        "trigger": { "schedule": { "interval": "1m" } },
+        "input": {
+          "search": {
+            "request": {
+              "indices": ["logs-web-*"],
+              "body": {
+                "size": 0,
+                "query": {
+                  "bool": {
+                    "filter": {
+                      "range": { "@timestamp": { "gte": "{{ctx.trigger.scheduled_time}}||-5m", "lte": "{{ctx.trigger.scheduled_time}}", "format": "strict_date_optional_time||epoch_millis" } }
+                    }
+                  }
+                },
+                "aggs": {
+                  "bucketAgg": {
+                    "terms": { "field": "host.name", "size": 5, "order": { "metricAgg": "desc" } },
+                    "aggs": { "metricAgg": { "max": { "field": "event.duration" } } }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "condition": {
+          "script": {
+            "source": "ArrayList arr = ctx.payload.aggregations.bucketAgg.buckets; for (int i = 0; i < arr.length; i++) { if (arr[i]['metricAgg'].value > params.threshold) { return true; } } return false;",
+            "params": { "threshold": 800000000 }
+          }
+        },
+        "actions": { "logging_1": { "logging": { "level": "info", "text": "Durée maximale dépassée sur au moins un hôte." } } },
+        "metadata": {
+          "name": "Durée maximale par hôte",
+          "watcherui": {
+            "index": ["logs-web-*"], "time_field": "@timestamp", "trigger_interval_size": 1, "trigger_interval_unit": "m",
+            "agg_type": "max", "agg_field": "event.duration", "term_size": 5, "term_field": "host.name",
+            "threshold_comparator": ">", "time_window_size": 5, "time_window_unit": "m", "threshold": [800000000]
+          },
+          "xpack": { "type": "threshold" }
+        }
+      },
+      "status": { "state": { "active": true } }
+    },
+    {
+      "_id": "connexions-refusees",
+      "watch": {
+        "trigger": { "schedule": { "daily": { "at": ["08:00", "18:30"] } } },
+        "input": {
+          "search": {
+            "request": {
+              "indices": ["logs-web-*"],
+              "body": {
+                "size": 0,
+                "query": {
+                  "bool": {
+                    "must": [{ "match_phrase": { "message": "connection refused" } }],
+                    "filter": [{ "range": { "@timestamp": { "gte": "{{ctx.trigger.scheduled_time}}||-1d" } } }]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "condition": { "script": { "source": "return ctx.payload.hits.total.value > 0;" } },
+        "actions": { "journal": { "logging": { "level": "warn", "text": "{{ctx.payload.hits.total}} connexions refusées en 24 heures" } } },
+        "metadata": { "name": "Connexions refusées" }
+      },
+      "status": { "state": { "active": true }, "last_checked": "2026-10-28T18:30:00.000Z" }
+    },
+    {
+      "_id": "rapport-hebdo",
+      "watch": {
+        "trigger": { "schedule": { "weekly": { "on": "monday", "at": "07:00" } } },
+        "input": {
+          "search": {
+            "request": {
+              "indices": ["logs-web-*"],
+              "body": {
+                "size": 0,
+                "query": { "range": { "@timestamp": { "gte": "{{ctx.trigger.scheduled_time}}||-7d/d", "lt": "{{ctx.trigger.scheduled_time}}||/d" } } },
+                "aggs": { "pages": { "terms": { "field": "url.path", "size": 5 } } }
+              }
+            }
+          }
+        },
+        "condition": { "always": {} },
+        "actions": {
+          "direction": {
+            "email": {
+              "to": ["direction@exemple.fr", "produit@exemple.fr"],
+              "subject": "Pages les plus vues de la semaine",
+              "body": { "html": "{{#ctx.payload.aggregations.pages.buckets}}<li>{{key}} : {{doc_count}}</li>{{/ctx.payload.aggregations.pages.buckets}}" }
+            }
+          }
+        },
+        "metadata": { "name": "Rapport hebdomadaire des pages" }
+      },
+      "status": { "state": { "active": true } }
+    },
+    {
+      "_id": "sante-cluster",
+      "watch": {
+        "trigger": { "schedule": { "interval": "1m" } },
+        "input": { "http": { "request": { "host": "localhost", "port": 9200, "path": "/_cluster/health" } } },
+        "condition": { "compare": { "ctx.payload.status": { "not_eq": "green" } } },
+        "actions": { "astreinte": { "pagerduty": { "account": "astreinte", "event": { "description": "Cluster {{ctx.payload.cluster_name}} : {{ctx.payload.status}}" } } } },
+        "throttle_period": "30m",
+        "metadata": { "name": "Santé du cluster Elasticsearch" }
+      },
+      "status": { "state": { "active": true } }
+    },
+    {
+      "_id": "echecs-de-connexion",
+      "watch": {
+        "trigger": { "schedule": { "hourly": { "minute": [0, 30] } } },
+        "input": {
+          "chain": {
+            "inputs": [
+              {
+                "echecs": {
+                  "search": {
+                    "request": {
+                      "indices": ["logs-web-*"],
+                      "body": {
+                        "size": 0,
+                        "query": {
+                          "bool": {
+                            "filter": [
+                              { "term": { "event.category": "authentication" } },
+                              { "term": { "event.outcome": "failure" } },
+                              { "range": { "@timestamp": { "gte": "{{ctx.trigger.scheduled_time}}||-30m" } } }
+                            ]
+                          }
+                        },
+                        "aggs": { "utilisateurs": { "terms": { "field": "user.name", "size": 20, "min_doc_count": 5 } } }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "detail": {
+                  "search": {
+                    "request": {
+                      "indices": ["logs-web-*"],
+                      "body": {
+                        "size": 20,
+                        "query": { "term": { "user.name": "{{ctx.payload.echecs.aggregations.utilisateurs.buckets.0.key}}" } },
+                        "sort": [{ "@timestamp": "desc" }]
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "condition": { "script": { "source": "return ctx.payload.echecs.aggregations.utilisateurs.buckets.size() > 0" } },
+        "actions": { "securite": { "email": { "to": ["securite@exemple.fr"], "subject": "Échecs de connexion répétés : {{ctx.payload.echecs.aggregations.utilisateurs.buckets.0.key}}" } } },
+        "metadata": { "name": "Échecs de connexion répétés" }
+      },
+      "status": { "state": { "active": true } }
+    },
+    {
+      "_id": "ancien-export",
+      "watch": {
+        "trigger": { "schedule": { "interval": "1h" } },
+        "input": {
+          "search": {
+            "request": {
+              "indices": ["logs-web-*"],
+              "template": {
+                "source": "{ \"size\": {{taille}}, \"query\": { \"bool\": { \"filter\": [ { \"term\": { \"service.name\": \"{{service}}\" } }, { \"range\": { \"@timestamp\": { \"gte\": \"{{ctx.trigger.scheduled_time}}||-1h\" } } } ] } }, \"sort\": [ { \"@timestamp\": \"desc\" } ] }",
+                "params": { "service": "panier", "taille": 100 }
+              }
+            }
+          }
+        },
+        "condition": {
+          "array_compare": { "ctx.payload.hits.hits": { "path": "_source.http.response.bytes", "gte": { "value": 4000 } } }
+        },
+        "actions": { "archive": { "index": { "index": "export-panier" } } },
+        "metadata": { "name": "Ancien export des réponses volumineuses" }
+      },
+      "status": { "state": { "active": false } }
+    },
+    {
+      "_id": "kQ7fW3aZTGa0b1c2d3e4fA_elasticsearch_cluster_status",
+      "watch": {
+        "trigger": { "schedule": { "interval": "1m" } },
+        "input": { "chain": { "inputs": [ { "check": { "search": { "request": { "indices": [".monitoring-es-*"], "body": { "size": 1 } } } } } ] } },
+        "condition": { "script": { "source": "ctx.vars.fails_check = ctx.payload.check.hits.total != 0; return ctx.vars.fails_check;" } },
+        "actions": { "add_to_alerts_index": { "index": { "index": ".monitoring-alerts-7" } } },
+        "metadata": { "name": "X-Pack Monitoring: Cluster Status", "xpack": { "alert_index": ".monitoring-alerts-7", "cluster_uuid": "kQ7fW3aZTGa0b1c2d3e4fA", "type": "monitoring" } }
+      },
+      "status": { "state": { "active": true } }
+    }
+  ]
+}

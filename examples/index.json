@@ -53,6 +53,16 @@
       "file": "grafana/supervision_es.json"
     }
   ],
+  "watcher": [
+    {
+      "title": "Watches d’un cluster (_query/watches)",
+      "file": "watcher/watches.json"
+    },
+    {
+      "title": "Watches de la console Kibana",
+      "file": "watcher/console.txt"
+    }
+  ],
   "schema": [
     {
       "title": "Modèle d’index de logs applicatifs",

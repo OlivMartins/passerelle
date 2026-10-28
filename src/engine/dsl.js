@@ -722,10 +722,12 @@ function rangeClause(ctx, field, spec0) {
       sql = grafanaTime(paramSource(ctx, v));
       date = true;
     } else if (dateField && isParamMark(v)) {
-      // Modèle (Watcher, Grafana) : la valeur arrive à l’exécution, lue selon le format de la requête
+      // Modèle (Watcher, Grafana) : la valeur arrive à l’exécution, lue selon le format de la requête. Elasticsearch
+      // essaie les formats dans l’ordre (strict_date_optional_time||epoch_millis) : le premier décide.
       const zone = zoneOf(ctx.cfg, tz);
-      sql = /epoch_millis/.test(fmt) ? `fromUnixTimestamp64Milli(toInt64(${chStr(v)}))`
-        : /epoch_second/.test(fmt) ? `toDateTime(toInt64(${chStr(v)}))`
+      const first = String(fmt).split('||')[0];
+      sql = /epoch_millis/.test(first) ? `fromUnixTimestamp64Milli(toInt64(${chStr(v)}))`
+        : /epoch_second/.test(first) ? `toDateTime(toInt64(${chStr(v)}))`
           : `parseDateTime64BestEffort(${chStr(v)}, 3${zone ? `, ${chStr(zone)}` : ''})`;
       date = true;
     } else if (dateField && isEpoch(v)) {

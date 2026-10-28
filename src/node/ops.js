@@ -152,7 +152,7 @@ function opsScopeOf(pathname) {
 
 /* ---------- Cycle de vie d’une requête ---------- */
 const OPS_ID = /^[A-Za-z0-9._:-]{8,100}$/;
-const OPS_ROUTES = new Set(['/', '/healthz', '/metrics', '/v1/config', '/v1/translate/dsl', '/v1/translate/logstash', '/v1/translate/logstash/pipelines', '/v1/translate/ingest', '/v1/translate/grafana', '/v1/inventory/kibana', '/v1/schema/ddl', '/v1/schema/analyzers', '/v1/validate/vector', '/v1/validate/sql']);
+const OPS_ROUTES = new Set(['/', '/healthz', '/metrics', '/v1/config', '/v1/translate/dsl', '/v1/translate/logstash', '/v1/translate/logstash/pipelines', '/v1/translate/ingest', '/v1/translate/grafana', '/v1/translate/watcher', '/v1/inventory/kibana', '/v1/schema/ddl', '/v1/schema/analyzers', '/v1/validate/vector', '/v1/validate/sql']);
 const OPS_METHODS = new Set(['GET', 'POST', 'HEAD', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']);
 const opsLive = { inflight: 0 };
 const opsRouteOf = pathname => (pathname === '/index.html' ? '/' : OPS_ROUTES.has(pathname) ? pathname : 'autre');

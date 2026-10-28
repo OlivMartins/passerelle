@@ -69,6 +69,18 @@ jobs:
             grep -E -A2 'ÉCHEC|^Bilan|^Échecs' diff.log | head -60 | while IFS= read -r l; do echo "::error::${l:0:900}"; done
             exit "$status"
           }
+      # Chaque watch du banc jouée par Watcher (_execute) et par sa traduction : même décision des deux côtés
+      - name: Watches (Watcher / ClickHouse)
+        env:
+          CLICKHOUSE_LOCAL: ${{ github.workspace }}/clickhouse local
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:watcher 2>&1 | tee watcher.log || {
+            status=$?
+            grep -E '^✗|^Bilan' watcher.log | head -40 | while IFS= read -r l; do echo "::error::${l:0:900}"; done
+            exit "$status"
+          }
 
   # Sans Elasticsearch : les attributs (Map, JSON) donnent le résultat de la table plate, et ce que Passerelle
   # génère pour ses exemples (schéma, inventaire Kibana) s'exécute sur ClickHouse avec les valeurs attendues

@@ -219,6 +219,19 @@ try {
   r = await request(prod, 'POST', '/v1/translate/grafana', { body: JSON.stringify({ panels: [{ type: 'text', title: 't' }] }), headers: auth });
   check(r.status === 422 && /aucune requête Elasticsearch/.test(r.json.error), 'tableau de bord sans Elasticsearch : refusé', `statut ${r.status}`);
 
+  /* ---------- Watches Elasticsearch ---------- */
+  const watches = rd('examples/watcher/watches.json');
+  r = await request(prod, 'POST', '/v1/translate/watcher', { body: watches, headers: auth });
+  check(r.status === 200 && r.json.summary.watches === 8 && r.json.summary.skipped === 1 && r.json.entries.some(x => x.queries.some(q => /AS declenchee/.test(q.sql))), 'watches : rapport JSON, décisions SQL, Stack Monitoring à part', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/watcher?format=md', { body: rd('examples/watcher/console.txt'), headers: auth });
+  check(r.status === 200 && /^# Migration des watches/.test(r.body) && /erreurs-paiement/.test(r.body), 'watches : console Kibana, rapport Markdown', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/watcher?format=csv', { body: watches, headers: auth });
+  check(r.status === 200 && /^\ufeffIdentifiant;/.test(r.body), 'watches : CSV', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/watcher?format=toml', { body: watches, headers: auth });
+  check(r.status === 400, 'watches : format inconnu refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/watcher', { body: JSON.stringify({ query: { match_all: {} } }), headers: auth });
+  check(r.status === 422 && /aucune watch/.test(r.json.error), 'watches : une requête DSL n’est pas une watch', `statut ${r.status}`);
+
   /* ---------- Sens de tri des documents ---------- */
   r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ sort: [{ service: { order: 'desc; DROP TABLE logs.events --' } }] }), headers: auth });
   check(r.status === 422 && !/DROP/i.test(r.json && r.json.sql || ''), 'sens de tri inconnu refusé', `statut ${r.status}`);
@@ -296,6 +309,18 @@ c = cli('grafana', 'examples/grafana/supervision_es.json', '--config', 'examples
 check(c.status === 0 && existsSync(join(grafanaOut, 'supervision_es.clickhouse.json')) && existsSync(join(grafanaOut, 'supervision_es.rapport.md')), 'grafana --out : tableau de bord converti et rapport', `code ${c.status} ${c.stderr}`);
 c = cli('grafana', 'examples/grafana/supervision_es.json', '--fail-on', 'todo');
 check(c.status === 2 && /"grafana-clickhouse-datasource"/.test(c.stdout), 'grafana --fail-on todo : JSON sur la sortie standard, code 2', `code ${c.status}`);
+
+const watcherOut = join(TMP, 'watcher');
+c = cli('watcher', 'examples/watcher/', '--config', 'examples/watcher/passerelle.yaml', '--out', watcherOut);
+check(c.status === 0 && ['md', 'html', 'csv', 'json'].every(f => existsSync(join(watcherOut, `rapport.${f}`))) && readdirSync(join(watcherOut, 'sql')).length === 8 && !existsSync(join(watcherOut, 'export-watches.json')) && /10 watch\(es\)/.test(c.stderr), 'watcher --out : rapports et un fichier SQL par watch traduite', `code ${c.status} ${c.stderr}`);
+c = cli('watcher', 'examples/watcher/watches.json', '--fail-on', 'todo');
+check(c.status === 2 && /^# Migration des watches/.test(c.stdout), 'watcher --fail-on todo : rapport sur la sortie standard, code 2', `code ${c.status}`);
+c = cli('watcher', 'examples/watcher/watches.json', '--format', 'yaml');
+check(c.status === 1 && /--format/.test(c.stderr), 'watcher --format : formats du rapport seulement', `code ${c.status}`);
+c = cli('watcher', 'examples/watcher/watches.json', '--es', 'http://127.0.0.1:1');
+check(c.status === 1 && /watcher pull/.test(c.stderr), 'watcher --es sans pull : refusé', `code ${c.status}`);
+c = cli('watcher');
+check(c.status === 1 && /aucune watch à lire/.test(c.stderr), 'watcher sans fichier : refusé, avec un exemple', `code ${c.status}`);
 
 const typo = join(TMP, 'faute.yaml');
 writeFileSync(typo, 'version: 1\nclickhous:\n  endpoint: http://localhost:8123\nkafka:\n  bootstrap_server: k:9092\n');
