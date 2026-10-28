@@ -2,6 +2,17 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Ajouté
+
+- **Interface, section « Kibana »** : on y dépose un export d’objets sauvegardés (`.ndjson`, plusieurs exports réunis). À gauche, les tableaux de bord et leurs panneaux, puis les objets qu’aucun tableau de bord n’affiche, chacun avec son verdict et un filtre par titre ; à droite, les requêtes SQL ClickHouse de l’objet choisi (tout le tableau de bord, panneau après panneau, ou un seul panneau), avec le verdict, l’effort et les remarques de l’inventaire. Les onglets montrent aussi la requête DSL que Kibana envoie, reconstituée (« Ouvrir dans Requêtes » la reprend dans la section Requêtes), et la lecture de l’objet : vue de données, table, paramètres, champs cités, détail de l’effort. La vue d’ensemble reprend la synthèse de l’inventaire ; l’archive téléchargée contient un fichier SQL par objet et l’inventaire en Markdown, CSV et HTML.
+- Un fichier `.ndjson`, ou un `.json` dont la première ligne est un objet sauvegardé ou une règle de détection, déposé n’importe où dans l’interface ouvre la section Kibana (depuis « Autres sources », il reste dans l’inventaire). Le test d’interface (`npm run test:ui`) couvre la nouvelle section.
+
+### Modifié
+
+- Interface : les tableaux des rapports (inventaire, Grafana, analyseurs) sont mis en forme, colonnes de nombres alignées à droite ; sur mobile, la barre de navigation prend des libellés courts pour tenir ses huit sections.
+
 ## [1.4.0] - 2026-10-28
 
 ### Ajouté
@@ -320,6 +331,7 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
+[Non publié]: https://github.com/OlivMartins/passerelle/compare/v1.4.0...HEAD
 [1.4.0]: https://github.com/OlivMartins/passerelle/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/OlivMartins/passerelle/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/OlivMartins/passerelle/compare/v1.1.1...v1.2.0

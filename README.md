@@ -255,7 +255,7 @@ Une migration ne se limite pas aux requêtes. Passerelle lit aussi ce qui les en
 - **Plusieurs pipelines** : `passerelle ls2vector pipelines.yml` relie les pipelines qui s’appellent entre eux.
 - **Analyseurs personnalisés** (`passerelle schema analyzers mapping.json`) : un analyseur Elasticsearch devient une colonne de mots calculée et un index plein texte ClickHouse, avec l’aperçu des mots produits. [Ce qui est repris, et les écarts](docs/ANALYSEURS.md).
 
-Tout cela est aussi dans l’interface (sections « Ingestion » et « Autres sources »), dans l’API (`/v1/schema/ddl` et `/v1/schema/analyzers` pour le schéma) et en ligne de commande.
+Tout cela est aussi dans l’interface (sections « Ingestion », « Kibana » et « Autres sources » ; la section « Kibana » montre, panneau par panneau, les requêtes SQL d’un tableau de bord déposé), dans l’API (`/v1/schema/ddl` et `/v1/schema/analyzers` pour le schéma) et en ligne de commande.
 
 ## Une configuration, versionnée avec votre code
 
