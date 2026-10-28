@@ -45,10 +45,14 @@ const DEFAULT_CONFIG = {
   elasticsearch: { endpoint: '', user: '${ES_USER}', password: '${ES_PASSWORD}', api_key: '${ES_API_KEY}' },
   // time_field : le champ de date côté Elasticsearch (vide : celui que field_mapping envoie sur la colonne de temps de la table)
   // timeout : secondes accordées à chaque requête, de chaque côté ; examples : écarts cités par requête dans le rapport
-  verify: { time_field: '', window: { length: '1h', lag: '10m' }, tolerance: 1e-9, examples: 3, timeout: 60 }
+  verify: { time_field: '', window: { length: '1h', lag: '10m' }, tolerance: 1e-9, examples: 3, timeout: 60 },
+  // Exploitation du service (passerelle serve). tokens : [{ name, token: '${VARIABLE}', scopes: [translate, validate, metrics] }] ;
+  // trusted_proxies : les reverse proxies dont on croit X-Forwarded-For et l’en-tête d’identité ; audit_log : un fichier, ou le journal du service s’il est vide ;
+  // tracing : un collecteur OTLP/HTTP (par exemple http://collecteur:4318/v1/traces), vide : aucune trace
+  server: { tokens: [], trusted_proxies: [], identity_header: '', metrics: true, audit_log: '', tracing: { endpoint: '', headers: {}, sample_ratio: 1, service_name: 'passerelle' } }
 };
 // Tables de correspondance : leurs clés sont libres, et une valeur donnée remplace la valeur par défaut en entier
-const FREE_MAPS = ['index_mapping', 'field_mapping', 'columns', 'names', 'tables', 'attributes', 'attribute_types', 'analyzers'];
+const FREE_MAPS = ['index_mapping', 'field_mapping', 'columns', 'names', 'tables', 'attributes', 'attribute_types', 'analyzers', 'headers'];
 
 function mergeConfig(base, over) {
   const out = clone(base);

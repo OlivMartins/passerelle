@@ -1808,7 +1808,18 @@ function parseYAMLConfig(text) {
       const line = lines[pos]; const ind = line.match(/^ */)[0].length;
       if (ind < indentLvl) break;
       const t = line.trim();
-      if (t.startsWith('- ')) { if (!obj) obj = []; obj.push(scalar(t.slice(2))); pos++; continue; }
+      if (t.startsWith('- ')) {
+        if (!obj) obj = [];
+        const rest = t.slice(2);
+        // « - clé: valeur » : un élément qui est une table. Sa première paire est sur la ligne du tiret, les autres
+        // à deux colonnes du tiret ; la ligne est lue comme si elle était déjà à cette indentation.
+        if (/^('[^']*'|"[^"]*"|[A-Za-z_][\w.-]*):(\s|$)/.test(rest)) {
+          lines[pos] = ' '.repeat(ind + 2) + rest;
+          obj.push(block(ind + 2));
+          continue;
+        }
+        obj.push(scalar(rest)); pos++; continue;
+      }
       const m = /^('[^']*'|"[^"]*"|[^:]+):(\s+(.*))?$/.exec(t);
       if (!m) { pos++; continue; }
       if (!obj) obj = {};

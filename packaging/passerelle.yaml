@@ -61,3 +61,22 @@ vector:
 #   tolerance: 1e-9
 #   examples: 3
 #   timeout: 60
+# Exploitation du service (passerelle serve) : jetons à portée, identité du reverse proxy, audit, métriques, traces
+# server:
+#   tokens:                           # en plus de PASSERELLE_TOKEN, qui garde toutes les portées (nom « principal »)
+#     - name: ci                      # le nom paraît dans le journal, l'audit et les métriques ; jamais la valeur
+#       token: '${PASSERELLE_TOKEN_CI}'
+#       scopes: [translate, validate] # translate : traductions, inventaire, schéma, /v1/config ; validate : validations ; metrics : /metrics
+#     - name: prometheus
+#       token: '${PASSERELLE_TOKEN_PROMETHEUS}'
+#       scopes: [metrics]
+#   trusted_proxies: [127.0.0.1]      # adresses ou réseaux CIDR du reverse proxy ; seuls eux fixent l'identité, l'adresse du client et X-Request-Id
+#   identity_header: X-Forwarded-User # l'utilisateur authentifié par le proxy (SSO), repris dans le journal et l'audit
+#   metrics: true                     # false : /metrics n'existe pas
+#   audit_log: /var/log/passerelle/audit.jsonl   # vide : l'audit passe par le journal du service (msg « audit »)
+#   tracing:
+#     endpoint: http://collecteur:4318/v1/traces   # OTLP/HTTP en JSON ; vide : pas de traces
+#     headers:
+#       authorization: 'Bearer ${OTEL_AUTHORIZATION}'
+#     sample_ratio: 1                 # 0 à 1 ; un appelant qui a décidé d'échantillonner (traceparent) est suivi
+#     service_name: passerelle

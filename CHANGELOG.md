@@ -14,11 +14,25 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
   - **`--no-values`** : le rapport ne cite ni clé de groupe, ni identifiant, ni champ, ni nom de cluster, seulement des comptes, pour qu’il quitte la machine du client.
   - Codes de sortie : `0` tout est identique, `2` au moins un écart (ou un résultat non concluant avec `--strict`), `1` au moins une erreur.
   - Nouvelles sections de configuration : `elasticsearch` (`endpoint`, `user`, `password`, `api_key`) et `verify` (`time_field`, `window`, `tolerance`, `examples`, `timeout`).
+- **Exploitation du service** (`passerelle serve`), nouveau code dans `src/node/ops.js`.
+  - **`/metrics`** au format texte de Prometheus : requêtes par méthode, route et statut, durées (histogramme), requêtes en cours, refus par raison, traductions par verdict, validations par résultat, rechargements, audit, export des traces, processus. Les étiquettes sont en nombre fixe : une route inconnue est comptée « autre ». `server.metrics: false` retire la route.
+  - **Jetons multiples à portée** (`server.tokens`) : chaque jeton a un nom et des portées `translate`, `validate`, `metrics`. `PASSERELLE_TOKEN` reste valable, avec les trois portées, sous le nom `principal`. Un jeton sans la portée d'une route reçoit 403. Le service refuse de démarrer, ou de recharger, quand la variable d'un jeton est vide, quand deux jetons ont la même valeur ou quand une portée est inconnue ; `check-config` signale un jeton écrit en clair.
+  - **Identifiant de requête** : `X-Request-Id` dans chaque réponse, repris dans le journal (`request_id`), l'audit et les spans. Celui d'un reverse proxy de confiance (`server.trusted_proxies`) est adopté ; celui d'un autre client est gardé à part (`client_request_id`).
+  - **Identité transmise par le reverse proxy** (`server.identity_header`) : reprise dans le journal et l'audit seulement quand elle vient d'un proxy de confiance, avec l'adresse du client lue dans `X-Forwarded-For` en partant de la droite.
+  - **Journal d'audit** (`server.audit_log`) : une ligne JSON par appel à l'API et par refus sur `/metrics`, avec jeton, identité, action, issue, durée, taille et empreinte du corps. Jamais le contenu ni la chaîne de requête. Fichier en `0600`, rouvert par `SIGHUP` pour la rotation ; le service ne démarre pas sans lui. Sans fichier, l'audit passe par le journal du service.
+  - **Traces OpenTelemetry** (`server.tracing`, OTLP/HTTP en JSON, sans bibliothèque) : un span par requête, des spans enfants pour ClickHouse et Vector, `traceparent` entrant repris et transmis à ClickHouse, taux d'échantillonnage, envoi par lots et à l'arrêt. Aucune requête ni SQL dans les spans ; un collecteur en panne ne gêne pas le service.
+  - L'unité systemd crée `/var/log/passerelle` (`LogsDirectory=`) pour l'audit. `tests/ops/run.mjs` (lancé par `npm test`) éprouve l'ensemble contre un faux ClickHouse et un faux collecteur.
 - Les bancs `tests/differential` et `tests/pipelines` emploient les comparateurs du moteur, plus leur propre copie. `tests/verify/run.mjs` (lancé par `npm test`) vérifie, contre une copie figée de l’ancien code, que l’extraction rend exactement les mêmes écarts, puis éprouve la commande contre un faux Elasticsearch, un faux ClickHouse, un faux Vector et un faux Logstash.
 
 ### Modifié
 
 - Le code propre à Node.js (entrées-sorties de la ligne de commande) se range dans `src/node/`, assemblé entre le moteur et `src/server.js`.
+- Chaque ligne de journal « requête » porte `request_id` (et `token`, `identity`, `trace_id` quand ils existent). Son `ip` est l'adresse du client, lue derrière un proxy de confiance (`peer` donne alors celle du proxy).
+- Le message sans jeton nomme aussi `server.tokens`. La section `server` n'est jamais diffusée par `/v1/config` ni par l'interface.
+
+### Corrigé
+
+- La configuration YAML accepte une liste de tables (`- name: …` suivi de ses clés), qu'elle lisait comme des textes.
 
 ## [1.5.0] - 2026-10-28
 

@@ -25,6 +25,16 @@ S’y ajoutent des garde-fous ciblés : refus des clés inconnues, verdicts, par
 
 Il ne prouve pas la traduction : ce sont les bancs, qui demandent Docker, et `passerelle verify` sur vos données.
 
+`npm test` lance enfin `tests/ops/run.mjs` : l’exploitation du service, contre une fausse instance ClickHouse et un faux collecteur OpenTelemetry (Linux seulement). Il éprouve :
+
+- l’adresse du client et l’identité derrière un reverse proxy (pair de confiance ou non, plusieurs sauts, faux sauts ajoutés par le client) ;
+- les jetons à portée, route par route, la configuration refusée au démarrage et au rechargement, et que ni la page, ni `/v1/config`, ni `/healthz` ne citent un jeton ;
+- l’identifiant de requête sur toutes les réponses, et le journal d’audit (champs, absence de contenu et de chaîne de requête, droits `0600`, rotation par `SIGHUP`, client parti avant la réponse) ;
+- `/metrics` : valeurs exactes des compteurs, histogrammes cohérents, nombre de séries borné ;
+- les traces : contexte de l’appelant, spans enfants, `traceparent` transmis à ClickHouse, lots, collecteur en panne, arrêt du service.
+
+Pas plus que les deux autres, il ne remplace une vraie chaîne : un vrai Prometheus ou un vrai collecteur n’y tournent pas.
+
 ## Banc différentiel : `npm run test:diff`
 
 Un instantané prouve que la sortie n’a pas changé, pas qu’elle est juste. Le banc exécute donc chaque requête DSL sur Elasticsearch, sa traduction sur ClickHouse, et compare les deux résultats ligne à ligne : clés, comptes, mesures et ordre.

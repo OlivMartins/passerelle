@@ -168,11 +168,12 @@ L’interface ne contient aucun secret, car la configuration diffusée masque le
 
 ## API
 
-Toutes les routes `/v1/*` exigent l’en-tête `Authorization: Bearer <PASSERELLE_TOKEN>`.
+Toutes les routes `/v1/*` exigent l’en-tête `Authorization: Bearer <PASSERELLE_TOKEN>`, ou celui d’un [jeton à portée](#jetons-à-portée-identité-et-audit) qui ouvre la route demandée. Chaque réponse porte un `X-Request-Id`, qu’on retrouve dans le journal et l’audit.
 
 | Méthode | Route | Rôle |
 |---|---|---|
 | GET | `/healthz` | État du service (sans jeton) |
+| GET | `/metrics` | Métriques au format texte de Prometheus (jeton de portée `metrics`) |
 | GET | `/v1/config` | Configuration active, secrets masqués |
 | POST | `/v1/translate/dsl?index=logs-*` | DSL (JSON ou format console Kibana) vers SQL, avec verdict, paramètres et remarques |
 | POST | `/v1/translate/logstash?format=yaml` | Pipeline `.conf` vers configuration Vector (`yaml` ou `toml`), avec verdict |
@@ -212,13 +213,83 @@ passerelle verify queries requetes/ --index 'logs-*' --out rapport/
 
 Chaque fichier reçoit un verdict : prête, à vérifier, à reprendre ou non reconnue. Codes de sortie : `0` succès, `1` erreur ou fichier non reconnu, `2` fichier à reprendre (`--fail-on todo`), ou à vérifier ou à reprendre (`--fail-on review`). `--verbose` affiche les remarques de chaque fichier.
 
+## Jetons à portée, identité et audit
+
+`PASSERELLE_TOKEN` ouvre toute l’API. Pour donner à chaque client ce dont il a besoin, déclarez des jetons dans `passerelle.yaml`, avec leur valeur dans `passerelle.env` :
+
+```yaml
+server:
+  tokens:
+    - name: ci                          # paraît dans le journal, l’audit et les métriques
+      token: '${PASSERELLE_TOKEN_CI}'
+      scopes: [translate, validate]
+    - name: prometheus
+      token: '${PASSERELLE_TOKEN_PROMETHEUS}'
+      scopes: [metrics]
+```
+
+| Portée | Routes |
+|---|---|
+| `translate` | `/v1/translate/*`, `/v1/inventory/*`, `/v1/schema/*`, `/v1/config` |
+| `validate` | `/v1/validate/sql`, `/v1/validate/vector` |
+| `metrics` | `/metrics` |
+
+`PASSERELLE_TOKEN` reste valable, avec les trois portées, sous le nom `principal`. Un jeton qui n’a pas la portée d’une route reçoit `403`, un jeton absent ou inconnu `401`. Les valeurs ne sont jamais écrites : le journal, l’audit et `/metrics` ne citent que le nom du jeton.
+
+Le service refuse de démarrer (et `systemctl reload` refuse de recharger, en gardant la configuration précédente) si la variable d’un jeton est vide ou absente, si deux jetons ont la même valeur ou si une portée est inconnue : l’API ne reste pas ouverte par une faute de frappe. `passerelle check-config` signale un jeton écrit en clair, mais signale seulement, sans bloquer, une variable absente de l’environnement du contrôle (une intégration continue ne connaît pas vos secrets).
+
+### Identité transmise par le reverse proxy
+
+Derrière un proxy qui authentifie (oauth2-proxy, par exemple), le journal et l’audit peuvent dire **qui** a appelé, pas seulement quel jeton :
+
+```yaml
+server:
+  trusted_proxies: [127.0.0.1]          # adresses ou réseaux CIDR
+  identity_header: X-Forwarded-User
+```
+
+```nginx
+proxy_set_header X-Forwarded-User $remote_user;     # ou $upstream_http_x_auth_request_user
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Request-Id $request_id;
+```
+
+Seuls les pairs listés dans `trusted_proxies` sont crus : leur en-tête d’identité est repris (200 caractères au plus), leur `X-Forwarded-For` donne l’adresse du client (le premier saut, en partant de la droite, qui n’est pas lui-même un proxy de confiance), et leur `X-Request-Id` devient l’identifiant de la requête, celui de leur journal d’accès. Venant de tout autre pair, ces trois en-têtes sont ignorés : l’identifiant du client est gardé à part (`client_request_id`), et l’audit note `identity_untrusted` quand une identité a été refusée. L’identité n’est jamais une preuve d’accès : c’est le jeton qui ouvre les routes.
+
+### Journal d’audit
+
+```yaml
+server:
+  audit_log: /var/log/passerelle/audit.jsonl
+```
+
+Une ligne JSON par appel à l’API (`/v1/*`) et par refus sur `/metrics` : date, `request_id`, jeton, identité, adresse du client, action (`translate.dsl`, `validate.sql`…), statut, issue (`ok`, `refused`, `rejected`, `error`, `aborted`), verdict, durée, taille du corps et son empreinte SHA-256 tronquée à 16 caractères, qui permet de reconnaître la même requête sans la conserver. **Le contenu des requêtes n’y figure jamais.** Ni `/healthz`, ni l’interface, ni un relevé de `/metrics` réussi ne sont audités.
+
+Le fichier est créé en `0600`. Le service ne démarre pas s’il ne peut pas l’ouvrir. L’unité systemd fournie crée `/var/log/passerelle` (`LogsDirectory=`), le seul dossier ouvert en écriture au service. Pour la rotation, `logrotate` déplace le fichier et demande au service de le rouvrir :
+
+```
+/var/log/passerelle/audit.jsonl {
+    weekly
+    rotate 52
+    compress
+    delaycompress
+    missingok
+    notifempty
+    postrotate
+        systemctl reload passerelle >/dev/null 2>&1 || true
+    endscript
+}
+```
+
+Sans `audit_log`, l’audit passe par le journal du service (`journalctl -u passerelle`), avec `"msg":"audit"`.
+
 ## Sécurité
 
 - Le service tourne sous un utilisateur dédié, sans capacité ni élévation de privilèges, avec un système de fichiers en lecture seule et un `/tmp` privé.
 - Un filtre seccomp restreint les appels système au groupe `@system-service`. Les appels réellement utilisés, y compris l’exécution de `vector validate`, ont été relevés et sont tous couverts.
 - Score `systemd-analyze security passerelle` : **1.2 (OK)**. Les points restants sont inhérents à la fonction : accès réseau, et pages exécutables nécessaires au JIT de V8.
 - En-têtes HTTP : politique CSP stricte (script autorisé par empreinte SHA-256, aucun `unsafe-eval`), `X-Frame-Options: DENY`, `nosniff`, `no-referrer`.
-- Le jeton est comparé en temps constant. La validation SQL n’accepte qu’un seul SELECT, sur les seules tables de la configuration vérifiées par `EXPLAIN AST`, et s’exécute en `readonly=1`, qui interdit aussi de modifier les réglages, dont la limite de 15 s.
+- Les jetons sont comparés en temps constant, tous à chaque appel, et chacun a une portée (`translate`, `validate`, `metrics`) ; le contenu des requêtes n’est jamais écrit dans l’audit. La validation SQL n’accepte qu’un seul SELECT, sur les seules tables de la configuration vérifiées par `EXPLAIN AST`, et s’exécute en `readonly=1`, qui interdit aussi de modifier les réglages, dont la limite de 15 s.
 - `passerelle.env` n’est lisible que par root (0600) : systemd le lit au démarrage. `vector validate` ne reçoit aucune variable d’environnement du service, secrets compris.
 - Les traductions faites dans l’interface restent dans le navigateur. Seuls les appels explicites à l’API passent par le serveur.
 - L’interface ne charge aucune ressource externe (polices système, aucun CDN) : aucune donnée de navigation ne sort vers un tiers.
@@ -227,10 +298,55 @@ Chaque fichier reçoit un verdict : prête, à vérifier, à reprendre ou non re
 
 ```bash
 systemctl status passerelle
-journalctl -u passerelle -f          # journaux JSON, une ligne par requête
+journalctl -u passerelle -f          # journaux JSON, une ligne par requête, avec son request_id
 sudo systemctl reload passerelle     # relit passerelle.yaml
 systemctl edit passerelle            # surcharges locales (port, limites…)
 ```
+
+### Métriques
+
+`GET /metrics` répond au format texte de Prometheus, avec un jeton de portée `metrics`. Les étiquettes sont d’un nombre fixe : une route inconnue est comptée sous `route="autre"`, jamais sous le chemin demandé.
+
+```yaml
+scrape_configs:
+  - job_name: passerelle
+    metrics_path: /metrics
+    authorization:
+      credentials_file: /etc/prometheus/passerelle.token
+    static_configs:
+      - targets: ['passerelle.exemple.interne:443']
+    scheme: https
+```
+
+| Famille | Contenu |
+|---|---|
+| `passerelle_http_requests_total{method,route,status}` | requêtes servies |
+| `passerelle_http_request_duration_seconds{route}` | durées (histogramme) |
+| `passerelle_http_requests_in_flight` | requêtes en cours |
+| `passerelle_token_requests_total{token}` | requêtes par nom de jeton |
+| `passerelle_auth_failures_total{reason}` | refus : `absent`, `invalide`, `portee`, `intersite` |
+| `passerelle_translations_total{action,verdict}` | traductions par verdict (`ready`, `review`, `todo`, `unrecognized`) |
+| `passerelle_validations_total{action,result}` | validations : `valid`, `invalid`, `rejected`, `error` |
+| `passerelle_validation_jobs_running`, `passerelle_validation_rejected_total` | validations en cours, refusées (429) faute de place |
+| `passerelle_config_reloads_total{result}` | rechargements acceptés ou refusés |
+| `passerelle_audit_events_total`, `passerelle_audit_write_errors_total` | audit |
+| `passerelle_trace_spans_exported_total`, `…_dropped_total`, `passerelle_trace_export_errors_total` | export des traces |
+| `process_*`, `passerelle_build_info` | mémoire, processeur, démarrage, version |
+
+`server.metrics: false` retire la route. Alerte conseillée : `rate(passerelle_audit_write_errors_total[5m]) > 0`, car un audit qui ne s’écrit plus ne se voit pas ailleurs.
+
+### Traces OpenTelemetry
+
+```yaml
+server:
+  tracing:
+    endpoint: http://collecteur:4318/v1/traces    # OTLP/HTTP, JSON
+    headers:
+      authorization: 'Bearer ${OTEL_AUTHORIZATION}'
+    sample_ratio: 1
+```
+
+Chaque requête donne un span serveur (`POST /v1/translate/dsl`), et chaque appel à ClickHouse (validation SQL) ou à Vector un span enfant. Un en-tête `traceparent` entrant est repris : la trace continue celle de l’appelant, et celui-ci peut demander de ne pas échantillonner. ClickHouse reçoit le `traceparent` de chaque appel, pour relier ses propres traces (`system.opentelemetry_span_log`). La ligne de journal de chaque requête porte son `trace_id`. **Aucun span ne contient de requête, de SQL ni de jeton.** Les spans partent par lots toutes les 5 secondes et à l’arrêt du service ; un collecteur en panne ne gêne pas le service : les échecs sont comptés dans `/metrics` et signalés une fois par minute dans le journal.
 
 Pour changer d’adresse d’écoute, définissez `PASSERELLE_LISTEN=0.0.0.0:8080` dans `passerelle.env`, avec le jeton obligatoire et un pare-feu.
 

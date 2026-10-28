@@ -33,6 +33,7 @@ export const ENGINE_FILES = [
  * dans ses fonctions seulement, jamais à son chargement.
  */
 export const NODE_FILES = [
+  'src/node/ops.js',
   'src/node/verify.js'
 ];
 

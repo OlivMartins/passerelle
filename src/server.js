@@ -32,7 +32,9 @@ function loadConfig(file) {
     const out = over.vector && over.vector.elasticsearch_output;
     if (out !== undefined && !['elasticsearch', 'clickhouse'].includes(out)) throw new Error(`vector.elasticsearch_output attend elasticsearch ou clickhouse, pas « ${out} » (${file})`);
   }
-  return mergeConfig(DEFAULT_CONFIG, { clickhouse: over.clickhouse, kafka: over.kafka, vector: over.vector, elasticsearch: over.elasticsearch, verify: over.verify });
+  const cfg = mergeConfig(DEFAULT_CONFIG, { clickhouse: over.clickhouse, kafka: over.kafka, vector: over.vector, elasticsearch: over.elasticsearch, verify: over.verify, server: over.server });
+  opsCheckConfig(cfg.server, file);
+  return cfg;
 }
 // Les tables de correspondance ont des clés libres, comme dans mergeConfig
 function unknownKeys(src, ref, prefix) {
@@ -59,6 +61,9 @@ function configWarnings(cfg) {
     if (v && !ENV_REF.test(v)) w.push(`${sec}.${key} est écrit en clair : remplacez-le par une référence \${VARIABLE} définie dans le fichier d’environnement.`);
   }
   if (!cfg.clickhouse.endpoint) w.push('clickhouse.endpoint est vide : /v1/validate/sql sera indisponible.');
+  cfg.server.tokens.forEach((t, i) => { if (t.token && !ENV_REF.test(t.token)) w.push(`server.tokens[${i}] (${t.name}) : le jeton est écrit en clair : remplacez-le par une référence \${VARIABLE} définie dans le fichier d’environnement.`); });
+  for (const [k, v] of Object.entries(cfg.server.tracing.headers)) if (!opsHeaderRef(v)) w.push(`server.tracing.headers.${k} est écrit en clair : remplacez-le par une référence \${VARIABLE} définie dans le fichier d’environnement.`);
+  if (cfg.server.identity_header && !cfg.server.trusted_proxies.length) w.push('server.identity_header est renseigné sans server.trusted_proxies : l’en-tête sera toujours ignoré, car n’importe quel client peut en écrire un.');
   return w;
 }
 /* Configuration diffusée (interface, GET /v1/config) : aucun secret en clair */
@@ -69,6 +74,8 @@ function publicConfig(cfg) {
   if (c.kafka.password && !ENV_REF.test(c.kafka.password)) c.kafka.password = '${KAFKA_PASSWORD}';
   if (c.elasticsearch.password && !ENV_REF.test(c.elasticsearch.password)) c.elasticsearch.password = '${ES_PASSWORD}';
   if (c.elasticsearch.api_key && !ENV_REF.test(c.elasticsearch.api_key)) c.elasticsearch.api_key = '${ES_API_KEY}';
+  // L’interface est servie sans authentification : ni noms de jetons, ni réseau des proxys, ni chemin du journal d’audit
+  delete c.server;
   return c;
 }
 
@@ -100,7 +107,10 @@ function send(res, status, body, headers) {
   res.writeHead(status, Object.assign({}, SEC_HEADERS, headers || {}, { 'content-length': Buffer.byteLength(body) }));
   res.end(body);
 }
-function json(res, status, obj) { send(res, status, JSON.stringify(obj, null, 2) + '\n', { 'content-type': 'application/json; charset=utf-8' }); }
+function json(res, status, obj) {
+  if (res.opsRq) opsNote(res.opsRq, obj);
+  send(res, status, JSON.stringify(obj, null, 2) + '\n', { 'content-type': 'application/json; charset=utf-8' });
+}
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 function readBody(req, limit) {
   const tooBig = () => new HttpError(413, `corps de requête limité à ${Math.round(limit / 1024)} Kio`);
@@ -112,30 +122,23 @@ function readBody(req, limit) {
     req.on('error', reject);
   });
 }
-const sha = s => crypto.createHash('sha256').update(String(s)).digest();
-function authorized(req) {
-  const token = process.env.PASSERELLE_TOKEN;
-  if (!token) return true;
-  const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
-  return !!m && crypto.timingSafeEqual(sha(m[1]), sha(token));
-}
 function isLoopback(host) { return host === '127.0.0.1' || host === '::1' || host === 'localhost'; }
 // Une page web ouverte sur le poste ne doit pas pouvoir appeler l’API : requête intersite (CSRF),
 // ou nom de domaine qui pointe soudain vers 127.0.0.1 (DNS rebinding), ce que seul un jeton empêchait.
-function crossSiteRefusal(req) {
+function crossSiteRefusal(req, rt) {
   const site = req.headers['sec-fetch-site'];
   if (site === 'cross-site' || site === 'same-site') return 'requête intersite refusée';
-  if (process.env.PASSERELLE_TOKEN) return '';
+  if (rt.authRequired) return '';
   const m = /^(\[[^\]]*\]|[^:]*)(?::\d+)?$/.exec(req.headers.host || '');
   const host = m ? m[1].replace(/^\[|\]$/g, '').toLowerCase() : '';
-  return isLoopback(host) ? '' : 'sans PASSERELLE_TOKEN, l’API ne répond qu’aux requêtes adressées à localhost, 127.0.0.1 ou [::1]';
+  return isLoopback(host) ? '' : 'sans jeton configuré (PASSERELLE_TOKEN ou server.tokens), l’API ne répond qu’aux requêtes adressées à localhost, 127.0.0.1 ou [::1]';
 }
 
 /* ---------- Validation par les moteurs réels ---------- */
 // Validations Vector et SQL confondues : chacune occupe un processus ou une requête ClickHouse jusqu’à son délai
 let running = 0; const MAX_JOBS = 2;
 async function limited(job) {
-  if (running >= MAX_JOBS) throw new HttpError(429, 'trop de validations en cours, réessayez dans quelques secondes');
+  if (running >= MAX_JOBS) { opsInc('passerelle_validation_rejected_total'); throw new HttpError(429, 'trop de validations en cours, réessayez dans quelques secondes'); }
   running++;
   try { return await job(); } finally { running--; }
 }
@@ -167,7 +170,7 @@ async function validateVector(text, format) {
     // Vector 0.57 et suivants : l’interpolation que demande l’en-tête des configurations générées (sauf réglage contraire du service)
     if (env.VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION === undefined) env.VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION = 'true';
     const bin = process.env.PASSERELLE_VECTOR_BIN || 'vector';
-    const r = await runProcess(bin, ['--color', 'never', 'validate', '--skip-healthchecks', file], env, 90000);
+    const r = await opsWithSpan('vector.validate', 1, { 'process.executable.name': path.basename(bin) }, () => runProcess(bin, ['--color', 'never', 'validate', '--skip-healthchecks', file], env, 90000));
     const output = (r.stdout + '\n' + r.stderr).replace(/\x1b\[[0-9;]*m/g, '').split('\n')
       .filter(l => l.trim() && !/librdkafka|rdkafka::|base_producer|Log level is enabled/.test(l)).join('\n').replaceAll(dir, '<tmp>');
     return { valid: r.code === 0, exit_code: r.code, output };
@@ -228,10 +231,16 @@ async function clickhouseQuery(cfg, body, params) {
   const headers = { 'content-type': 'text/plain; charset=utf-8' };
   const user = expand(cfg.clickhouse.user);
   if (user) { headers['x-clickhouse-user'] = user; headers['x-clickhouse-key'] = expand(cfg.clickhouse.password); }
-  let r;
-  try { r = await fetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(20000) }); }
-  catch (e) { throw new HttpError(502, `ClickHouse injoignable : ${e.cause ? e.cause.code || e.cause.message : e.message}`); }
-  return { ok: r.ok, status: r.status, text: (await r.text()).trim() };
+  // L’appel à ClickHouse est un span enfant (ni SQL ni requête dans ses attributs) ; ClickHouse reprend le traceparent
+  return opsWithSpan('clickhouse.query', 3, { 'db.system.name': 'clickhouse', 'server.address': url.hostname, 'server.port': Number(url.port) || (url.protocol === 'https:' ? 443 : 80) }, async span => {
+    const traceparent = opsTraceparent(span);
+    if (traceparent) headers.traceparent = traceparent;
+    let r;
+    try { r = await fetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(20000) }); }
+    catch (e) { throw new HttpError(502, `ClickHouse injoignable : ${e.cause ? e.cause.code || e.cause.message : e.message}`); }
+    if (span) span.attrs['http.response.status_code'] = r.status;
+    return { ok: r.ok, status: r.status, text: (await r.text()).trim() };
+  });
 }
 async function validateSQL(cfg, sql, query) {
   if (!expand(cfg.clickhouse.endpoint)) throw new HttpError(503, 'clickhouse.endpoint n’est pas configuré');
@@ -268,28 +277,47 @@ function serve(opts) {
   const cfgFile = opts.config || process.env.PASSERELLE_CONFIG || null;
   let cfg = loadConfig(cfgFile);
   let ui = buildUI(cfg);
+  let ops = opsRuntime(cfg);
+  try { opsAuditOpen(ops.auditLog); } catch (e) { throw new Error(`server.audit_log : ${ops.auditLog} ne s’ouvre pas en écriture (${e.code || e.message}). Le service ne démarre pas sans son journal d’audit.`); }
+  opsTraceConfigure(ops); opsMetricsInit();
   const { host, port } = parseListen(opts.listen || process.env.PASSERELLE_LISTEN || '127.0.0.1:8080');
   const LIMIT = 2 * 1024 * 1024; const INVENTORY_LIMIT = 32 * 1024 * 1024;
   configWarnings(cfg).forEach(w => log('warn', w));
-  if (!process.env.PASSERELLE_TOKEN) log(isLoopback(host) ? 'info' : 'warn', 'PASSERELLE_TOKEN absent : l’API /v1 est accessible sans authentification, pour les seules requêtes adressées à localhost', { listen: `${host}:${port}` });
+  if (!ops.authRequired) log(isLoopback(host) ? 'info' : 'warn', 'aucun jeton (PASSERELLE_TOKEN, server.tokens) : l’API /v1 est accessible sans authentification, pour les seules requêtes adressées à localhost', { listen: `${host}:${port}` });
+  log('info', 'exploitation', { jetons: ops.tokens.map(t => t.name), metrics: ops.metrics, audit: ops.auditLog || 'journal du service', traces: ops.tracing ? ops.tracing.endpoint.replace(/^(\w+:\/\/)[^/@]*@/, '$1') : false, identite: ops.identityHeader || false, proxys_de_confiance: Boolean(ops.proxies) });
 
-  const server = http.createServer(async (req, res) => {
-    const t0 = process.hrtime.bigint();
-    let url = null;
-    res.on('finish', () => log('info', 'requête', { method: req.method, path: url ? url.pathname : String(req.url).slice(0, 200), status: res.statusCode, ms: Number((process.hrtime.bigint() - t0) / 1000000n), ip: req.socket.remoteAddress }));
+  const handle = async (req, res, rq) => {
+    const rt = rq.rt;
+    let url;
     // Une adresse comme « // » ne s’analyse pas : sans cette garde, l’exception arrêterait le processus
     try { url = new URL(req.url, 'http://localhost'); } catch (e) { return json(res, 400, { error: 'adresse de requête invalide' }); }
+    rq.path = url.pathname; rq.route = opsRouteOf(url.pathname); rq.action = opsActionOf(url.pathname);
+    // Origine de la requête, jeton, puis portée du jeton. Vrai quand la réponse de refus est partie.
+    const denied = scope => {
+      const refusal = crossSiteRefusal(req, rt);
+      if (refusal) { rq.refused = 'intersite'; json(res, 403, { error: refusal }); return true; }
+      const a = opsAuth(req, rt);
+      if (!a.ok) { rq.refused = a.reason; json(res, 401, { error: 'jeton absent ou invalide (Authorization: Bearer …)' }); return true; }
+      rq.token = a.name;
+      if (scope && !a.scopes.has(scope)) { rq.refused = 'portee'; json(res, 403, { error: `ce jeton n’a pas la portée « ${scope} » que demande cette route` }); return true; }
+      return false;
+    };
     try {
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) return send(res, 200, ui.html, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': ui.csp });
       if (req.method === 'GET' && url.pathname === '/healthz') return json(res, 200, { status: 'ok', version: VERSION });
+      if (url.pathname === '/metrics') {
+        if (!rt.metrics) return json(res, 404, { error: 'ressource inconnue' });
+        if (denied('metrics')) return;
+        if (req.method !== 'GET') return json(res, 405, { error: 'méthode non autorisée' });
+        return send(res, 200, opsRender(), { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' });
+      }
       if (!url.pathname.startsWith('/v1/')) return json(res, 404, { error: 'ressource inconnue' });
-      const refusal = crossSiteRefusal(req);
-      if (refusal) return json(res, 403, { error: refusal });
-      if (!authorized(req)) return json(res, 401, { error: 'jeton absent ou invalide (Authorization: Bearer …)' });
+      if (denied(opsScopeOf(url.pathname))) return;
       if (req.method === 'GET' && url.pathname === '/v1/config') return json(res, 200, publicConfig(cfg));
       if (req.method !== 'POST') return json(res, 405, { error: 'méthode non autorisée' });
       // Un export Kibana complet ou un gros tableau de bord dépassent vite 2 Mio : leurs routes acceptent davantage
       const body = await readBody(req, url.pathname === '/v1/inventory/kibana' || url.pathname === '/v1/translate/grafana' || url.pathname === '/v1/translate/ingest' || url.pathname === '/v1/translate/logstash/pipelines' || url.pathname === '/v1/schema/ddl' || url.pathname === '/v1/schema/analyzers' ? INVENTORY_LIMIT : LIMIT);
+      opsBody(rq, body);
       switch (url.pathname) {
         case '/v1/translate/dsl': {
           const r = translateDSL(body, cfg, { index: url.searchParams.get('index') || '' });
@@ -383,18 +411,36 @@ function serve(opts) {
         if (e.status === 413) { res.setHeader('connection', 'close'); res.on('finish', () => req.socket.destroy()); }
         return json(res, e.status, { error: e.message });
       }
-      log('error', 'erreur interne', { error: e.message, stack: e.stack });
+      log('error', 'erreur interne', { error: e.message, stack: e.stack, request_id: rq.id });
       return json(res, 500, { error: 'erreur interne' });
     }
+  };
+  const server = http.createServer((req, res) => {
+    const rq = opsBegin(req, res, ops);
+    res.on('finish', () => opsEnd(rq, res));
+    res.on('close', () => opsEnd(rq, res));
+    opsContext.run(rq, () => handle(req, res, rq)).catch(e => log('error', 'erreur interne', { error: e.message, request_id: rq.id }));
   });
   server.requestTimeout = 120000; server.headersTimeout = 15000; server.keepAliveTimeout = 5000;
   server.on('error', e => { log('error', `écoute impossible sur ${host}:${port}`, { error: e.code || e.message }); process.exit(1); });
   server.listen(port, host, () => log('info', 'Passerelle démarrée', { version: VERSION, listen: `${host}:${port}`, config: cfgFile || '(valeurs par défaut)', node: process.version }));
   process.on('SIGHUP', () => {
-    try { cfg = loadConfig(cfgFile); ui = buildUI(cfg); configWarnings(cfg).forEach(w => log('warn', w)); log('info', 'configuration rechargée', { config: cfgFile }); }
-    catch (e) { log('error', 'rechargement refusé, configuration précédente conservée', { error: e.message }); }
+    // Tout est préparé avant d’être adopté : un rechargement refusé ne change rien. Le fichier d’audit est rouvert,
+    // ce qui est le signal d’une rotation (logrotate : postrotate → systemctl reload passerelle).
+    try {
+      const next = loadConfig(cfgFile); const nextUi = buildUI(next); const nextOps = opsRuntime(next);
+      try { opsAuditOpen(nextOps.auditLog); } catch (e) { throw new Error(`server.audit_log : ${nextOps.auditLog} ne s’ouvre pas en écriture (${e.code || e.message})`); }
+      cfg = next; ui = nextUi; ops = nextOps; opsTraceConfigure(ops);
+      configWarnings(cfg).forEach(w => log('warn', w));
+      opsInc('passerelle_config_reloads_total', { result: 'ok' });
+      log('info', 'configuration rechargée', { config: cfgFile });
+    } catch (e) {
+      opsInc('passerelle_config_reloads_total', { result: 'refused' });
+      log('error', 'rechargement refusé, configuration précédente conservée', { error: e.message });
+    }
   });
-  const stop = sig => { log('info', 'arrêt demandé', { signal: sig }); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 8000).unref(); };
+  // À l’arrêt, les traces en attente partent avant la sortie
+  const stop = sig => { log('info', 'arrêt demandé', { signal: sig }); server.close(() => { opsShutdown().then(() => process.exit(0)); }); setTimeout(() => process.exit(0), 8000).unref(); };
   process.on('SIGTERM', () => stop('SIGTERM')); process.on('SIGINT', () => stop('SIGINT'));
 }
 
@@ -419,7 +465,7 @@ Utilisation :
 Variables d’environnement :
   PASSERELLE_CONFIG      fichier de configuration (passerelle.yaml)
   PASSERELLE_LISTEN      adresse d’écoute, 127.0.0.1:8080 par défaut
-  PASSERELLE_TOKEN       jeton exigé sur /v1/* (Authorization: Bearer …)
+  PASSERELLE_TOKEN       jeton exigé sur /v1/* et /metrics, toutes portées (Authorization: Bearer …) ; d’autres jetons, à portée, se déclarent dans server.tokens
   PASSERELLE_VECTOR_BIN  binaire Vector pour /v1/validate/vector (vector par défaut)
   CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, KAFKA_USERNAME, KAFKA_PASSWORD, ES_USER, ES_PASSWORD, ES_API_KEY : secrets référencés par la configuration
 
@@ -789,8 +835,11 @@ function main(argv) {
         const extra = {};
         if (pub.elasticsearch.endpoint) extra.elasticsearch = pub.elasticsearch;
         if (JSON.stringify(pub.verify) !== JSON.stringify(DEFAULT_CONFIG.verify)) extra.verify = pub.verify;
+        if (JSON.stringify(cfg.server) !== JSON.stringify(DEFAULT_CONFIG.server)) extra.server = opsShown(cfg.server);
         if (Object.keys(extra).length) process.stdout.write(toYAML(extra) + '\n');
       }
+      // Les variables des jetons, comme le fera « serve » : une variable absente est signalée ici, pas à la première requête
+      try { opsRuntime(cfg); } catch (e) { w.push(e.message); }
       w.forEach(x => process.stderr.write(`attention : ${x}\n`));
       process.stderr.write(`${file || '(valeurs par défaut)'} : configuration lisible${w.length ? `, ${w.length} avertissement(s)` : ''}.\n`);
       return;

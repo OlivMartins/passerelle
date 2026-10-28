@@ -412,11 +412,35 @@ curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
 | `POST /v1/validate/sql` | `EXPLAIN indexes = 1` sur votre ClickHouse, en lecture seule, après contrôle des tables lues |
 | `POST /v1/validate/vector` | Compilation complète de la configuration et du VRL par `vector validate` |
 
+## Exploiter le service
+
+`passerelle serve` s’exploite comme le reste de votre parc, sans agent à poser à côté :
+
+- **Métriques Prometheus** sur `/metrics` : requêtes, durées, refus, verdicts des traductions, validations, rechargements. Les étiquettes sont en nombre fixe (une route inconnue est « autre »), jamais tirées de la requête.
+- **Traces OpenTelemetry** (OTLP/HTTP) : un span par requête, un span enfant par appel à ClickHouse ou à Vector. Un `traceparent` entrant est repris, et ClickHouse reçoit le sien. Aucun span ne contient de requête ni de SQL.
+- **Identifiant de requête** : chaque réponse porte un `X-Request-Id`, repris dans le journal, l’audit et les spans. Celui d’un reverse proxy de confiance est adopté ; celui d’un autre client est gardé à part.
+- **Journal d’audit** : une ligne JSON par appel à l’API, refusés compris, avec le jeton, l’identité, l’action et l’empreinte du corps. **Jamais le contenu de la requête.** Rotation prise en compte au rechargement (`SIGHUP`).
+- **Jetons multiples à portée** : un jeton par client, chacun limité à `translate`, `validate` ou `metrics`. Le service refuse de démarrer quand la variable d’un jeton est vide.
+- **Identité du reverse proxy** : l’utilisateur que votre SSO a authentifié (`X-Forwarded-User`) entre dans le journal et l’audit, mais seulement quand il vient d’un proxy déclaré de confiance.
+
+```yaml
+server:
+  tokens:
+    - { name: ci, token: '${PASSERELLE_TOKEN_CI}', scopes: [translate, validate] }
+    - { name: prometheus, token: '${PASSERELLE_TOKEN_PROMETHEUS}', scopes: [metrics] }
+  trusted_proxies: [127.0.0.1]
+  identity_header: X-Forwarded-User
+  audit_log: /var/log/passerelle/audit.jsonl
+  tracing: { endpoint: 'http://collecteur:4318/v1/traces' }
+```
+
+Tout est détaillé dans le [guide d’installation](docs/INSTALL.md#jetons-à-portée-identité-et-audit).
+
 ## Sécurité et confidentialité
 
 - **Vos requêtes restent chez vous.** L’interface traduit dans le navigateur, hors ligne, sans police ni script externe ni télémétrie.
 - **Service durci.** Utilisateur dédié sans privilège, système de fichiers en lecture seule, filtre seccomp vérifié sur les appels système réellement utilisés. Score `systemd-analyze security` : 1.2, « OK ».
-- **API sobre.** Jeton comparé en temps constant, requêtes intersites refusées, politique CSP stricte, corps limités à 2 Mio. La validation SQL n’accepte qu’un `SELECT` sur les tables de la configuration, vérifiées par `EXPLAIN AST` avant toute exécution, en `readonly`. Le compte ClickHouse conseillé est décrit dans le [guide d’installation](docs/INSTALL.md#compte-clickhouse-de-validation).
+- **API sobre.** Jetons comparés en temps constant et limités à une portée, journal d’audit sans contenu de requête, requêtes intersites refusées, politique CSP stricte, corps limités à 2 Mio. La validation SQL n’accepte qu’un `SELECT` sur les tables de la configuration, vérifiées par `EXPLAIN AST` avant toute exécution, en `readonly`. Le compte ClickHouse conseillé est décrit dans le [guide d’installation](docs/INSTALL.md#compte-clickhouse-de-validation).
 - **Lecture seule chez vous.** `passerelle verify` n’envoie à Elasticsearch que des `_search` et à ClickHouse que des `SELECT` en `readonly`, et `--no-values` garde les données du client hors du rapport.
 - **Secrets hors des fichiers.** Par défaut, les mots de passe sont des références `${VARIABLE}`, aussi bien dans la configuration de Passerelle que dans les configurations Vector qu’il génère.
 
