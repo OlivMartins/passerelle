@@ -1,6 +1,6 @@
 {
   "name": "passerelle",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "description": "Traduction des requêtes DSL Elasticsearch en SQL ClickHouse et des pipelines Logstash en configurations Vector",
   "license": "Apache-2.0",

@@ -19,6 +19,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+
+const VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
 import crypto from 'node:crypto';
 import http from 'node:http';
 import net from 'node:net';
@@ -494,7 +496,7 @@ section('G. /metrics');
   check(d('passerelle_translations_total{action="translate.dsl",verdict="ready"}') + d('passerelle_translations_total{action="translate.dsl",verdict="review"}') === 2 && d('passerelle_translations_total{action="translate.dsl",verdict="unrecognized"}') === 1 && [...m.keys()].some(k => k.startsWith('passerelle_translations_total{action="translate.logstash"')), 'traductions par action et verdict (la requête illisible est « unrecognized »)', [...m.keys()].filter(k => k.startsWith('passerelle_translations')).join(' '));
   check(d('passerelle_validations_total{action="validate.sql",result="valid"}') === 1 && d('passerelle_validations_total{action="validate.sql",result="rejected"}') === 1, 'validations par résultat : valide, et rejetée avant d’arriver à ClickHouse (DROP)', [...m.keys()].filter(k => k.startsWith('passerelle_validations')).join(' '));
   check(count(m, 'passerelle_http_requests_in_flight') >= 1 && count(m, 'passerelle_validation_jobs_running') === 0, 'requêtes en cours (au moins ce relevé) et validations en cours');
-  check(count(m, 'process_resident_memory_bytes') > 1e6 && count(m, 'process_cpu_seconds_total') > 0 && count(m, 'process_start_time_seconds') > 1.7e9 && [...m.keys()].some(k => /^passerelle_build_info\{node="v\d+[^"]*",version="1\.5\.0"\} 1$/.test(`${k} ${m.get(k)}`)), 'processus et version');
+  check(count(m, 'process_resident_memory_bytes') > 1e6 && count(m, 'process_cpu_seconds_total') > 0 && count(m, 'process_start_time_seconds') > 1.7e9 && [...m.keys()].some(k => new RegExp(`^passerelle_build_info\\{node="v\\d+[^"]*",version="${VERSION.replace(/\./g, '\\.')}"\\} 1$`).test(`${k} ${m.get(k)}`)), 'processus et version');
   // Histogrammes cohérents : +Inf = count, seaux croissants, somme positive
   const routes = [...new Set([...m.keys()].filter(k => k.startsWith('passerelle_http_request_duration_seconds_count{')).map(k => /route="([^"]*)"/.exec(k)[1]))];
   const sane = routes.every(rt => {
@@ -561,7 +563,7 @@ section('H. Traces OpenTelemetry');
   check(otlp.length >= 1 && otlp.every(p => p.method === 'POST' && p.url === '/v1/traces' && p.headers['content-type'] === 'application/json' && p.headers.authorization === 'Bearer otel-secret'), 'à l’arrêt, les spans en attente partent vers le collecteur, avec ses en-têtes (variable résolue)', J(otlp.map(p => [p.method, p.url, p.headers.authorization])));
   const payload = otlp[0] && otlp[0].json;
   const res = payload && payload.resourceSpans[0];
-  check(res && attr(res.resource, 'service.name') === 'passerelle-test' && attr(res.resource, 'service.version') === '1.5.0' && res.scopeSpans[0].scope.name === 'passerelle', 'ressource OTLP : nom du service et version', J(res && res.resource));
+  check(res && attr(res.resource, 'service.name') === 'passerelle-test' && attr(res.resource, 'service.version') === VERSION && res.scopeSpans[0].scope.name === 'passerelle', 'ressource OTLP : nom du service et version', J(res && res.resource));
   const spans = spansOf();
   const root1 = spans.find(s => s.traceId === TRACE);
   check(root1 && root1.name === 'POST /v1/translate/dsl' && root1.kind === 2 && root1.parentSpanId === PARENT && /^[0-9a-f]{16}$/.test(root1.spanId) && root1.status.code === 0, 'le contexte de l’appelant est repris : même trace, parent = son span, nom « POST /v1/translate/dsl », type serveur', J(root1));

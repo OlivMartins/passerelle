@@ -1,4 +1,4 @@
-# Passerelle 1.5.0 — Linux x86_64
+# Passerelle 1.6.0 — Linux x86_64
 
 Passerelle traduit les requêtes DSL Elasticsearch en SQL ClickHouse et les pipelines Logstash (Kafka vers Kafka) en configurations Vector. Un seul binaire fournit l’interface web, l’API REST et la ligne de commande. Le moteur Node.js 24 LTS est embarqué : rien d’autre à installer.
 
@@ -34,13 +34,13 @@ SHA256SUMS                     sommes de contrôle
 ## Installation
 
 ```bash
-sha256sum -c passerelle-1.5.0-linux-x86_64.tar.gz.sha256
-tar xzf passerelle-1.5.0-linux-x86_64.tar.gz
-cd passerelle-1.5.0-linux-x86_64
+sha256sum -c passerelle-1.6.0-linux-x86_64.tar.gz.sha256
+tar xzf passerelle-1.6.0-linux-x86_64.tar.gz
+cd passerelle-1.6.0-linux-x86_64
 sudo ./install.sh
 ```
 
-La somme de contrôle détecte un fichier abîmé. Pour vérifier aussi que l’archive a été construite par la CI du dépôt, à partir de l’étiquette de la release : `gh attestation verify passerelle-1.5.0-linux-x86_64.tar.gz -R OlivMartins/passerelle`.
+La somme de contrôle détecte un fichier abîmé. Pour vérifier aussi que l’archive a été construite par la CI du dépôt, à partir de l’étiquette de la release : `gh attestation verify passerelle-1.6.0-linux-x86_64.tar.gz -R OlivMartins/passerelle`.
 
 Le script vérifie l’architecture, la glibc et l’intégrité des fichiers. Il crée ensuite l’utilisateur système `passerelle` et installe `/usr/local/bin/passerelle`, `/etc/passerelle/` et l’unité systemd. Un jeton d’API aléatoire est écrit dans `/etc/passerelle/passerelle.env`, puis le service est démarré.
 
