@@ -32,7 +32,7 @@ function loadConfig(file) {
     const out = over.vector && over.vector.elasticsearch_output;
     if (out !== undefined && !['elasticsearch', 'clickhouse'].includes(out)) throw new Error(`vector.elasticsearch_output attend elasticsearch ou clickhouse, pas « ${out} » (${file})`);
   }
-  const cfg = mergeConfig(DEFAULT_CONFIG, { clickhouse: over.clickhouse, kafka: over.kafka, vector: over.vector, elasticsearch: over.elasticsearch, verify: over.verify, server: over.server });
+  const cfg = mergeConfig(DEFAULT_CONFIG, { clickhouse: over.clickhouse, kafka: over.kafka, vector: over.vector, elasticsearch: over.elasticsearch, verify: over.verify, assist: over.assist, server: over.server });
   opsCheckConfig(cfg.server, file);
   return cfg;
 }
@@ -64,6 +64,17 @@ function configWarnings(cfg) {
   cfg.server.tokens.forEach((t, i) => { if (t.token && !ENV_REF.test(t.token)) w.push(`server.tokens[${i}] (${t.name}) : le jeton est écrit en clair : remplacez-le par une référence \${VARIABLE} définie dans le fichier d’environnement.`); });
   for (const [k, v] of Object.entries(cfg.server.tracing.headers)) if (!opsHeaderRef(v)) w.push(`server.tracing.headers.${k} est écrit en clair : remplacez-le par une référence \${VARIABLE} définie dans le fichier d’environnement.`);
   if (cfg.server.identity_header && !cfg.server.trusted_proxies.length) w.push('server.identity_header est renseigné sans server.trusted_proxies : l’en-tête sera toujours ignoré, car n’importe quel client peut en écrire un.');
+  const model = cfg.assist.model.endpoint;
+  if (model) {
+    let reason = '';
+    try {
+      const u = new URL(expand(model)); const h = u.hostname.replace(/^\[|\]$/g, '');
+      if (u.protocol !== 'http:') reason = `${u.protocol}// n’est pas admis`;
+      else if (u.username || u.password) reason = 'l’adresse porte un identifiant';
+      else if (h !== 'localhost' && !(asstNet.isIP(h) && asstLoopback(h))) reason = `${h} n’est pas une adresse de bouclage`;
+    } catch (e) { reason = 'adresse illisible'; }
+    if (reason) w.push(`assist.model.endpoint : ${reason} ; « passerelle assist --local-model » ne joint un modèle que sur la boucle locale (127.0.0.1, ::1, localhost).`);
+  }
   return w;
 }
 /* Configuration diffusée (interface, GET /v1/config) : aucun secret en clair */
@@ -76,6 +87,7 @@ function publicConfig(cfg) {
   if (c.elasticsearch.api_key && !ENV_REF.test(c.elasticsearch.api_key)) c.elasticsearch.api_key = '${ES_API_KEY}';
   // L’interface est servie sans authentification : ni noms de jetons, ni réseau des proxys, ni chemin du journal d’audit
   delete c.server;
+  delete c.assist;
   return c;
 }
 
@@ -459,6 +471,8 @@ Utilisation :
   passerelle grafana     <tableau.json>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo|review]
   passerelle verify queries   <fichier|dossier|export.ndjson>... --index MOTIF [--config FICHIER] [--from DATE --to DATE | --last 1h --lag 10m] [--out DOSSIER] [--format md|html|csv|json] [--no-values] [--strict]
   passerelle verify pipelines <pipeline.conf|dossier>... --sample FICHIER (--logstash-bin CHEMIN | --reference FICHIER|DOSSIER) [--ecs v8|disabled] [--config FICHIER] [--out DOSSIER] [--no-values] [--strict]
+  passerelle assist ruby     <pipeline.conf|dossier>... [--sample FICHIER (--logstash-bin CHEMIN | --reference FICHIER|DOSSIER)] [--local-model] [--ignore CHAMP]... [--out DOSSIER] [--no-values] [--strict]
+  passerelle assist painless <pipeline.yml|dossier>... [--sample FICHIER --reference FICHIER] [--local-model] [--ignore CHAMP]... [--out DOSSIER] [--no-values] [--strict]
   passerelle check-config [--config FICHIER] [--quiet]
   passerelle version
 
@@ -472,7 +486,8 @@ Variables d’environnement :
 Verdict de chaque fichier : prête, à vérifier, à reprendre, non reconnue.
 Codes de sortie : 0 succès, 1 erreur ou fichier non reconnu,
   2 fichier à reprendre (--fail-on todo), ou à vérifier ou à reprendre (--fail-on review).
-  verify : 0 tout est identique, 2 au moins un écart (ou un résultat non concluant avec --strict), 1 au moins une erreur.`;
+  verify : 0 tout est identique, 2 au moins un écart (ou un résultat non concluant avec --strict), 1 au moins une erreur.
+  assist : 0 aucune proposition n’est différente de la référence, 2 au moins une l’est (ou une proposition manque ou n’est pas rejouée avec --strict), 1 au moins une erreur.`;
 // Options déclarées : une option mal écrite ou une valeur inconnue est une erreur, pas une option ignorée
 // (« --fail-on todos » désactivait en silence le contrôle d’une intégration continue).
 const OPTIONS = {
@@ -484,6 +499,7 @@ const OPTIONS = {
   sample: { type: 'string' }, reference: { type: 'string' }, 'logstash-bin': { type: 'string' }, 'vector-bin': { type: 'string' }, ecs: { type: 'string' },
   examples: { type: 'string' }, timeout: { type: 'string' }, 'max-queries': { type: 'string' },
   'no-values': { type: 'boolean' }, 'no-window': { type: 'boolean' }, keep: { type: 'boolean' }, strict: { type: 'boolean' },
+  'local-model': { type: 'boolean' }, 'model-endpoint': { type: 'string' }, 'model-name': { type: 'string' }, 'model-api': { type: 'string' }, ignore: { type: 'string', multiple: true },
   help: { type: 'boolean', short: 'h' }
 };
 function parseArgs(argv) {
@@ -619,6 +635,17 @@ function batch(kind, o) {
   }
 }
 /* ---------- Pipelines d’ingestion Elasticsearch (passerelle ingest) ---------- */
+// Les pipelines d’un même dossier s’appellent entre eux (processeur pipeline) : ils sont lus ensemble. Un fichier
+// « .yml.link » d’une intégration Elastic (elastic-package) désigne un pipeline partagé : on lit le fichier désigné.
+function ingestInputs(files) {
+  return files.map(f => {
+    const name = path.basename(f).replace(/\.(ya?ml|json)(\.link)?$/i, '');
+    if (!/\.link$/i.test(f)) return { name, text: fs.readFileSync(f, 'utf8') };
+    const target = path.resolve(path.dirname(f), fs.readFileSync(f, 'utf8').trim().split(/\s+/)[0] || '');
+    if (!fs.existsSync(target)) fail(`${f} désigne ${target}, introuvable`);
+    return { name, text: fs.readFileSync(target, 'utf8') };
+  });
+}
 function ingestConvert(o) {
   if (!o._.length) fail('aucun pipeline à traduire. Exemple : passerelle ingest pipelines/ --out ingest/');
   formatFor(o, ['yaml', 'toml'], 'ingest');
@@ -626,16 +653,7 @@ function ingestConvert(o) {
   const fmt = o.format || cfg.vector.format;
   const files = collect(o._, /\.(ya?ml|json)(\.link)?$/i);
   if (!files.length) fail('aucun fichier .yml, .yaml ou .json trouvé');
-  // Les pipelines d’un même dossier s’appellent entre eux (processeur pipeline) : ils sont lus ensemble. Un fichier
-  // « .yml.link » d’une intégration Elastic (elastic-package) désigne un pipeline partagé : on lit le fichier désigné.
-  const inputs = files.map(f => {
-    const name = path.basename(f).replace(/\.(ya?ml|json)(\.link)?$/i, '');
-    if (!/\.link$/i.test(f)) return { name, text: fs.readFileSync(f, 'utf8') };
-    const target = path.resolve(path.dirname(f), fs.readFileSync(f, 'utf8').trim().split(/\s+/)[0] || '');
-    if (!fs.existsSync(target)) fail(`${f} désigne ${target}, introuvable`);
-    return { name, text: fs.readFileSync(target, 'utf8') };
-  });
-  const r = translateIngest(inputs, cfg);
+  const r = translateIngest(ingestInputs(files), cfg);
   const MARK = { ready: '✓', review: '~', todo: '!', unrecognized: '✗' };
   if (r.error) { r.notes.forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`)); fail(`aucun pipeline traduit : ${r.error}`); }
   const verdict = verdictOf(r); const cov = coverage(r.stats);
@@ -824,6 +842,7 @@ function main(argv) {
     case 'kibana': return kibanaReport(o);
     case 'grafana': return grafanaConvert(o);
     case 'verify': return verifyCommand(o);
+    case 'assist': return assistCommand(o);
     case 'check-config': {
       const file = o.config || process.env.PASSERELLE_CONFIG || null;
       let cfg; try { cfg = loadConfig(file); } catch (e) { fail(e.message); }
@@ -835,6 +854,7 @@ function main(argv) {
         const extra = {};
         if (pub.elasticsearch.endpoint) extra.elasticsearch = pub.elasticsearch;
         if (JSON.stringify(pub.verify) !== JSON.stringify(DEFAULT_CONFIG.verify)) extra.verify = pub.verify;
+        if (JSON.stringify(cfg.assist) !== JSON.stringify(DEFAULT_CONFIG.assist)) extra.assist = cfg.assist;
         if (JSON.stringify(cfg.server) !== JSON.stringify(DEFAULT_CONFIG.server)) extra.server = opsShown(cfg.server);
         if (Object.keys(extra).length) process.stdout.write(toYAML(extra) + '\n');
       }

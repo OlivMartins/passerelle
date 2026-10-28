@@ -46,6 +46,10 @@ const DEFAULT_CONFIG = {
   // time_field : le champ de date côté Elasticsearch (vide : celui que field_mapping envoie sur la colonne de temps de la table)
   // timeout : secondes accordées à chaque requête, de chaque côté ; examples : écarts cités par requête dans le rapport
   verify: { time_field: '', window: { length: '1h', lag: '10m' }, tolerance: 1e-9, examples: 3, timeout: 60 },
+  // Aide aux cas « à reprendre » (passerelle assist). model : un modèle local, joint seulement avec --local-model et seulement sur la boucle locale
+  // (endpoint : http://127.0.0.1:11434 ; api : ollama ou openai, pour un serveur compatible avec /v1/chat/completions) ; timeout en secondes ;
+  // max_attempts : essais par cas, la sortie du compilateur de Vector étant rendue au modèle entre deux essais
+  assist: { model: { endpoint: '', api: 'ollama', model: '', timeout: 300, max_attempts: 2 } },
   // Exploitation du service (passerelle serve). tokens : [{ name, token: '${VARIABLE}', scopes: [translate, validate, metrics] }] ;
   // trusted_proxies : les reverse proxies dont on croit X-Forwarded-For et l’en-tête d’identité ; audit_log : un fichier, ou le journal du service s’il est vide ;
   // tracing : un collecteur OTLP/HTTP (par exemple http://collecteur:4318/v1/traces), vide : aucune trace

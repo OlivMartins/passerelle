@@ -20,6 +20,7 @@ export const ENGINE_FILES = [
   'src/engine/kibana.js',
   'src/engine/grafana.js',
   'src/engine/logstash.js',
+  'src/engine/assist.js',
   'src/engine/sink.js',
   'src/engine/pipelines.js',
   'src/engine/ingest.js',
@@ -34,7 +35,8 @@ export const ENGINE_FILES = [
  */
 export const NODE_FILES = [
   'src/node/ops.js',
-  'src/node/verify.js'
+  'src/node/verify.js',
+  'src/node/assist.js'
 ];
 
 export const engineSource = () => ENGINE_FILES.map(f => readFileSync(join(ROOT, f), 'utf8')).join('');
@@ -44,5 +46,5 @@ export const serverSource = () => nodeSource() + readFileSync(join(ROOT, 'src/se
 
 // Le moteur chargé hors du binaire, pour les tests et les bancs
 export function loadEngine() {
-  return new Function(`'use strict';\n${engineSource()}\nreturn { clickhouseOutput, chShapeLines, translateDSL, translateLogstash, translateIngest, ingestRead, yamlLoad, translatePipelines, pipelinesFromYML, parsePipelinesYML, pipelineConfigFiles, schemaFromElastic, profilesFromSystem, anAnalyze, anPlan, anFieldPlan, anReport, kqlParse, kqlToDSL, kqlTranslate, kibanaObjects, kibanaInventory, inventoryMarkdown, inventoryCSV, inventoryHTML, inventorySQLFiles, grafanaDashboard, grafanaReportMarkdown, schemaPullQueries, parseYAMLConfig, tableConfig, toYAML, DEFAULT_CONFIG, mergeConfig, verdictOf, coverage, VERDICTS, eqRunCase, eqRunComposite, eqCompareStatements, eqCompareRows, eqCompareRowsDetailed, eqCompareIds, eqCompareIdsDetailed, eqBucketRows, eqLeafMetrics, eqMetricColumns, eqSame, eqNormKey, eqPinNow, eqBoundWindow, eqTimeField, eqDuration, eqWindow, eqStateOf, eqSummarize, eqSentence, eqReportMarkdown, eqReportCSV, eqReportHTML, eqNormalizeEvent, eqAlign, eqEventDiffs, eqPipelineParts, eqVectorSource, eqLogstashSource, eqComparePipelineOutputs, eqEsError, eqCanon, EQ_ECS_MODES, EQ_STATES };`)();
+  return new Function(`'use strict';\n${engineSource()}\nreturn { clickhouseOutput, chShapeLines, translateDSL, translateLogstash, translateIngest, ingestRead, yamlLoad, translatePipelines, pipelinesFromYML, parsePipelinesYML, pipelineConfigFiles, schemaFromElastic, profilesFromSystem, anAnalyze, anPlan, anFieldPlan, anReport, kqlParse, kqlToDSL, kqlTranslate, kibanaObjects, kibanaInventory, inventoryMarkdown, inventoryCSV, inventoryHTML, inventorySQLFiles, grafanaDashboard, grafanaReportMarkdown, schemaPullQueries, parseYAMLConfig, tableConfig, toYAML, DEFAULT_CONFIG, mergeConfig, verdictOf, coverage, VERDICTS, eqRunCase, eqRunComposite, eqCompareStatements, eqCompareRows, eqCompareRowsDetailed, eqCompareIds, eqCompareIdsDetailed, eqBucketRows, eqLeafMetrics, eqMetricColumns, eqSame, eqNormKey, eqPinNow, eqBoundWindow, eqTimeField, eqDuration, eqWindow, eqStateOf, eqSummarize, eqSentence, eqReportMarkdown, eqReportCSV, eqReportHTML, eqNormalizeEvent, eqAlign, eqEventDiffs, eqPipelineParts, eqVectorSource, eqLogstashSource, eqComparePipelineOutputs, eqEsError, eqCanon, EQ_ECS_MODES, EQ_STATES, assistRuby, assistRubyParse, AssistError, assistCases, assistApply, assistPrompt, assistFromModel, assistSummarize, assistSentence, assistReportMarkdown, assistReportCSV, assistReportHTML, ASSIST_STATES };`)();
 }

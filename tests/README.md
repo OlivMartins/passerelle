@@ -35,6 +35,24 @@ Il ne prouve pas la traduction : ce sont les bancs, qui demandent Docker, et `pa
 
 Pas plus que les deux autres, il ne remplace une vraie chaîne : un vrai Prometheus ou un vrai collecteur n’y tournent pas.
 
+`npm test` lance enfin `tests/assist/run.mjs` : `passerelle assist`, sans modèle, Vector, Logstash ni Elasticsearch réels. Il éprouve :
+
+- les règles Ruby → VRL (ce qu’elles traduisent, ce qu’elles refusent, le `$$` de Vector), le prompt, la lecture de la réponse d’un modèle et la liste des fonctions de VRL écartées ;
+- la commande contre de faux Vector (`validate`, rejeu) et Logstash : une proposition que Vector refuse n’est pas rejouée, un essai suivant reçoit le message du compilateur sans chemin temporaire, un pipeline dont un cas n’a pas de proposition n’est jamais « confirmé », les états du rapport, `--ignore`, `--no-values`, `--strict` et les codes de sortie ;
+- la confidentialité : aucun modèle sans `--local-model`, seule la boucle locale admise (une douzaine de formes d’adresse refusées avant toute connexion), aucun proxy, un faux modèle en HTTP qui ne reçoit que le code du cas et la raison du traducteur (des secrets et des chemins semés dans l’échantillon, la configuration et l’environnement n’y figurent jamais), `/v1/config` qui ne cite pas `assist`.
+
+Il ne prouve pas que les propositions sont justes : c’est `npm run test:assist` pour les règles, et le rejeu sur vos données pour le reste.
+
+### Règles ruby → VRL : `npm run test:assist`
+
+`tests/assist/ruby.mjs` joue chaque morceau de Ruby avec un vrai Ruby (`shim.rb` : un faux `LogStash::Event` sur un Hash, les mêmes `get`, `set`, `remove`, `tag`, `cancel`), sa traduction avec le VRL de Vector, et compare les événements obtenus champ par champ, types compris. Un cas a ses événements d’essai, dont les cas limites (valeurs absentes, chaîne vide, négatifs, listes vides) ; les refus attendus des règles y sont aussi. Ce qui lève une exception de Ruby n’est pas comparé : Logstash étiquette alors l’événement `_rubyexception`, ce que la proposition ne reproduit pas.
+
+```sh
+VECTOR_BIN=vector npm run test:assist      # `vector vrl` ; ou VRL_BIN=<binaire vrl>, RUBY=<ruby>
+```
+
+Sans Ruby ou sans VRL, le banc est ignoré (sortie 0) ; `npm run test:assist` passe `--require` et échoue. La CI le joue dans le job `ingest`, avec Vector 0.59.0 et le Ruby de l’image.
+
 ## Banc différentiel : `npm run test:diff`
 
 Un instantané prouve que la sortie n’a pas changé, pas qu’elle est juste. Le banc exécute donc chaque requête DSL sur Elasticsearch, sa traduction sur ClickHouse, et compare les deux résultats ligne à ligne : clés, comptes, mesures et ordre.

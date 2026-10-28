@@ -128,6 +128,8 @@ jobs:
         run: node tests/ingest/tls.mjs
       - name: Scripts Painless (documents rejoués dans Vector)
         run: node tests/ingest/painless.mjs
+      - name: Règles ruby → VRL de « passerelle assist » (Ruby et VRL joués pour de bon)
+        run: node tests/assist/ruby.mjs --require
 
   # L'interface ouverte dans un vrai navigateur : chaque section traduit son exemple, sans erreur de page
   interface:

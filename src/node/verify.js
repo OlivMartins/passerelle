@@ -235,6 +235,33 @@ const verifyEvents = file => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8'
 const verifyOutputs = (dir, prefix, names) => Object.fromEntries(names.map(n => [n, verifyEvents(path.join(dir, `${eqOutName(prefix, n)}.ndjson`))]));
 const lastLines = (text, n) => String(text).split('\n').filter(l => l.trim() && !/librdkafka|rdkafka::/.test(l)).slice(-n).join(' ⏎ ').slice(0, 400);
 
+// Deux retouches d’environnement, pas de traitement : un dossier de données à soi, et pas d’API (le port 8686
+// est peut-être celui du Vector qui tourne déjà sur cette machine)
+const verifyRetouch = (yaml, dataDir) => yaml.replace(/^data_dir:.*$/m, `data_dir: ${dataDir}`).replace(/^api:\n(?: {2}.*\n)+/m, 'api:\n  enabled: false\n');
+// Vector joue l’échantillon (entrée standard) avec cette configuration : null, ou la raison de l’échec
+async function verifyPlayVector(yaml, vecDir, input, vectorBin, timeout) {
+  const conf = path.join(vecDir, 'vector.yaml');
+  fs.writeFileSync(conf, yaml);
+  const venv = Object.assign({}, process.env, { VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION: 'true' });
+  const v = await verifyRun(vectorBin, ['--quiet', '--color', 'never', '--config', conf], { stdin: input, env: venv, timeout });
+  return v.error || v.code !== 0 ? `Vector : ${v.timedOut ? 'délai dépassé' : v.error ? v.out : `code ${v.code}, ${lastLines(v.out, 3)}`}` : null;
+}
+// La référence : les événements déjà produits par le pipeline du client, ou son Logstash rejouant l’échantillon.
+// Rend { ref } ou { error }
+async function verifyReference(o, parts, dirs, input, mode, id, timeout) {
+  if (o.reference) {
+    let st; try { st = fs.statSync(o.reference); } catch (e) { return { error: `référence introuvable : ${o.reference}` }; }
+    if (st.isDirectory()) return { ref: Object.fromEntries(parts.outputNames.map(name => [name, verifyEvents(path.join(o.reference, `${name}.ndjson`))])) };
+    if (parts.outputNames.length === 1) return { ref: { [parts.outputNames[0]]: verifyEvents(o.reference) } };
+    return { error: `le pipeline a ${parts.outputNames.length} sorties (${parts.outputNames.join(', ')}) : --reference attend un dossier avec un <sortie>.ndjson par sortie` };
+  }
+  const lsConf = path.join(dirs.ls, 'replay.conf');
+  fs.writeFileSync(lsConf, eqLogstashSource(parts, mode, input, path.join(dirs.ls, 'out'), id));
+  const l = await verifyRun(o['logstash-bin'], ['--path.data', path.join(dirs.ls, 'data'), '--path.logs', path.join(dirs.ls, 'logs'), '--pipeline.workers', '1', '--pipeline.ecs_compatibility', mode, '--log.level', 'warn', '-f', lsConf], { timeout });
+  if (l.error || l.code !== 0) return { error: `Logstash : ${l.timedOut ? 'délai dépassé' : l.error ? l.out : `code ${l.code}, ${lastLines(l.out, 3)}`}` };
+  return { ref: verifyOutputs(path.join(dirs.ls, 'out'), id, parts.outputNames) };
+}
+
 async function verifyPipelines(o) {
   if (!o._.length) fail('aucun pipeline à comparer. Exemple : passerelle verify pipelines pipelines/web.conf --sample echantillon.ndjson --logstash-bin /usr/share/logstash/bin/logstash');
   if (!o.sample) fail('--sample FICHIER est nécessaire : les événements d’entrée, un par ligne (un export du topic Kafka d’entrée)');
@@ -270,28 +297,11 @@ async function verifyPipelines(o) {
       const t = translateLogstash(eqVectorSource(parts, path.join(dirs.vec, 'out'), id), cfg);
       if (t.error || t.empty) { finish('error', `traduction impossible : ${t.error || 'résultat vide'}`, { translation: { verdict: 'unrecognized' } }); continue; }
       const translation = { verdict: verdictOf(t), coverage: coverage(t.stats).percent };
-      const conf = path.join(dirs.vec, 'vector.yaml');
-      // Deux retouches d’environnement, pas de traitement : un dossier de données à soi, et pas d’API (le port 8686
-      // est peut-être celui du Vector qui tourne déjà sur cette machine)
-      const yaml = t.yaml.replace(/^data_dir:.*$/m, `data_dir: ${path.join(dirs.vec, 'data')}`).replace(/^api:\n(?: {2}.*\n)+/m, 'api:\n  enabled: false\n');
-      fs.writeFileSync(conf, yaml);
-      const venv = Object.assign({}, process.env, { VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION: 'true' });
-      const v = await verifyRun(vectorBin, ['--quiet', '--color', 'never', '--config', conf], { stdin: input, env: venv, timeout });
-      if (v.error || v.code !== 0) { finish('error', `Vector : ${v.timedOut ? 'délai dépassé' : v.error ? v.out : `code ${v.code}, ${lastLines(v.out, 3)}`}`, { translation }); continue; }
-      // Référence : les événements déjà produits par le pipeline du client, ou son Logstash rejouant l’échantillon
-      let ref;
-      if (o.reference) {
-        let st; try { st = fs.statSync(o.reference); } catch (e) { finish('error', `référence introuvable : ${o.reference}`, { translation }); continue; }
-        if (st.isDirectory()) ref = Object.fromEntries(parts.outputNames.map(name => [name, verifyEvents(path.join(o.reference, `${name}.ndjson`))]));
-        else if (parts.outputNames.length === 1) ref = { [parts.outputNames[0]]: verifyEvents(o.reference) };
-        else { finish('error', `le pipeline a ${parts.outputNames.length} sorties (${parts.outputNames.join(', ')}) : --reference attend un dossier avec un <sortie>.ndjson par sortie`, { translation }); continue; }
-      } else {
-        const lsConf = path.join(dirs.ls, 'replay.conf');
-        fs.writeFileSync(lsConf, eqLogstashSource(parts, mode, input, path.join(dirs.ls, 'out'), id));
-        const l = await verifyRun(o['logstash-bin'], ['--path.data', path.join(dirs.ls, 'data'), '--path.logs', path.join(dirs.ls, 'logs'), '--pipeline.workers', '1', '--pipeline.ecs_compatibility', mode, '--log.level', 'warn', '-f', lsConf], { timeout });
-        if (l.error || l.code !== 0) { finish('error', `Logstash : ${l.timedOut ? 'délai dépassé' : l.error ? l.out : `code ${l.code}, ${lastLines(l.out, 3)}`}`, { translation }); continue; }
-        ref = verifyOutputs(path.join(dirs.ls, 'out'), id, parts.outputNames);
-      }
+      const failure = await verifyPlayVector(verifyRetouch(t.yaml, path.join(dirs.vec, 'data')), dirs.vec, input, vectorBin, timeout);
+      if (failure) { finish('error', failure, { translation }); continue; }
+      const got = await verifyReference(o, parts, dirs, input, mode, id, timeout);
+      if (got.error) { finish('error', got.error, { translation }); continue; }
+      const ref = got.ref;
       const vec = verifyOutputs(path.join(dirs.vec, 'out'), id, parts.outputNames);
       // Une minute de marge de part et d’autre : l’horodatage d’ingestion tombe pendant l’exécution
       const cmp = eqComparePipelineOutputs(ref, vec, parts.outputNames, [now - 60000, Date.now() + 60000], { labels: { ref: o.reference ? 'référence' : 'Logstash', vec: 'Vector' } });

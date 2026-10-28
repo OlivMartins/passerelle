@@ -142,6 +142,40 @@ Choisissez la fenêtre dans une période où les deux moteurs ont reçu les mêm
 
 Pour un pipeline, `--sample` est un export du topic Kafka d’entrée, un événement JSON par ligne. Logstash le relit par une entrée fichier, Vector par son entrée standard ; les métadonnées Kafka (`[@metadata][kafka]`) ne sont pas rejouées, et le rapport le signale quand le pipeline s’en sert. Un échantillon de moins de 100 événements ne dit rien des cas rares.
 
+## Aide aux cas à reprendre
+
+`passerelle assist` prépare, compile et rejoue une proposition pour les filtres `ruby` de Logstash et les scripts Painless que la traduction laisse « à reprendre » (voir le [README](../README.md#aide-aux-cas-à-reprendre)). Il se lance depuis un poste ou un serveur qui a Vector (`--vector-bin` ou `PASSERELLE_VECTOR_BIN`) ; le service `passerelle` n’en a pas besoin.
+
+```bash
+# Filtres ruby : l’échantillon est rejoué dans le Logstash du client, ou comparé à des événements déjà produits
+passerelle assist ruby pipelines/web.conf --sample echantillon.ndjson --logstash-bin /usr/share/logstash/bin/logstash --out aide/
+
+# Painless : la référence est ce que votre Elasticsearch produit pour les mêmes documents
+curl -s -u "$ES_USER:$ES_PASSWORD" -H 'content-type: application/json' "$ES/_ingest/pipeline/mon-pipeline/_simulate" \
+  -d "{\"docs\": $(jq -s '[.[] | {_source: .}]' documents.ndjson)}" | jq -c '.docs[].doc._source' > attendus.ndjson
+passerelle assist painless ingest/ --local-model --model-name qwen2.5-coder:14b --sample documents.ndjson --reference attendus.ndjson --out aide/
+```
+
+Sans `--sample` et sans référence, les propositions sont compilées par Vector mais pas rejouées : le rapport les donne « non rejouées ». Un champ que les deux moteurs ne peuvent pas produire égal (un horodatage d’ingestion, par exemple `event.ingested`) s’écarte des deux côtés par `--ignore event.ingested`.
+
+**Le modèle local** est facultatif. Il se déclare dans `passerelle.yaml`, et ne sert que si `--local-model` est passé :
+
+```yaml
+assist:
+  model:
+    endpoint: http://127.0.0.1:11434   # Ollama ; seule la boucle locale est admise (127.0.0.1, ::1, localhost), en http
+    api: ollama                        # ou openai : un serveur local compatible avec /v1/chat/completions (llama.cpp, vLLM…)
+    model: qwen2.5-coder:14b
+    timeout: 300                       # secondes, par demande
+    max_attempts: 2                    # essais par cas ; le message du compilateur de Vector est rendu au modèle entre deux essais
+```
+
+Ce que le modèle reçoit : le code du cas, la raison donnée par le traducteur, les règles de VRL à suivre, et au second essai le message du compilateur. Jamais un événement de l’échantillon, ni la configuration, ni un nom de machine, de fichier ou de topic. Aucune demande ne porte de jeton. Un modèle distant, même derrière un tunnel, se refuse : l’adresse est vérifiée avant toute connexion, et la demande ne passe par aucun proxy de l’environnement. `check-config` signale une adresse qui n’est pas locale.
+
+**Ce que la preuve vaut.** Le rejeu compare le pipeline entier : un écart peut venir d’un autre filtre que celui qu’on a repris, et `passerelle verify pipelines` dit si la traduction seule est en cause. « Confirmée sur l’échantillon » veut dire identique à la référence sur les événements rejoués, pas sur ceux que l’échantillon ne contient pas : élargissez-le (au moins une centaine d’événements, avec les cas rares) avant de reprendre une proposition, et relisez-la. Vector rejoue l’échantillon avec une entrée standard et des sorties en fichiers ; une proposition qui lit l’environnement ou appelle le réseau est écartée avant d’être compilée.
+
+**Ce que les règles ne couvrent pas** : un Ruby hors du sous-ensemble (classes, appels système, bibliothèques, blocs de plusieurs instructions, noms de champs calculés, `+` entre deux champs dont on ne connaît pas le type, division dont on ne sait pas si elle est entière) n’a pas de proposition, avec la raison dans le rapport. Quand Ruby lève une exception (une méthode sur `nil`), Logstash étiquette l’événement `_rubyexception` et s’arrête là ; la proposition continue avec une valeur neutre, et le banc le montre comme un écart. Les règles sont éprouvées contre un vrai Ruby et un vrai VRL par `npm run test:assist` (voir [tests/README.md](../tests/README.md)).
+
 ## Accès à l’interface
 
 Le service n’écoute que sur `127.0.0.1:8080`. Deux options :
@@ -209,6 +243,7 @@ passerelle grafana tableaux/ --index 'logs-*' --out build/grafana
 passerelle schema ddl mappings/ --preset otel --out build/ddl
 passerelle schema analyzers mappings/ --text "texte d’essai" --format md
 passerelle verify queries requetes/ --index 'logs-*' --out rapport/
+passerelle assist ruby pipelines/ --sample echantillon.ndjson --logstash-bin /usr/share/logstash/bin/logstash --out aide/
 ```
 
 Chaque fichier reçoit un verdict : prête, à vérifier, à reprendre ou non reconnue. Codes de sortie : `0` succès, `1` erreur ou fichier non reconnu, `2` fichier à reprendre (`--fail-on todo`), ou à vérifier ou à reprendre (`--fail-on review`). `--verbose` affiche les remarques de chaque fichier.

@@ -61,6 +61,14 @@ vector:
 #   tolerance: 1e-9
 #   examples: 3
 #   timeout: 60
+# Aide aux cas « à reprendre » (passerelle assist) : un modèle local, facultatif, joint seulement avec --local-model
+# assist:
+#   model:
+#     endpoint: http://127.0.0.1:11434  # seule la boucle locale est admise (127.0.0.1, ::1, localhost), en http
+#     api: ollama                       # ou openai : un serveur local compatible avec /v1/chat/completions
+#     model: ''
+#     timeout: 300                      # secondes, par demande
+#     max_attempts: 2                   # essais par cas
 # Exploitation du service (passerelle serve) : jetons à portée, identité du reverse proxy, audit, métriques, traces
 # server:
 #   tokens:                           # en plus de PASSERELLE_TOKEN, qui garde toutes les portées (nom « principal »)

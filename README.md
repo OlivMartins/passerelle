@@ -260,6 +260,24 @@ Chaque requête ou pipeline reçoit un état : **identique**, **différent** (av
 
 Les deux moteurs ne sont lus qu’en lecture seule : Elasticsearch ne reçoit que `GET /` et `POST /<index>/_search`, ClickHouse que des `SELECT` sous `readonly = 1`. Les comptes conseillés sont décrits dans le [guide d’installation](docs/INSTALL.md#équivalence-sur-vos-données).
 
+## Aide aux cas à reprendre
+
+Quand un filtre `ruby` de Logstash ou un script Painless n’a pas d’équivalent connu, la traduction laisse un commentaire et le code d’origine. `passerelle assist` prépare une **proposition** pour chacun de ces cas, la fait compiler par Vector, puis la **rejoue avec le banc** de `passerelle verify` : l’échantillon passe par votre moteur d’origine et par Vector avec la proposition, et les événements sont comparés champ par champ.
+
+```bash
+# Filtres ruby : des règles couvrent un sous-ensemble de Ruby (event.get, set, remove, tag, cancel, conditions, texte, nombres, boucles)
+passerelle assist ruby pipelines/web.conf --sample echantillon.ndjson \
+  --logstash-bin /usr/share/logstash/bin/logstash --out aide/
+
+# Scripts Painless : un modèle qui tourne sur ce poste, en option, et les documents que votre Elasticsearch produit
+passerelle assist painless ingest/ --local-model --model-name qwen2.5-coder:14b \
+  --sample documents.ndjson --reference attendus.ndjson --out aide/
+```
+
+Une proposition n’est jamais une traduction : elle va dans un fichier à part (`aide/web.propositions.yaml`), chaque bloc marqué « PROPOSITION À VÉRIFIER » avec son origine, le code d’origine en commentaire. Le rapport donne un état par pipeline : **confirmée sur l’échantillon** (identique à la référence, ce qui ne dit rien des événements que l’échantillon ne contient pas), **différente** (avec l’écart), **non concluante**, **non rejouée** (compilée seulement, faute d’échantillon ou de référence), **sans proposition** ou **en erreur**. Un pipeline dont un cas n’a pas de proposition n’est jamais déclaré confirmé.
+
+Le modèle est **en option et reste sur le poste** : sans `--local-model`, aucune connexion n’est ouverte, même si une adresse est configurée. Avec, seule la boucle locale est admise (`127.0.0.1`, `::1`, `localhost`), refusée avant toute connexion sinon. Il reçoit le code du cas et la raison donnée par le traducteur, jamais un événement de l’échantillon ni la configuration ; une proposition qui lit l’environnement ou appelle le réseau (`get_env_var`, `http_request`…) est écartée. Le rejeu de Vector n’a ni source Kafka ni sortie réseau : des fichiers. Détails et limites dans le [guide d’installation](docs/INSTALL.md#aide-aux-cas-à-reprendre).
+
 ## Au-delà des requêtes : Kibana, Grafana, schéma, ingestion
 
 Une migration ne se limite pas aux requêtes. Passerelle lit aussi ce qui les entoure, avec les mêmes verdicts (prête, à vérifier, à reprendre, non reconnue).
@@ -442,6 +460,7 @@ Tout est détaillé dans le [guide d’installation](docs/INSTALL.md#jetons-à-p
 - **Service durci.** Utilisateur dédié sans privilège, système de fichiers en lecture seule, filtre seccomp vérifié sur les appels système réellement utilisés. Score `systemd-analyze security` : 1.2, « OK ».
 - **API sobre.** Jetons comparés en temps constant et limités à une portée, journal d’audit sans contenu de requête, requêtes intersites refusées, politique CSP stricte, corps limités à 2 Mio. La validation SQL n’accepte qu’un `SELECT` sur les tables de la configuration, vérifiées par `EXPLAIN AST` avant toute exécution, en `readonly`. Le compte ClickHouse conseillé est décrit dans le [guide d’installation](docs/INSTALL.md#compte-clickhouse-de-validation).
 - **Lecture seule chez vous.** `passerelle verify` n’envoie à Elasticsearch que des `_search` et à ClickHouse que des `SELECT` en `readonly`, et `--no-values` garde les données du client hors du rapport.
+- **Aide locale.** `passerelle assist` n’appelle un modèle qu’avec `--local-model`, seulement sur la boucle locale, et ne lui envoie que le code des cas à reprendre : ni événement, ni configuration. Ses propositions sont marquées « à vérifier » et rejouées avant toute confiance.
 - **Secrets hors des fichiers.** Par défaut, les mots de passe sont des références `${VARIABLE}`, aussi bien dans la configuration de Passerelle que dans les configurations Vector qu’il génère.
 
 Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
