@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.4.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.4.0"></a>
+  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.5.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.5.0"></a>
   <a href="https://github.com/OlivMartins/passerelle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/OlivMartins/passerelle/ci.yml?branch=main&style=flat-square&label=tests&labelColor=1B2A33" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache%202.0-1E7A68?style=flat-square&labelColor=1B2A33" alt="Licence Apache 2.0"></a>
   <img src="https://img.shields.io/badge/Linux-x86__64-53636B?style=flat-square&labelColor=1B2A33" alt="Linux x86_64">
@@ -31,7 +31,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/demo-dark.gif">
-  <img src="docs/assets/demo-light.gif" width="100%" alt="Démonstration : un fichier de requête déposé dans Passerelle est traduit instantanément en SQL ClickHouse, avec remarques d’optimisation, lecture en langage clair, puis topologie d’un pipeline Logstash traduit pour Vector">
+  <img src="docs/assets/demo-light.gif" width="100%" alt="Démonstration : un fichier de requête déposé dans Passerelle est traduit instantanément en SQL ClickHouse, avec remarques d’optimisation et lecture en langage clair ; puis la topologie d’un pipeline Logstash traduit pour Vector, et un export Kibana dont chaque panneau donne ses requêtes SQL">
 </picture>
 
 <br>
@@ -191,7 +191,7 @@ Sont reconnus les modèles de Watcher et des alertes Kibana (`{{…}}`) et les v
   <img src="docs/assets/pipelines-light.png" width="100%" alt="Un pipeline Logstash de routage multi-topics et sa topologie Vector : étapes VRL, aiguillage et trois destinations Kafka">
 </picture>
 
-- **Chaque filtre devient une étape VRL nommée** : grok, dissect, date, mutate, json, kv, geoip, translate, fingerprint, et neuf autres. Le code est typé selon les règles du compilateur VRL : aucune erreur ignorée en silence.
+- **Chaque filtre devient une étape VRL nommée** : grok, dissect, date, mutate, json, kv, geoip, translate, fingerprint, et seize autres. Le code est typé selon les règles du compilateur VRL : aucune erreur ignorée en silence.
 - **Les sorties conditionnelles deviennent un aiguillage** `route`, avec une destination par branche.
 - **Kafka reste au cœur du flux** : mêmes topics, groupe de consommateurs, SASL et TLS. Les identifiants sont référencés par des variables d’environnement plutôt qu’écrits en clair ; depuis la 0.57, Vector ne les remplace qu’avec l’option `--dangerously-allow-env-var-interpolation`, que rappelle l’en-tête du fichier généré.
 - **Elasticsearch en sortie, configuration comprise** : identifiants lus dans des variables d’environnement, TLS, data streams, identifiant de document et pipeline d’ingestion. Ce qui n’a pas d’équivalent dans Vector (mise à jour de documents, modèles d’index, ILM) est signalé.
@@ -255,7 +255,7 @@ Une migration ne se limite pas aux requêtes. Passerelle lit aussi ce qui les en
 - **Plusieurs pipelines** : `passerelle ls2vector pipelines.yml` relie les pipelines qui s’appellent entre eux.
 - **Analyseurs personnalisés** (`passerelle schema analyzers mapping.json`) : un analyseur Elasticsearch devient une colonne de mots calculée et un index plein texte ClickHouse, avec l’aperçu des mots produits. [Ce qui est repris, et les écarts](docs/ANALYSEURS.md).
 
-Tout cela est aussi dans l’interface (sections « Ingestion » et « Autres sources »), dans l’API (`/v1/schema/ddl` et `/v1/schema/analyzers` pour le schéma) et en ligne de commande.
+Tout cela est aussi dans l’interface (sections « Ingestion », « Kibana » et « Autres sources » ; la section « Kibana » montre, panneau par panneau, les requêtes SQL d’un tableau de bord déposé), dans l’API (`/v1/schema/ddl` et `/v1/schema/analyzers` pour le schéma) et en ligne de commande.
 
 ## Une configuration, versionnée avec votre code
 
@@ -358,8 +358,8 @@ Téléchargez [`passerelle.html`](https://github.com/OlivMartins/passerelle/rele
 ### Sur un serveur Linux
 
 ```bash
-curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.4.0/passerelle-1.4.0-linux-x86_64.tar.gz
-tar xzf passerelle-1.4.0-linux-x86_64.tar.gz && cd passerelle-1.4.0-linux-x86_64
+curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.5.0/passerelle-1.5.0-linux-x86_64.tar.gz
+tar xzf passerelle-1.5.0-linux-x86_64.tar.gz && cd passerelle-1.5.0-linux-x86_64
 sudo ./install.sh
 ```
 

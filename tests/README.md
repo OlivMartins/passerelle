@@ -166,7 +166,7 @@ La CI joue ce banc dans le job `ingest`, avec Vector 0.59.0 et des clones éping
 
 ## Interface : `npm run test:ui`
 
-Ouvre `dist/passerelle.html` dans Chromium avec Playwright : les sections requête, Logstash, ingestion et « Autres sources » (Kibana, Grafana, schéma, analyseurs) traduisent leur exemple et affichent un verdict, leurs onglets s’ouvrent, et la page ne produit aucune erreur. Playwright n’est pas une dépendance du projet : `npm run build:ui`, puis `npm install --no-save playwright` et `npx playwright install chromium` (ou `PLAYWRIGHT_FROM=<dossier où playwright se résout>`). La CI joue ce test dans le job `interface`.
+Ouvre `dist/passerelle.html` dans Chromium avec Playwright : les sections requête, Logstash, ingestion, Kibana et « Autres sources » (inventaire Kibana, Grafana, schéma, analyseurs) traduisent leur exemple et affichent un verdict, leurs onglets s’ouvrent ; dans la section Kibana, un panneau choisi montre son SQL, et un export ouvert par le sélecteur de fichiers remplace l’exemple, et la page ne produit aucune erreur. Playwright n’est pas une dépendance du projet : `npm run build:ui`, puis `npm install --no-save playwright` et `npx playwright install chromium` (ou `PLAYWRIGHT_FROM=<dossier où playwright se résout>`). La CI joue ce test dans le job `interface`.
 
 ## Bancs ClickHouse : `npm run test:attributes` et `npm run test:clickhouse`
 

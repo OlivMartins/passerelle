@@ -333,11 +333,17 @@ function handleFiles(files) {
   if (cfgFile) { importConfig(cfgFile); return; }
   // Chaque fichier va où son contenu le désigne : export Kibana, tableau Grafana, pipeline d’ingestion, pipeline Logstash, requête DSL
   const kindOf = f => {
-    if (/\.ndjson$/i.test(f.name)) return 'kibana';
+    const grafana = /"panels"\s*:|"rows"\s*:/.test(f.text) && /"(?:datasource|targets)"/.test(f.text);
+    // Un export Kibana (.ndjson, ou une première ligne qui est un objet sauvegardé ou une règle de détection)
+    // va à la section Kibana, sauf depuis l’inventaire de la vue « autres sources »
+    const firstLine = (/^\s*(\{.*)$/m.exec(f.text) || [])[1] || '';
+    const savedObject = /"attributes"\s*:/.test(firstLine) && /"type"\s*:\s*"/.test(firstLine) && /"id"\s*:/.test(firstLine);
+    const detectionRule = /"rule_id"\s*:/.test(firstLine) && /"(?:severity|risk_score)"\s*:/.test(firstLine);
+    if (/\.ndjson$/i.test(f.name) || savedObject || detectionRule) return S.view === 'tools' ? 'kibana-tool' : 'kibana';
     // Dans la vue « autres sources », un fichier .json ou .txt va à l’outil choisi (schéma, analyseurs), sauf un tableau Grafana reconnu
-    if (S.view === 'tools' && /\.(json|txt|es)$/i.test(f.name) && !(/"panels"\s*:|"rows"\s*:/.test(f.text) && /"(?:datasource|targets)"/.test(f.text))) return 'tools';
+    if (S.view === 'tools' && /\.(json|txt|es)$/i.test(f.name) && !grafana) return 'tools';
     if (/\.(conf|cfg|logstash)$/i.test(f.name)) return 'ls';
-    if (/"panels"\s*:|"rows"\s*:/.test(f.text) && /"(?:datasource|targets)"/.test(f.text)) return 'grafana';
+    if (grafana) return 'grafana';
     if (/^\s*[{\[]?\s*"?(?:processors|description)"?\s*:/m.test(f.text) && /"?processors"?\s*:/.test(f.text)) return 'ingest';
     if (/\.ya?ml$/i.test(f.name)) return 'ingest';
     if (S.view === 'ls' && !/\.json$/i.test(f.name)) return 'ls';
@@ -347,7 +353,8 @@ function handleFiles(files) {
   let last = null;
   for (const [k, list] of Object.entries(groups)) {
     if (k === 'tools') { S.tools.texts[S.tools.tool] = list[0].text; S.tools.ed.value = list[0].text; runTool(); last = 'tools'; }
-    else if (k === 'kibana' || k === 'grafana') { S.tools.tool = k; S.tools.texts[k] = list[0].text; S.tools.ed && (S.tools.ed.value = list[0].text); runTool(); last = 'tools'; }
+    else if (k === 'kibana') { addKibanaFiles(list); last = 'kibana'; }
+    else if (k === 'kibana-tool' || k === 'grafana') { const t = k === 'grafana' ? 'grafana' : 'kibana'; S.tools.tool = t; S.tools.texts[t] = list[0].text; S.tools.ed && (S.tools.ed.value = list[0].text); runTool(); last = 'tools'; }
     else { addFiles(k, list); last = k; }
   }
   if (last) show(last);
@@ -411,12 +418,12 @@ function renderEnv() {
   $('#env-chip').innerHTML = `<span>ClickHouse<em title="${esc(cfg.clickhouse.endpoint)}">${esc(chHost())}</em></span><span>Kafka<em title="${esc(k)}">${esc(k)}</em></span>${cfg.vector.shadow_mode ? '<span>Mode<em>shadow</em></span>' : ''}${SERVER_CFG ? '<span>Source<em>serveur</em></span>' : ''}`;
   $('#index-list').innerHTML = Object.keys(cfg.clickhouse.index_mapping || {}).map(k2 => `<option value="${esc(k2)}">`).join('');
 }
-function configChanged() { store.set(CFG_KEY, cfg); renderConfigPreview(); clearTimeout(configChanged.h); configChanged.h = setTimeout(() => { run('dsl'); run('ls'); run('ingest'); }, 250); }
+function configChanged() { store.set(CFG_KEY, cfg); renderConfigPreview(); clearTimeout(configChanged.h); configChanged.h = setTimeout(() => { run('dsl'); run('ls'); run('ingest'); runKibana(); }, 250); }
 function importConfig(f) {
   try {
     const parsed = /\.json$/i.test(f.name) ? JSON.parse(f.text) : parseYAMLConfig(f.text);
     cfg = mergeConfig(DEFAULT_CONFIG, { clickhouse: parsed.clickhouse, kafka: parsed.kafka, vector: parsed.vector });
-    store.set(CFG_KEY, cfg); renderConfigForm(); run('dsl'); run('ls'); run('ingest');
+    store.set(CFG_KEY, cfg); renderConfigForm(); run('dsl'); run('ls'); run('ingest'); runKibana();
     toast(`Configuration importée depuis ${f.name}`);
   } catch (e) { toast(`${f.name} n’est pas lisible : ${e.message}`); }
 }
@@ -533,9 +540,11 @@ function mdHTML(md) {
     if (h) { out.push(`<h${h[1].length + 1}>${mdInline(h[2])}</h${h[1].length + 1}>`); i++; continue; }
     if (/^\|/.test(l) && /^\|[\s:|-]+\|?$/.test(L[i + 1] || '')) {
       const cells = r => r.replace(/^\||\|$/g, '').split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'));
-      const head = cells(l); i += 2; const rows = [];
+      // Colonnes alignées à droite (---:) : des nombres, gardés sur une ligne
+      const head = cells(l); const num = cells(L[i + 1]).map(c => /-:$/.test(c)); i += 2; const rows = [];
       while (i < L.length && /^\|/.test(L[i])) rows.push(cells(L[i++]));
-      out.push(`<div class="tw"><table><thead><tr>${head.map(c => `<th>${mdInline(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${mdInline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`); continue;
+      const td = (tag, c, j) => `<${tag}${num[j] ? ' class="n"' : ''}>${mdInline(c)}</${tag}>`;
+      out.push(`<div class="tw"><table><thead><tr>${head.map((c, j) => td('th', c, j)).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map((c, j) => td('td', c, j)).join('')}</tr>`).join('')}</tbody></table></div>`); continue;
     }
     if (/^\s*[-*]\s+/.test(l)) { const items = []; while (i < L.length && /^\s*[-*]\s+/.test(L[i])) items.push(L[i++].replace(/^\s*[-*]\s+/, '')); out.push(`<ul>${items.map(x => `<li>${mdInline(x)}</li>`).join('')}</ul>`); continue; }
     if (!l.trim()) { i++; continue; }
@@ -658,6 +667,335 @@ function setupTools() {
   view.addEventListener('input', e => { const o = e.target.closest('[data-opt]'); if (!o) return; st.opts[o.dataset.opt] = o.value.trim(); clearTimeout(setupTools.h2); setupTools.h2 = setTimeout(runTool, 180); });
   st.ed.value = st.texts[st.tool]; fillExamples(); runTool();
 }
+/* ---------- Tableaux de bord Kibana : un export, ses objets à gauche, leurs requêtes à droite ---------- */
+// L’inventaire (moteur, kibana.js) fait l’analyse ; cette vue la parcourt objet par objet
+const KB_OVERVIEW = '@ensemble';
+const KB_LEVEL = { todo: 'err', review: 'warn', info: 'info' };
+const KB_RANK = { err: 0, warn: 1, opt: 2, info: 3 };
+const kbNorm = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+const nb = (n, one, many) => `${n} ${n > 1 ? many : one}`;
+const ucfirst = s => String(s).charAt(0).toUpperCase() + String(s).slice(1);
+S.kibana = { files: [{ name: EXAMPLES.kibana[0].file, text: EXAMPLES.kibana[0].text, example: true }], active: 0, mode: 'tree', sel: null, tab: 'sql', filter: '', inv: null, error: null, byKey: new Map(), flat: [], ed: null };
+const kbEntry = k => S.kibana.byKey.get(k);
+const kbKids = x => (x.children || []).map(kbEntry).filter(Boolean);
+const kbDashboards = () => (S.kibana.inv ? S.kibana.inv.entries.filter(x => x.type === 'dashboard') : []);
+const kbKind = x => [KB_TYPES[x.type], x.kind].filter(Boolean).join(' · ');
+const kbOwners = x => (x.parent ? [x.parent] : x.usedBy || []).map(k => (kbEntry(k) || {}).title).filter(Boolean);
+const kbFileStatus = f => { try { return kibanaObjects(f.text).objects.length ? 'ok' : 'err'; } catch (e) { return 'err'; } };
+
+function runKibana(pulse) {
+  const st = S.kibana; const files = st.files.filter(f => f.text.trim());
+  const before = st.inv ? st.inv.summary.queries + ':' + st.inv.summary.objects : '';
+  st.inv = null; st.error = null;
+  if (files.length) {
+    try {
+      // Plusieurs exports (un par espace) : réunis, un objet présent deux fois compte une fois
+      const inv = kibanaInventory(files.map(f => f.text), cfg, { names: files.map(f => f.name) });
+      if (!inv.summary.objects && !Object.keys(inv.source.ignored).length) st.error = `Aucun objet sauvegardé lisible${inv.source.errors.length ? ` (${inv.source.errors[0]})` : ''}.`;
+      else st.inv = inv;
+    } catch (e) { st.error = `Erreur interne de l’inventaire : ${e.message}`; }
+  }
+  st.byKey = new Map(st.inv ? st.inv.entries.map(x => [x.key, x]) : []);
+  if (st.sel !== KB_OVERVIEW && !kbEntry(st.sel)) st.sel = kbDefault();
+  renderKibana();
+  if (pulse && st.inv && before !== st.inv.summary.queries + ':' + st.inv.summary.objects) pulseSeam('kibana');
+}
+// Premier tableau de bord de l’export, sinon la vue d’ensemble
+function kbDefault() { const d = kbDashboards()[0]; return d ? d.key : KB_OVERVIEW; }
+function kbSelect(key, focus) {
+  const st = S.kibana; if (st.sel === key) return;
+  st.sel = key; renderKibana(); pulseSeam('kibana');
+  const view = $('#view-kibana');
+  $('[data-role="out"]', view).scrollTop = 0;
+  if (focus) { const row = $(`.kb-row[data-key="${CSS.escape(key)}"]`, view); if (row) { row.focus(); row.scrollIntoView({ block: 'nearest' }); } }
+}
+
+/* Ce qui s’affiche à droite pour la sélection : verdict, comptes, effort, phrase, et les objets dont on montre les requêtes */
+function kbSelection() {
+  const st = S.kibana; const inv = st.inv;
+  const x = st.sel === KB_OVERVIEW ? null : kbEntry(st.sel);
+  if (!x) {
+    const s = inv.summary; const b = s.byVerdict; const dashes = kbDashboards();
+    const ign = Object.entries(inv.source.ignored);
+    return {
+      overview: true, verdict: worstOf(Object.keys(b).filter(k => b[k])), title: 'Vue d’ensemble',
+      counts: { ok: b.ready, approx: b.review, ko: b.todo + b.unrecognized }, noun: ['objet', 'objets'],
+      hours: s.effort.hours, hoursLabel: `effort estimé, soit ${frNum(s.effort.days)} j à ${inv.effortScale.hoursPerDay} h`,
+      meta: [st.files.length > 1 ? `${st.files.length} exports réunis` : (st.files[0] || {}).name, ign.length ? `non comptés : ${ign.map(([t, n]) => `${n} ${t}`).join(', ')}` : ''].filter(Boolean).join(' · '),
+      sentence: `${nb(s.objects, 'objet', 'objets')} à migrer${dashes.length ? `, dont ${nb(dashes.length, 'tableau de bord', 'tableaux de bord')}` : ''} ; ${nb(s.queries, 'requête traduite', 'requêtes traduites')} en SQL ClickHouse.`,
+      groups: inv.entries.filter(y => y.queries.length).map(y => ({ x: y, qs: y.queries, path: true }))
+    };
+  }
+  if (x.type === 'dashboard') {
+    const kids = kbKids(x); const c = { ok: 0, approx: 0, ko: 0 };
+    kids.forEach(k => c[{ ready: 'ok', review: 'approx' }[k.verdict] || 'ko']++);
+    const nq = x.queries.length + kids.reduce((n, k) => n + k.queries.length, 0);
+    const manual = kids.filter(k => !k.queries.length && k.verdict !== 'ready');
+    // Ce que le tableau de bord ajoute à ses panneaux : un filtre commun, des contrôles
+    const ctrls = x.queries.filter(q => /^Contrôle /.test(q.title)).map(q => q.title.replace(/^Contrôle « (.*) »$/, '$1'));
+    const own = [x.queries.some(q => q.title === 'Filtre commun') ? 'un filtre commun' : '', ctrls.length ? `${ctrls.length > 1 ? `${ctrls.length} contrôles` : 'un contrôle'} (${ctrls.join(', ')})` : ''].filter(Boolean);
+    return {
+      x, verdict: x.verdict, counts: kids.length ? c : null, noun: ['panneau', 'panneaux'],
+      hours: x.effortTotal || x.effort, hoursLabel: 'effort estimé, panneaux compris',
+      meta: [kbKind(x), [...new Set(kids.flatMap(k => k.views))].join(', ')].filter(Boolean).join(' · '),
+      sentence: `${nb(x.panels || kids.length, 'panneau', 'panneaux')}, ${nb(nq, 'requête SQL', 'requêtes SQL')}.${own.length ? ` Le tableau de bord ajoute ${own.join(' et ')}.` : ''}${manual.length ? ` ${nb(manual.length, 'panneau se recrée', 'panneaux se recréent')} sans traduction : ${manual.map(k => k.title).join(', ')}.` : ''}`,
+      groups: [x].concat(kids).map(y => ({ x: y, qs: y.queries, own: y === x })).filter(g => !g.own || g.qs.length)
+    };
+  }
+  const c = { ok: 0, approx: 0, ko: 0 };
+  x.queries.forEach(q => c[{ ready: 'ok', review: 'approx' }[q.verdict] || 'ko']++);
+  const owners = kbOwners(x);
+  const firstTodo = x.issues.find(i => i.kind === 'todo');
+  const sentence = x.queries.length === 1 && x.queries[0].sentence ? x.queries[0].sentence
+    : x.queries.length ? `${nb(x.queries.length, 'requête SQL', 'requêtes SQL')} : ${x.queries.map(q => q.title).join(', ')}.`
+    : firstTodo ? firstTodo.detail : 'Aucune requête à traduire : l’objet se recrée tel quel dans l’outil cible.';
+  return {
+    x, verdict: x.verdict, counts: x.queries.length ? c : null, noun: ['requête', 'requêtes'],
+    hours: x.effort, hoursLabel: 'effort estimé',
+    meta: [kbKind(x), x.views.length ? `${x.views.join(', ')} → ${x.tables.join(', ') || '?'}` : '', owners.length ? `dans ${owners.map(t => `« ${t} »`).join(', ')}` : ''].filter(Boolean).join(' · '),
+    sentence, groups: [{ x, qs: x.queries }]
+  };
+}
+
+function renderKibana() {
+  const st = S.kibana; const view = $('#view-kibana'); if (!view) return;
+  const files = $('[data-role="files"]', view);
+  files.hidden = st.files.length < 2;
+  files.innerHTML = st.files.map((f, i) => `<button class="file-chip" type="button" data-file="${i}" aria-pressed="${i === st.active}"><i class="${f.status || 'ok'}"></i>${esc(f.name)}<span class="x" data-close="${i}" role="button" aria-label="Fermer ${esc(f.name)}">×</span></button>`).join('');
+  $('[data-role="fname"]', view).textContent = st.files.length > 1 ? `${st.files.length} fichiers` : st.files[0] ? st.files[0].name : '';
+  $$('[data-mode]', view).forEach(b => b.setAttribute('aria-pressed', b.dataset.mode === st.mode));
+  $('[data-role="browse"]', view).hidden = st.mode !== 'tree';
+  $('[data-role="editor"]', view).hidden = st.mode !== 'source';
+  renderKbBrowse(view); renderKbOut(view);
+}
+
+function renderKbBrowse(view) {
+  const st = S.kibana; const inv = st.inv;
+  const stats = $('[data-role="stats"]', view); const tree = $('[data-role="tree"]', view);
+  $('.kb-search', view).hidden = !inv || !inv.entries.length;
+  if (!inv) {
+    stats.hidden = true;
+    tree.innerHTML = st.error ? `<div class="empty"><strong>Aucun objet à afficher</strong><span>Passez sur NDJSON pour voir le fichier lu.</span></div>` : `<div class="empty"><strong>Aucun export</strong><span>Déposez ici un fichier .ndjson exporté de Kibana, ou chargez un exemple.</span><div class="row">${EXAMPLES.kibana.map((e, i) => `<button class="btn" type="button" data-load-example="${i}">${esc(e.title)}</button>`).join('')}</div></div>`;
+    return;
+  }
+  const s = inv.summary; const b = s.byVerdict; const total = s.objects || 1;
+  const dashes = kbDashboards();
+  stats.hidden = false;
+  stats.innerHTML = `<div class="kb-figs"><span><b>${s.objects}</b>objet${s.objects > 1 ? 's' : ''}</span><span><b>${dashes.length}</b>tableau${dashes.length > 1 ? 'x' : ''} de bord</span><span><b>${s.queries}</b>requête${s.queries > 1 ? 's' : ''} SQL</span><span><b>${esc(frHours(s.effort.hours))}</b>d’effort</span></div>
+    <div class="gauge" role="img" aria-label="${b.ready} objets prêts, ${b.review} à vérifier, ${b.todo + b.unrecognized} à reprendre"><span class="c-ok" style="width:${(100 * b.ready) / total}%"></span><span class="c-approx" style="width:${(100 * b.review) / total}%"></span><span class="c-ko" style="width:${(100 * (b.todo + b.unrecognized)) / total}%"></span></div>`;
+  // Arbre : vue d’ensemble, tableaux de bord et leurs panneaux, puis les objets qu’aucun tableau de bord n’affiche
+  const q = kbNorm(st.filter.trim()); const match = x => !q || kbNorm(x.title).includes(q);
+  const row = (x, child) => {
+    const n = x.queries.length + (x.type === 'dashboard' ? kbKids(x).reduce((m, k) => m + k.queries.length, 0) : 0);
+    return `<button type="button" class="kb-row${child ? ' child' : ''}${x.type === 'dashboard' ? ' dash' : ''}" role="option" data-key="${esc(x.key)}" aria-selected="${st.sel === x.key}" tabindex="-1"><i class="dot v-${x.verdict}" title="${esc(verdictLabel(x.verdict))}"></i><span class="kb-name"><b>${esc(x.title)}</b><small>${esc(kbKind(x))}</small></span>${n ? `<span class="kb-count" title="${nb(n, 'requête SQL', 'requêtes SQL')}">${n}</span>` : '<span></span>'}</button>`;
+  };
+  const html = [`<button type="button" class="kb-row overview" role="option" data-key="${KB_OVERVIEW}" aria-selected="${st.sel === KB_OVERVIEW}" tabindex="-1"><i class="dot v-${worstOf(Object.keys(b).filter(k => b[k]))}"></i><span class="kb-name"><b>Vue d’ensemble</b><small>Inventaire, prérequis, points à reprendre</small></span><span></span></button>`];
+  const dashRows = [];
+  for (const d of dashes) {
+    const kids = kbKids(d); const shown = match(d) ? kids : kids.filter(match);
+    if (match(d) || shown.length) dashRows.push(row(d), ...shown.map(k => row(k, true)));
+  }
+  if (dashRows.length) html.push(`<div class="kb-group"><span>Tableaux de bord</span><span>${dashes.length}</span></div>`, ...dashRows);
+  const loose = inv.entries.filter(x => x.type !== 'dashboard' && !x.parent && !(x.usedBy || []).length);
+  const looseShown = loose.filter(match);
+  if (looseShown.length) html.push(`<div class="kb-group"><span>${dashes.length ? 'Hors tableau de bord' : 'Objets'}</span><span>${loose.length}</span></div>`, ...looseShown.map(x => row(x)));
+  if (q && !dashRows.length && !looseShown.length) html.push(`<p class="kb-none">Aucun titre ne contient « ${esc(st.filter.trim())} ».</p>`);
+  tree.innerHTML = html.join('');
+  const cur = $('.kb-row[aria-selected="true"]', tree) || $('.kb-row', tree);
+  if (cur) cur.tabIndex = 0;
+}
+
+const KB_TABS = { overview: [['synth', 'Synthèse'], ['sql', 'SQL'], ['notes', 'Remarques']], object: [['sql', 'SQL'], ['dsl', 'Requête DSL'], ['notes', 'Remarques'], ['anatomy', 'Lecture']] };
+function renderKbOut(view) {
+  const st = S.kibana;
+  const v = $('[data-role="verdict"]', view); const tabs = $('[data-role="tabs"]', view); const out = $('[data-role="out"]', view); const foot = $('.out-foot', view);
+  st.flat = [];
+  if (!st.inv) {
+    tabs.hidden = true; foot.hidden = true;
+    if (!st.error) { v.hidden = true; out.innerHTML = `<div class="empty"><strong>Aucun tableau de bord à traduire</strong><span>Déposez un export .ndjson de Kibana (objets enregistrés, avec les objets liés) : chaque panneau donne ses requêtes SQL.</span><div class="row">${EXAMPLES.kibana.map((e, i) => `<button class="btn" type="button" data-load-example="${i}">${esc(e.title)}</button>`).join('')}</div></div>`; return; }
+    v.hidden = false; v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-unrecognized"><i></i>${verdictLabel('unrecognized')}</span></div><p class="sentence error">${esc(st.error)}</p>`;
+    out.innerHTML = '<div class="empty"><strong>L’export n’est pas lisible</strong><span>Un export d’objets sauvegardés compte un objet JSON par ligne (type, id, attributes). Exportez-le depuis Gestion de la pile &gt; Objets enregistrés.</span></div>';
+    return;
+  }
+  const sel = kbSelection();
+  v.hidden = false; foot.hidden = false;
+  const c = sel.counts; const total = c ? c.ok + c.approx + c.ko || 1 : 1;
+  const [one, many] = sel.noun;
+  const ready = n => `${n} ${n > 1 ? many : one} prêt${one === 'requête' ? 'e' : ''}${n > 1 ? 's' : ''}`;
+  v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-${sel.verdict}"><i></i>${verdictLabel(sel.verdict)}</span><span class="score">${esc(frHours(sel.hours))}</span><span class="score-label">${esc(sel.hoursLabel)}</span>
+    ${c ? `<span class="counts"><span><i class="c-ok"></i>${ready(c.ok)}</span><span><i class="c-approx"></i>${c.approx} à vérifier</span><span><i class="c-ko"></i>${c.ko} à reprendre</span></span>` : ''}</div>
+    ${c ? `<div class="gauge" role="img" aria-label="${ready(c.ok)}, ${c.approx} à vérifier, ${c.ko} à reprendre"><span class="c-ok" style="width:${(100 * c.ok) / total}%"></span><span class="c-approx" style="width:${(100 * c.approx) / total}%"></span><span class="c-ko" style="width:${(100 * c.ko) / total}%"></span></div>` : ''}
+    <p class="kb-meta"><b>${esc(sel.overview ? sel.title : sel.x.title)}</b>${sel.meta ? ` · ${esc(sel.meta)}` : ''}</p>
+    <p class="sentence">${esc(sel.sentence)}</p>${kbIssuesLine(sel)}`;
+  const list = KB_TABS[sel.overview ? 'overview' : 'object'];
+  if (!list.some(([id]) => id === st.tab)) st.tab = list[0][0];
+  const notes = kbNotes(sel); const nErr = notes.filter(n => n.level === 'err').length;
+  tabs.hidden = false;
+  tabs.innerHTML = list.map(([id, label]) => `<button class="tab" role="tab" type="button" data-tab="${id}" aria-selected="${st.tab === id}">${label}${id === 'notes' && notes.length ? `<span class="badge ${nErr ? 'err' : ''}">${notes.length}</span>` : ''}</button>`).join('');
+  if (st.tab === 'sql') out.innerHTML = kbQueriesHTML(sel, 'sql');
+  else if (st.tab === 'dsl') out.innerHTML = kbQueriesHTML(sel, 'dsl');
+  else if (st.tab === 'notes') out.innerHTML = kbNotesHTML(notes);
+  else if (st.tab === 'anatomy') out.innerHTML = kbAnatomyHTML(sel);
+  else if (st.tab === 'synth') out.innerHTML = mdHTML(kbSynthesisMD(st.inv));
+}
+// Ce qui pèse sur l’objet lui-même, hors de ses requêtes : le verdict peut être plus sévère que celui des requêtes
+function kbIssuesLine(sel) {
+  if (sel.overview) return '';
+  const part = (kind, label) => { const l = [...new Set(sel.x.issues.filter(i => i.kind === kind).map(i => i.label))]; return l.length ? `<span><b class="v-${kind}">${label}</b> ${esc(l.join(', '))}</span>` : ''; };
+  const html = part('todo', 'À reprendre :') + part('review', 'À vérifier :');
+  return html ? `<p class="kb-issues">${html}</p>` : '';
+}
+// Corps de recherche reconstitué, au format de la console Kibana
+const kbConsole = q => `GET ${q.pattern || '_all'}/_search\n${JSON.stringify(q.dsl, null, 2)}`;
+// SQL (ou DSL) de chaque objet de la sélection ; un tableau de bord montre ses panneaux l’un après l’autre
+function kbQueriesHTML(sel, what) {
+  const st = S.kibana; const multi = sel.overview || sel.x.type === 'dashboard';
+  const parts = [];
+  if (what === 'dsl') parts.push('<p class="kb-hint">Ce que Kibana envoie à Elasticsearch pour cet affichage, reconstitué depuis l’export. {{time_from}} et {{time_to}} tiennent la place de la période choisie ; ils deviennent les paramètres {time_from:String} et {time_to:String} du SQL.</p>');
+  for (const g of sel.groups) {
+    if (multi) {
+      const path = g.path && g.x.parent && kbEntry(g.x.parent) ? `${kbEntry(g.x.parent).title} › ` : '';
+      parts.push(`<div class="kb-sub"><i class="dot v-${g.x.verdict}"></i><b>${esc(g.own ? 'Tableau de bord' : path + g.x.title)}</b><small>${esc(g.own ? 'filtre commun et contrôles' : kbKind(g.x))}</small>${g.own ? '' : `<button class="btn quiet kb-go" type="button" data-go="${esc(g.x.key)}">Détail</button>`}</div>`);
+    }
+    if (!g.qs.length) {
+      const todo = g.x.issues.find(i => i.kind === 'todo');
+      parts.push(`<p class="kb-none${todo ? ' err' : ''}">${esc(todo ? `${ucfirst(todo.label)} : ${todo.detail}` : 'Contenu sans requête (texte, image, liens) : à recréer tel quel.')}</p>`);
+      continue;
+    }
+    for (const q of g.qs) {
+      const i = st.flat.push({ x: g.x, q }) - 1;
+      const head = `<div class="stmt-head"><span class="kb-qtitle">${esc(q.title)}${what === 'dsl' && q.pattern ? ` <small>${esc(q.pattern)}</small>` : ''}<span class="vmini v-${q.verdict}">${esc(VERDICTS[q.verdict])}</span></span><span class="kb-acts">${what === 'dsl' ? `<button class="btn quiet kb-go" type="button" data-kb-bench="${i}" title="Traduire cette requête dans la section Requêtes">Ouvrir dans Requêtes</button>` : ''}<button class="icon-btn" type="button" data-kb-copy="${i}" data-what="${what}" title="Copier" aria-label="Copier ${what === 'dsl' ? 'la requête DSL' : 'le SQL'}">${ICON_COPY}</button></span></div>`;
+      if (what === 'dsl') parts.push(`<div class="stmt">${head}<pre class="code">${hl(kbConsole(q), 'json')}</pre></div>`);
+      else parts.push(`<div class="stmt">${head}${q.sql ? `<pre class="code">${hl(q.sql, 'sql')}</pre>` : `<p class="kb-none err">${esc(q.error || 'La traduction n’a pas produit de SQL.')}</p>`}</div>`);
+    }
+  }
+  return parts.join('');
+}
+// Remarques de la sélection : celles de l’objet et celles de ses requêtes, chaque remarque une fois avec les objets concernés
+function kbNotes(sel) {
+  const inv = S.kibana.inv;
+  if (sel.overview) {
+    return inv.prerequisites.map(p => ({ level: 'warn', title: p.label, detail: p.detail, where: [nb(p.objects, 'objet', 'objets')] }))
+      .concat(inv.blockers.map(b => ({ level: b.kind === 'todo' ? 'err' : 'warn', title: ucfirst(b.label), detail: '', where: [`${nb(b.objects, 'objet', 'objets')}, ${frHours(b.hours)}`] })))
+      .concat(inv.source.errors.length ? [{ level: 'warn', title: nb(inv.source.errors.length, 'ligne illisible', 'lignes illisibles'), detail: inv.source.errors.slice(0, 5).join(' ; '), where: [] }] : []);
+  }
+  const multi = sel.x.type === 'dashboard';
+  const map = new Map();
+  const add = (level, title, detail, code, where) => {
+    const k = `${level}|${title}|${detail}`;
+    if (!map.has(k)) map.set(k, { level, title, detail, code, where: [] });
+    if (where && !map.get(k).where.includes(where)) map.get(k).where.push(where);
+  };
+  for (const g of sel.groups) {
+    const who = multi && !g.own ? g.x.title : '';
+    for (const i of g.x.issues) add(KB_LEVEL[i.kind] || 'info', ucfirst(i.label), i.detail, null, who);
+    for (const q of g.qs) for (const n of q.notes) add(n.level, n.title, n.detail, n.code, multi ? [who, q.title].filter(Boolean).join(' › ') : g.qs.length > 1 ? q.title : '');
+  }
+  return [...map.values()].sort((a, b) => KB_RANK[a.level] - KB_RANK[b.level]);
+}
+function kbNotesHTML(notes) {
+  if (!notes.length) return '<div class="empty"><strong>Aucune remarque</strong><span>Traduction directe, sans approximation.</span></div>';
+  return `<ul class="notes">${notes.map(n => `<li class="note ${n.level}"><span class="note-kind">${LEVEL[n.level]}</span><h3>${esc(n.title)}</h3>${n.detail ? `<p>${esc(n.detail)}</p>` : ''}${n.where.length ? `<p class="kb-where">${n.where.length > 1 || /›/.test(n.where[0]) || !/\d/.test(n.where[0]) ? 'Concerne : ' : ''}${esc(n.where.join(' ; '))}</p>` : ''}${n.code ? `<pre class="code boxed">${hl(n.code, /^(ALTER|--|PARTITION)/.test(n.code) ? 'sql' : 'vrl')}</pre>` : ''}</li>`).join('')}</ul>`;
+}
+function kbAnatomyHTML(sel) {
+  const x = sel.x; const all = sel.groups.map(g => g.x);
+  const uniq = list => [...new Set(list)];
+  const params = uniq(all.flatMap(y => y.queries.flatMap(q => (q.parameters || []).map(p => `{${p.name}:${(p.types || ['String'])[0]}} ← ${p.source}`))));
+  const rows = [
+    ['Objet', [kbKind(x)]], ['Identifiant', [x.id]],
+    ['Tableau de bord', kbOwners(x)],
+    ['Panneaux', x.type === 'dashboard' ? kbKids(x).map(k => k.title) : []],
+    ['Contrôles', x.controls ? [nb(x.controls, 'contrôle', 'contrôles')] : []],
+    ['Vue de données', uniq(all.flatMap(y => y.views))], ['Table ClickHouse', uniq(all.flatMap(y => y.tables))],
+    ['Paramètres', params], ['Champs cités', uniq(all.flatMap(y => y.fields || [])).sort()],
+    ['Effort', x.effortDetail.map(l => `${l.label} · ${frHours(l.hours)}`)]
+  ].filter(([, list]) => list && list.length);
+  return `<dl class="anatomy">${rows.map(([k, list]) => `<dt>${k}</dt><dd>${list.map(y => `<span class="chip">${esc(y)}</span>`).join('')}</dd>`).join('')}</dl>`;
+}
+// Synthèse de l’inventaire : son rapport, sans le détail objet par objet que l’arbre montre déjà
+function kbSynthesisMD(inv) {
+  return inventoryMarkdown(inv).split(/^(?=## )/m).filter(sec => !/^## (Objets|Détail par objet)\b/.test(sec)).join('').replace(/^# .*\n+/, '');
+}
+function kbSQLText(sel) {
+  return sel.groups.filter(g => g.qs.some(q => q.sql)).map(g => `-- ===== ${KB_TYPES[g.x.type]} : ${kbFlat(g.x.title)}\n${g.qs.filter(q => q.sql).map(q => `-- ${kbFlat(q.title)} (${VERDICTS[q.verdict]})\n${q.sql}`).join('\n\n')}`).join('\n\n') + '\n';
+}
+function addKibanaFiles(files) {
+  const st = S.kibana;
+  if (st.files.length === 1 && (st.files[0].example || !st.files[0].text.trim())) st.files = [];
+  files.forEach(f => st.files.push({ name: f.name, text: f.text, status: kbFileStatus(f) }));
+  st.active = st.files.length - files.length; st.sel = null; st.filter = '';
+  $('#view-kibana [data-role="filter"]').value = '';
+  st.ed.value = st.files[st.active].text;
+  runKibana(true);
+}
+function loadKibanaExample(i) {
+  const e = EXAMPLES.kibana[i]; if (!e) return;
+  const st = S.kibana; st.files = [{ name: e.file, text: e.text, example: true }]; st.active = 0; st.sel = null; st.ed.value = e.text;
+  runKibana(true);
+}
+function setupKibana() {
+  const view = $('#view-kibana'); const st = S.kibana;
+  st.ed = makeEditor($('[data-role="editor"]', view), 'json', 'Export Kibana (NDJSON)', 'Collez ici un export d’objets sauvegardés : un objet JSON par ligne, avec type, id et attributes.', text => {
+    const f = st.files[st.active]; if (f) { f.text = text; f.example = false; f.status = kbFileStatus(f); } else st.files.push({ name: 'export.ndjson', text });
+    clearTimeout(setupKibana.h); setupKibana.h = setTimeout(() => runKibana(true), 300);
+  });
+  st.ed.value = st.files[st.active].text;
+  const sel = $('[data-act="example"]', view);
+  sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES.kibana.map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`;
+  sel.addEventListener('change', () => { loadKibanaExample(+sel.value); sel.value = ''; });
+  const fi = $('input[type="file"]', view);
+  $('[data-act="open"]', view).addEventListener('click', () => fi.click());
+  fi.addEventListener('change', async () => { const files = await readFiles(fi.files); if (files.length) addKibanaFiles(files); fi.value = ''; });
+  $('[data-act="clear"]', view).addEventListener('click', () => { st.files = [{ name: 'export.ndjson', text: '' }]; st.active = 0; st.mode = 'source'; st.ed.value = ''; runKibana(); st.ed.focus(); });
+  $('[data-act="copy"]', view).addEventListener('click', () => { if (!st.inv) return; const t = kbSQLText(kbSelection()); if (t.trim()) copyText(t, 'SQL'); else toast('Aucune requête SQL pour cet objet.'); });
+  $('[data-act="export"]', view).addEventListener('click', () => {
+    const inv = st.inv; if (!inv) return;
+    const files = inventorySQLFiles(inv).map(f => ({ name: `sql/${f.name}`, content: f.content }))
+      .concat([{ name: 'inventaire/inventaire.md', content: inventoryMarkdown(inv) }, { name: 'inventaire/inventaire.csv', content: inventoryCSV(inv) }, { name: 'inventaire/inventaire.html', content: inventoryHTML(inv, 'Inventaire Kibana') }, { name: 'passerelle.yaml', content: configToYAML(cfg) }]);
+    saveFile('passerelle-kibana.zip', makeZip(files));
+  });
+  const filter = $('[data-role="filter"]', view);
+  filter.addEventListener('input', () => { st.filter = filter.value; renderKbBrowse(view); });
+  view.addEventListener('click', e => {
+    const t = e.target.closest('[data-key],[data-go],[data-tab],[data-mode],[data-file],[data-close],[data-kb-copy],[data-kb-bench],[data-load-example]'); if (!t) return;
+    if (t.dataset.close !== undefined) {
+      e.stopPropagation(); st.files.splice(+t.dataset.close, 1);
+      if (!st.files.length) st.files.push({ name: 'export.ndjson', text: '' });
+      st.active = Math.min(st.active, st.files.length - 1); st.ed.value = st.files[st.active].text; runKibana(true); return;
+    }
+    if (t.dataset.key) { kbSelect(t.dataset.key); if (matchMedia('(max-width: 900px)').matches) $('.pane-out', view).scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
+    if (t.dataset.go) { kbSelect(t.dataset.go, true); return; }
+    if (t.dataset.tab) { st.tab = t.dataset.tab; renderKbOut(view); return; }
+    if (t.dataset.mode) { st.mode = t.dataset.mode; renderKibana(); if (st.mode === 'source') st.ed.focus(); return; }
+    if (t.dataset.file !== undefined) { st.active = +t.dataset.file; st.ed.value = st.files[st.active].text; renderKibana(); return; }
+    if (t.dataset.kbCopy !== undefined) { const it = st.flat[+t.dataset.kbCopy]; if (it) t.dataset.what === 'dsl' ? copyText(kbConsole(it.q), 'Requête') : copyText(it.q.sql, 'SQL'); return; }
+    if (t.dataset.kbBench !== undefined) {
+      // La requête reconstituée part dans la section Requêtes, où elle se modifie et se retraduit
+      const it = st.flat[+t.dataset.kbBench]; if (!it) return;
+      const slug = kbNorm(`${it.x.title} ${it.x.queries.length > 1 ? it.q.title : ''}`).replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 50) || 'requete';
+      if (it.q.pattern) { S.dsl.index = it.q.pattern; $('#view-dsl [data-role="index"]').value = it.q.pattern; }
+      addFiles('dsl', [{ name: `${slug}.json`, text: kbConsole(it.q) }]); show('dsl'); return;
+    }
+    if (t.dataset.loadExample !== undefined) loadKibanaExample(+t.dataset.loadExample);
+  });
+  // Clavier : flèches dans l’arbre, flèches entre les onglets
+  $('[data-role="tree"]', view).addEventListener('keydown', e => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+    const rows = $$('.kb-row', view); if (!rows.length) return;
+    e.preventDefault();
+    const i = rows.findIndex(r => r === document.activeElement || r.getAttribute('aria-selected') === 'true');
+    const j = e.key === 'Home' ? 0 : e.key === 'End' ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)));
+    kbSelect(rows[j].dataset.key, true);
+  });
+  $('[data-role="tabs"]', view).addEventListener('keydown', e => {
+    if (!['ArrowRight', 'ArrowLeft'].includes(e.key)) return;
+    const ids = $$('[data-tab]', view).map(b => b.dataset.tab); const i = ids.indexOf(st.tab);
+    st.tab = ids[(i + (e.key === 'ArrowRight' ? 1 : ids.length - 1)) % ids.length]; renderKbOut(view); const b = $(`[data-tab="${st.tab}"]`, view); if (b) b.focus();
+  });
+  st.files.forEach(f => { f.status = kbFileStatus(f); });
+  runKibana();
+}
+
 function show(view) {
   S.view = view; store.set('view', view);
   $$('.view').forEach(v => (v.hidden = v.id !== `view-${view}`));
@@ -728,7 +1066,7 @@ function setupConfig() {
   fi.addEventListener('change', async () => { const [f] = await readFiles(fi.files); if (f) importConfig(f); fi.value = ''; });
   $('[data-act="cfg-export"]').addEventListener('click', () => saveFile('passerelle-config.zip', makeZip([{ name: 'passerelle.yaml', content: configToYAML(cfg) }])));
   $('[data-act="cfg-copy"]').addEventListener('click', () => copyText(configToYAML(cfg), 'Configuration'));
-  $('[data-act="cfg-reset"]').addEventListener('click', () => { cfg = mergeConfig(BASE_CFG, {}); store.set(CFG_KEY, cfg); renderConfigForm(); run('dsl'); run('ls'); run('ingest'); toast('Configuration réinitialisée'); });
+  $('[data-act="cfg-reset"]').addEventListener('click', () => { cfg = mergeConfig(BASE_CFG, {}); store.set(CFG_KEY, cfg); renderConfigForm(); run('dsl'); run('ls'); run('ingest'); runKibana(); toast('Configuration réinitialisée'); });
 }
 function setupTheme() {
   const modes = ['auto', 'light', 'dark']; const labels = { auto: 'automatique', light: 'clair', dark: 'sombre' };
@@ -741,9 +1079,9 @@ document.addEventListener('click', e => { const c = e.target.closest('[data-copy
 $$('.nav-item').forEach(b => b.addEventListener('click', () => show(b.getAttribute('data-view'))));
 window.addEventListener('resize', () => { const k = S.view; if ((k === 'ls' || k === 'ingest') && S[k].tab === 'flow' && S[k].res && S[k].res.graph) drawEdges($(`#view-${k} [data-role="out"]`), S[k].res.graph); });
 
-setupTheme(); setupBench('dsl'); setupBench('ls'); setupBench('ingest'); setupTools(); setupConfig();
+setupTheme(); setupBench('dsl'); setupBench('ls'); setupBench('ingest'); setupKibana(); setupTools(); setupConfig();
 run('dsl'); run('ls'); run('ingest');
-show(['dsl', 'ls', 'ingest', 'tools', 'config', 'api', 'arch'].includes(S.view) ? S.view : 'dsl');
+show(['dsl', 'ls', 'ingest', 'kibana', 'tools', 'config', 'api', 'arch'].includes(S.view) ? S.view : 'dsl');
 // Téléchargement classique par le navigateur (page servie par le binaire ou ouverte en local)
 downloads = { save: async ({ filename, data }) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], { type: 'application/zip' })); a.download = filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); return { status: 'saved' }; } };
 $$('.dl').forEach(b => (b.hidden = false));
