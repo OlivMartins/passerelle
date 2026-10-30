@@ -19,8 +19,7 @@
       <button class="nav-item" data-view="dsl"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8.5" cy="8.5" r="5"/><path d="M12.3 12.3 17 17"/></svg><div><b>Requêtes</b><small>DSL vers SQL ClickHouse</small></div></button>
       <button class="nav-item" data-view="ls"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="10" r="2"/><circle cx="16" cy="4.5" r="2"/><circle cx="16" cy="15.5" r="2"/><path d="M6 10h3.5c2 0 2.5-5.5 4.5-5.5M9.5 10c2 0 2.5 5.5 4.5 5.5"/></svg><div><b>Pipelines</b><small>Logstash vers Vector</small></div></button>
       <button class="nav-item" data-view="ingest"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h14l-5.2 6.2V16l-3.6-1.6v-4.2z"/></svg><div><b>Ingestion</b><small>Pipelines Elasticsearch vers Vector</small></div></button>
-      <button class="nav-item" data-view="kibana"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="8" rx="1"/><rect x="11" y="3" width="6" height="5" rx="1"/><rect x="11" y="10" width="6" height="7" rx="1"/><rect x="3" y="13" width="6" height="4" rx="1"/></svg><div><b>Kibana</b><small>Tableaux de bord vers SQL</small></div></button>
-      <button class="nav-item" data-view="tools"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="6" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/><path d="M11 14h6M14 11v6"/></svg><div><b><span class="nav-long">Autres sources</span><span class="nav-short" aria-hidden="true">Autres</span></b><small>Inventaire, Grafana, Watcher, schéma</small></div></button>
+      <button class="nav-item" data-view="tools"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="6" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/><path d="M11 14h6M14 11v6"/></svg><div><b><span class="nav-long">Autres sources</span><span class="nav-short" aria-hidden="true">Autres</span></b><small>Kibana, Grafana, Watcher, schéma</small></div></button>
       <button class="nav-item" data-view="config"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 5.5h8M15 5.5h2M3 14.5h2M9 14.5h8"/><circle cx="13" cy="5.5" r="2"/><circle cx="7" cy="14.5" r="2"/></svg><div><b><span class="nav-long">Configuration</span><span class="nav-short" aria-hidden="true">Config.</span></b><small>Endpoints, topics, options</small></div></button>
     </div>
     <div class="nav">
@@ -156,66 +155,56 @@
       </div>
     </section>
 
-    <!-- Tableaux de bord Kibana -->
-    <section class="view" id="view-kibana" hidden>
-      <header class="view-head">
-        <div>
-          <h1>Tableaux de bord Kibana vers SQL ClickHouse</h1>
-          <p>Déposez un export d’objets sauvegardés de Kibana (.ndjson). Choisissez un tableau de bord ou un panneau : ses requêtes ClickHouse s’affichent à droite, avec le verdict et l’effort de l’inventaire.</p>
-        </div>
-        <div class="head-actions">
-          <select class="btn" data-act="example" aria-label="Charger un exemple"></select>
-          <button class="btn" data-act="open" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10.5V2.5M5 5.5l3-3 3 3M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>Ouvrir des fichiers</button>
-          <input type="file" multiple accept=".ndjson,.json,.txt" hidden>
-        </div>
-      </header>
-      <div class="files" data-role="files" hidden></div>
-      <div class="bench">
-        <section class="pane pane-in" aria-label="Export Kibana">
-          <div class="pane-bar">
-            <span class="pane-title">Export Kibana <small data-role="fname"></small></span>
-            <div class="pane-tools">
-              <div class="seg" role="group" aria-label="Affichage de l’export"><button type="button" data-mode="tree" aria-pressed="true">Objets</button><button type="button" data-mode="source" aria-pressed="false">NDJSON</button></div>
-              <button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>
-            </div>
-          </div>
-          <div class="kb-browse" data-role="browse">
-            <div class="kb-stats" data-role="stats"></div>
-            <div class="kb-search"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5"/><path d="M12.3 12.3 17 17"/></svg><input type="search" data-role="filter" placeholder="Filtrer par titre" aria-label="Filtrer les objets par titre" spellcheck="false"></div>
-            <div class="kb-tree" data-role="tree" role="listbox" aria-label="Objets de l’export"></div>
-          </div>
-          <div class="editor" data-role="editor" hidden></div>
-          <div class="drop-veil"><div>Déposer pour analyser<small>Fichiers .ndjson : plusieurs exports (un par espace) sont réunis</small></div></div>
-        </section>
-        <div class="seam" aria-hidden="true"><span class="seam-pulse"></span><span class="seam-knot"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></span></div>
-        <section class="pane pane-out" aria-label="Requêtes de l’objet choisi">
-          <div class="verdict" data-role="verdict"></div>
-          <div class="tabs" role="tablist" data-role="tabs"></div>
-          <div class="out-body" data-role="out"></div>
-          <div class="out-foot">
-            <button class="btn primary" data-act="copy" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></svg>Copier le SQL</button>
-            <button class="btn dl" data-act="export" type="button" hidden>Télécharger (.zip)</button>
-            <span class="hint">Analyse locale : rien ne quitte votre navigateur.</span>
-          </div>
-        </section>
-      </div>
-    </section>
-
     <!-- Autres sources Elastic -->
     <section class="view" id="view-tools" data-kind="tools" hidden>
       <header class="view-head">
         <div>
           <h1>Kibana, Grafana, Watcher, schéma et analyseurs</h1>
-          <p>Ce que Passerelle lit en dehors des requêtes et des pipelines : l’inventaire d’un export Kibana, un tableau de bord Grafana, des watches Elasticsearch, les mappings d’un index et les analyseurs personnalisés. Chaque rapport dit ce qui est prêt, à vérifier ou à reprendre.</p>
+          <p>Ce que Passerelle lit en dehors des requêtes et des pipelines : un export Kibana, objet par objet et panneau par panneau, un tableau de bord Grafana, des watches Elasticsearch, les mappings d’un index et les analyseurs personnalisés. Chaque rapport dit ce qui est prêt, à vérifier ou à reprendre.</p>
         </div>
         <div class="head-actions">
           <div class="seg" role="group" aria-label="Outil" data-role="tool-seg"></div>
           <select class="btn" data-act="example" aria-label="Charger un exemple"></select>
           <button class="btn" data-act="open" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10.5V2.5M5 5.5l3-3 3 3M2.5 10v2.5a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V10"/></svg>Ouvrir des fichiers</button>
-          <input type="file" multiple hidden>
+          <input type="file" multiple hidden data-role="file">
         </div>
       </header>
-      <div class="bench">
+      <!-- Kibana : un export, ses objets à gauche, leurs requêtes à droite -->
+      <div class="kb" id="kb" hidden>
+        <div class="files" data-role="files" hidden></div>
+        <div class="bench">
+          <section class="pane pane-in" aria-label="Export Kibana">
+            <div class="pane-bar">
+              <span class="pane-title">Export Kibana <small data-role="fname"></small></span>
+              <div class="pane-tools">
+                <div class="seg" role="group" aria-label="Affichage de l’export"><button type="button" data-mode="tree" aria-pressed="true">Objets</button><button type="button" data-mode="source" aria-pressed="false">NDJSON</button></div>
+                <button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>
+              </div>
+            </div>
+            <div class="kb-browse" data-role="browse">
+              <div class="kb-stats" data-role="stats"></div>
+              <div class="kb-search"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5"/><path d="M12.3 12.3 17 17"/></svg><input type="search" data-role="filter" placeholder="Filtrer par titre" aria-label="Filtrer les objets par titre" spellcheck="false"></div>
+              <div class="kb-tree" data-role="tree" role="listbox" aria-label="Objets de l’export"></div>
+            </div>
+            <div class="editor" data-role="editor" hidden></div>
+            <div class="drop-veil"><div>Déposer pour analyser<small>Fichiers .ndjson : plusieurs exports (un par espace) sont réunis</small></div></div>
+          </section>
+          <div class="seam" aria-hidden="true"><span class="seam-pulse"></span><span class="seam-knot"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></span></div>
+          <section class="pane pane-out" aria-label="Requêtes de l’objet choisi">
+            <div class="verdict" data-role="verdict"></div>
+            <div class="tabs" role="tablist" data-role="tabs"></div>
+            <div class="out-body" data-role="out"></div>
+            <div class="out-foot">
+              <button class="btn primary" data-act="copy" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></svg>Copier le SQL</button>
+              <button class="btn dl" data-act="export" type="button" hidden>Télécharger (.zip)</button>
+              <span class="hint">Analyse locale : rien ne quitte votre navigateur.</span>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Grafana, Watcher, schéma, analyseurs : un rapport pour chaque source -->
+      <div class="bench" id="tools-bench">
         <section class="pane pane-in" aria-label="Source">
           <div class="pane-bar">
             <span class="pane-title" data-role="tool-title"></span>

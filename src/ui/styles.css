@@ -83,6 +83,8 @@ select.btn { padding-right: 30px; appearance: none; background-image: linear-gra
 
 /* ---------- Plan de travail ---------- */
 .bench { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 26px minmax(0, 1.12fr); }
+/* Le banc Kibana d’« Autres sources » : ses puces de fichiers et son banc restent des enfants directs de la vue */
+.kb { display: contents; }
 .pane { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 .pane-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--line-2); min-height: 48px; flex-wrap: wrap; }
 .pane-title { font-weight: 600; font-size: 14px; }
@@ -339,7 +341,7 @@ select.btn { padding-right: 30px; appearance: none; background-image: linear-gra
   .mobile-brand { display: flex !important; }
   .bench { display: flex; flex-direction: column; }
   .pane-in { height: 44vh; min-height: 260px; }
-  #view-kibana .pane-in { height: 62vh; min-height: 380px; }
+  #kb .pane-in { height: 62vh; min-height: 380px; }
   .pane-out { min-height: 60vh; }
   .seam { height: 30px; }
   .seam::before { top: 50%; bottom: auto; left: 14px; right: 14px; width: auto; height: 1px; }
