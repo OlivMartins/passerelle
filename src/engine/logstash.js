@@ -340,15 +340,6 @@ function fieldSegs(ref) {
   }
   return [ref];
 }
-/*
- * Chaîne littérale VRL. Les guillemets doubles de VRL interpolent « {{ variable }} » : sans échappement, "a{{b" vaut
- * silencieusement "a" (Vector 0.59). Chaque accolade ouvrante suivie d’une autre devient \{, ce que VRL lit comme « { ».
- */
-const vq = s =>
-  JSON.stringify(String(s))
-    .replace(/\\u([0-9a-fA-F]{4})/g, '\\u{$1}')
-    .replace(/\{(?=\{)/g, '\\{');
-const segName = x => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(x) ? x : vq(x));
 const KAFKA_META = {
   topic: 'topic',
   partition: 'partition',
@@ -370,12 +361,6 @@ function vPathOf(segs, ns) {
   }
   return '.' + segs.map(segName).join('.');
 }
-// Une expression régulière (r'…') reçoit les caractères de contrôle sous la forme \xNN : bruts, ils font refuser le YAML
-const vraw = (s, pre) =>
-  `${pre}'${String(s).replace(/\\'/g, "\\\\'").replace(/'/g, "\\'")}'`.replace(
-    pre === 'r' || pre === 's' ? /[\x00-\x1f\x7f]/g : /(?!)/g,
-    c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`
-  );
 /*
  * Expression régulière de Ruby (Onigmo, celle des conditions =~, de gsub et de prune) → moteur regex de VRL (Rust).
  * - ^ et $ valent pour chaque ligne en Ruby : (?m) leur donne ce sens en Rust ;

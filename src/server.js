@@ -1,5 +1,4 @@
 /* Passerelle — serveur HTTP (interface + API) et ligne de commande */
-const VERSION = '1.7.1';
 const http = require('node:http');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -9,78 +8,8 @@ const crypto = require('node:crypto');
 const { execFile } = require('node:child_process');
 
 /* ---------- Journalisation JSON (lue par journald) ---------- */
-function log(level, msg, extra) {
-  const line = Object.assign({ ts: new Date().toISOString(), level, msg }, extra || {});
-  (level === 'error' || level === 'warn' ? process.stderr : process.stdout).write(JSON.stringify(line) + '\n');
-}
-function fail(msg, code) {
-  process.stderr.write(`passerelle : ${msg}\n`);
-  process.exit(code || 1);
-}
 
 /* ---------- Configuration ---------- */
-function loadConfig(file) {
-  let over = {};
-  if (file) {
-    let text;
-    try {
-      text = fs.readFileSync(file, 'utf8');
-    } catch (e) {
-      throw new Error(`configuration illisible (${file}) : ${e.code || e.message}`);
-    }
-    over = /\.json$/i.test(file) ? JSON.parse(text) : parseYAMLConfig(text);
-    if (!isObj(over)) throw new Error(`configuration invalide (${file})`);
-    // Une clé mal écrite laisserait la valeur par défaut en place sans que personne ne le voie
-    const unknown = unknownKeys(over, Object.assign({ version: 1 }, DEFAULT_CONFIG), '');
-    if (unknown.length)
-      throw new Error(
-        `clé${unknown.length > 1 ? 's' : ''} inconnue${unknown.length > 1 ? 's' : ''} dans ${file} : ${unknown.join(', ')}`
-      );
-    for (const [t, profile] of Object.entries((over.clickhouse && over.clickhouse.tables) || {})) {
-      if (profile.preset !== undefined && !PRESETS[profile.preset])
-        throw new Error(
-          `préréglage inconnu pour la table ${t} dans ${file} : ${profile.preset} (${Object.keys(PRESETS).join(' ou ')})`
-        );
-    }
-    const out = over.vector && over.vector.elasticsearch_output;
-    if (out !== undefined && !['elasticsearch', 'clickhouse'].includes(out))
-      throw new Error(`vector.elasticsearch_output attend elasticsearch ou clickhouse, pas « ${out} » (${file})`);
-  }
-  const cfg = mergeConfig(DEFAULT_CONFIG, {
-    clickhouse: over.clickhouse,
-    kafka: over.kafka,
-    vector: over.vector,
-    elasticsearch: over.elasticsearch,
-    verify: over.verify,
-    assist: over.assist,
-    server: over.server
-  });
-  opsCheckConfig(cfg.server, file);
-  return cfg;
-}
-// Les tables de correspondance ont des clés libres, comme dans mergeConfig
-function unknownKeys(src, ref, prefix) {
-  const out = [];
-  for (const [k, v] of Object.entries(src)) {
-    const p = prefix + k;
-    if (!Object.hasOwn(ref, k)) out.push(p);
-    // Profils de table : le nom de la table est libre, pas les clés du profil
-    else if (k === 'tables' && prefix === 'clickhouse.' && isObj(v)) {
-      for (const [t, profile] of Object.entries(v)) {
-        if (!isObj(profile)) {
-          out.push(`${p}.${t}`);
-          continue;
-        }
-        for (const pk of Object.keys(profile)) if (!PROFILE_KEYS.includes(pk)) out.push(`${p}.${t}.${pk}`);
-      }
-    } else if (isObj(v) && isObj(ref[k]) && !FREE_MAPS.includes(k)) out.push(...unknownKeys(v, ref[k], p + '.'));
-  }
-  return out;
-}
-const ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
-function expand(s) {
-  return String(s || '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, v) => process.env[v] || '');
-}
 function configWarnings(cfg) {
   const w = [];
   for (const [sec, key] of [
@@ -196,12 +125,6 @@ function json(res, status, obj) {
   if (res.opsRq) opsNote(res.opsRq, obj);
   send(res, status, JSON.stringify(obj, null, 2) + '\n', { 'content-type': 'application/json; charset=utf-8' });
 }
-class HttpError extends Error {
-  constructor(status, msg) {
-    super(msg);
-    this.status = status;
-  }
-}
 function readBody(req, limit) {
   const tooBig = () => new HttpError(413, `corps de requête limité à ${Math.round(limit / 1024)} Kio`);
   if (+req.headers['content-length'] > limit) return Promise.reject(tooBig());
@@ -242,76 +165,17 @@ function crossSiteRefusal(req, rt) {
 
 /* ---------- Validation par les moteurs réels ---------- */
 // Validations Vector et SQL confondues : chacune occupe un processus ou une requête ClickHouse jusqu’à son délai
-let running = 0;
 const MAX_JOBS = 2;
 async function limited(job) {
-  if (running >= MAX_JOBS) {
+  if (jobs.running >= MAX_JOBS) {
     opsInc('passerelle_validation_rejected_total');
     throw new HttpError(429, 'trop de validations en cours, réessayez dans quelques secondes');
   }
-  running++;
+  jobs.running++;
   try {
     return await job();
   } finally {
-    running--;
-  }
-}
-function runProcess(bin, args, env, timeout) {
-  return new Promise((resolve, reject) => {
-    execFile(bin, args, { env, timeout, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
-      if (err && err.code === 'ENOENT')
-        return reject(
-          new HttpError(503, `binaire introuvable : ${bin}. Installez Vector ou définissez PASSERELLE_VECTOR_BIN.`)
-        );
-      if (err && err.killed) return reject(new HttpError(504, 'validation interrompue : délai dépassé'));
-      resolve({
-        code: err ? (typeof err.code === 'number' ? err.code : 1) : 0,
-        stdout: String(stdout),
-        stderr: String(stderr)
-      });
-    });
-  });
-}
-async function validateVector(text, format) {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'passerelle-'));
-  try {
-    const dataDir = path.join(dir, 'data');
-    await fsp.mkdir(dataDir);
-    const ext = format === 'toml' ? 'toml' : format === 'json' ? 'json' : 'yaml';
-    let body = String(text);
-    if (ext === 'yaml')
-      body = /^data_dir:/m.test(body)
-        ? body.replace(/^data_dir:.*$/m, `data_dir: ${dataDir}`)
-        : `data_dir: ${dataDir}\n${body}`;
-    if (ext === 'toml')
-      body = /^data_dir\s*=/m.test(body)
-        ? body.replace(/^data_dir\s*=.*$/m, `data_dir = ${JSON.stringify(dataDir)}`)
-        : `data_dir = ${JSON.stringify(dataDir)}\n${body}`;
-    const file = path.join(dir, `vector.${ext}`);
-    await fsp.writeFile(file, body, { mode: 0o600 });
-    // Vector ne reçoit aucun secret du service : sa sortie revient au client, et la configuration soumise
-    // peut lire un fichier (remap « file: /proc/self/environ »). Les variables ${…} reçoivent une valeur factice :
-    // on valide la structure, pas les secrets.
-    const env = {};
-    for (const [k, v] of Object.entries(process.env))
-      if (k === 'PATH' || k === 'HOME' || k === 'TZ' || k.startsWith('VECTOR_')) env[k] = v;
-    for (const m of body.matchAll(/(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}/g)) env[m[1]] = 'validation';
-    // Vector 0.57 et suivants : l’interpolation que demande l’en-tête des configurations générées (sauf réglage contraire du service)
-    if (env.VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION === undefined)
-      env.VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION = 'true';
-    const bin = process.env.PASSERELLE_VECTOR_BIN || 'vector';
-    const r = await opsWithSpan('vector.validate', 1, { 'process.executable.name': path.basename(bin) }, () =>
-      runProcess(bin, ['--color', 'never', 'validate', '--skip-healthchecks', file], env, 90000)
-    );
-    const output = (r.stdout + '\n' + r.stderr)
-      .replace(/\x1b\[[0-9;]*m/g, '')
-      .split('\n')
-      .filter(l => l.trim() && !/librdkafka|rdkafka::|base_producer|Log level is enabled/.test(l))
-      .join('\n')
-      .replaceAll(dir, '<tmp>');
-    return { valid: r.code === 0, exit_code: r.code, output };
-  } finally {
-    await fsp.rm(dir, { recursive: true, force: true });
+    jobs.running--;
   }
 }
 function withoutStrings(s) {
@@ -937,24 +801,6 @@ function parseArgs(argv) {
     );
   return o;
 }
-function collect(inputs, exts) {
-  const out = [];
-  const walk = p => {
-    let st;
-    try {
-      st = fs.statSync(p);
-    } catch (e) {
-      fail(`introuvable : ${p}`);
-    }
-    if (st.isDirectory())
-      fs.readdirSync(p)
-        .sort()
-        .forEach(n => walk(path.join(p, n)));
-    else if (exts.test(p) || inputs.includes(p)) out.push(p);
-  };
-  inputs.forEach(walk);
-  return out;
-}
 // --format : chaque commande n’accepte que ses propres formats
 function formatFor(o, allowed, what) {
   if (o.format !== undefined && !allowed.includes(o.format))
@@ -1004,16 +850,6 @@ function pipelineSet(file, cfg) {
     Object.assign(p, { from: list[k] && list[k].from, matched: list[k] && list[k].matched })
   );
   return r;
-}
-// Dossier de sortie (--out) : une erreur lisible plutôt qu’une pile Node.js
-function outDir(dir) {
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch (e) {
-    fail(
-      `--out : impossible de créer le dossier ${dir} (${e.code === 'EEXIST' || e.code === 'ENOTDIR' ? 'un fichier porte ce nom' : e.code || e.message})`
-    );
-  }
 }
 function batch(kind, o) {
   if (kind === 'ls') formatFor(o, ['yaml', 'toml'], 'ls2vector');
@@ -1146,17 +982,6 @@ function batch(kind, o) {
   }
 }
 /* ---------- Pipelines d’ingestion Elasticsearch (passerelle ingest) ---------- */
-// Les pipelines d’un même dossier s’appellent entre eux (processeur pipeline) : ils sont lus ensemble. Un fichier
-// « .yml.link » d’une intégration Elastic (elastic-package) désigne un pipeline partagé : on lit le fichier désigné.
-function ingestInputs(files) {
-  return files.map(f => {
-    const name = path.basename(f).replace(/\.(ya?ml|json)(\.link)?$/i, '');
-    if (!/\.link$/i.test(f)) return { name, text: fs.readFileSync(f, 'utf8') };
-    const target = path.resolve(path.dirname(f), fs.readFileSync(f, 'utf8').trim().split(/\s+/)[0] || '');
-    if (!fs.existsSync(target)) fail(`${f} désigne ${target}, introuvable`);
-    return { name, text: fs.readFileSync(target, 'utf8') };
-  });
-}
 function ingestConvert(o) {
   if (!o._.length) fail('aucun pipeline à traduire. Exemple : passerelle ingest pipelines/ --out ingest/');
   formatFor(o, ['yaml', 'toml'], 'ingest');
@@ -1200,13 +1025,6 @@ function ingestConvert(o) {
 }
 
 /* ---------- Schéma (passerelle schema ddl | pull) ---------- */
-function loadCfgOrFail(o) {
-  try {
-    return loadConfig(o.config || process.env.PASSERELLE_CONFIG || null);
-  } catch (e) {
-    return fail(e.message);
-  }
-}
 function schemaDDL(o) {
   if (!o._.length) fail('aucun fichier à lire. Exemple : passerelle schema ddl modeles/ --out build/schema');
   formatFor(o, ['sql', 'yaml'], 'schema ddl');

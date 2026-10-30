@@ -253,8 +253,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 section('A. Fonctions de l’exploitation (sans serveur)');
 {
   const code = `'use strict';\n${engineSource()}${nodeSource()}
-const crypto = require('node:crypto'); const fs = require('node:fs'); const log = () => {}; const expand = s => String(s || '').replace(/\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}/g, (m, v) => process.env[v] || '');
-const VERSION = '0.0.0'; let running = 0; const ENV_REF = /^\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}$/;
+const crypto = require('node:crypto'); const fs = require('node:fs'); log = () => {};
 return { opsProxyList, opsTrusted, opsClientIp, opsNormIp, opsIdentity, opsCheckConfig, opsRuntime, opsScopeOf, opsActionOf, opsRouteOf, opsInc, opsObserve, opsRender, opsLabels, opsShown, DEFAULT_CONFIG, mergeConfig };`;
   const O = new Function('require', code)(createRequire(import.meta.url));
   const rt = list => ({ proxies: O.opsProxyList(list) });

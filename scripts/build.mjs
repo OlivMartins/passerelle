@@ -63,12 +63,13 @@ function buildUI() {
 }
 
 function buildServer() {
-  const server = rd('src/server.js').replace(/^const VERSION = '[^']*';$/m, `const VERSION = '${VERSION}';`);
+  // La version vient de package.json : elle remplace celle que src/node/common.js écrit en dur
+  const node = (nodeSource() + rd('src/server.js')).replace(
+    /^const VERSION = '[^']*';$/m,
+    `const VERSION = '${VERSION}';`
+  );
   const js =
-    "'use strict';\n/* Passerelle — binaire autonome : moteur de traduction + serveur + CLI */\n" +
-    ENGINE +
-    nodeSource() +
-    server;
+    "'use strict';\n/* Passerelle — binaire autonome : moteur de traduction + serveur + CLI */\n" + ENGINE + node;
   writeFileSync(join(DIST, 'passerelle.cjs'), js);
   execFileSync(process.execPath, ['--check', join(DIST, 'passerelle.cjs')]);
   step('dist/passerelle.cjs');

@@ -34,7 +34,14 @@ export const ENGINE_FILES = [
  * src/server.js. Il partage sa portée : il emploie les modules que src/server.js charge en tête (fs, path, os, crypto…)
  * dans ses fonctions seulement, jamais à son chargement.
  */
-export const NODE_FILES = ['src/node/ops.js', 'src/node/verify.js', 'src/node/assist.js'];
+export const NODE_FILES = [
+  'src/node/common.js',
+  'src/node/ops.js',
+  'src/node/config.js',
+  'src/node/vector.js',
+  'src/node/verify.js',
+  'src/node/assist.js'
+];
 
 export const engineSource = () => ENGINE_FILES.map(f => readFileSync(join(ROOT, f), 'utf8')).join('');
 export const nodeSource = () => NODE_FILES.map(f => readFileSync(join(ROOT, f), 'utf8')).join('');
