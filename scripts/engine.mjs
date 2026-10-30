@@ -34,11 +34,7 @@ export const ENGINE_FILES = [
  * src/server.js. Il partage sa portée : il emploie les modules que src/server.js charge en tête (fs, path, os, crypto…)
  * dans ses fonctions seulement, jamais à son chargement.
  */
-export const NODE_FILES = [
-  'src/node/ops.js',
-  'src/node/verify.js',
-  'src/node/assist.js'
-];
+export const NODE_FILES = ['src/node/ops.js', 'src/node/verify.js', 'src/node/assist.js'];
 
 export const engineSource = () => ENGINE_FILES.map(f => readFileSync(join(ROOT, f), 'utf8')).join('');
 export const nodeSource = () => NODE_FILES.map(f => readFileSync(join(ROOT, f), 'utf8')).join('');
@@ -47,5 +43,7 @@ export const serverSource = () => nodeSource() + readFileSync(join(ROOT, 'src/se
 
 // Le moteur chargé hors du binaire, pour les tests et les bancs
 export function loadEngine() {
-  return new Function(`'use strict';\n${engineSource()}\nreturn { clickhouseOutput, chShapeLines, translateDSL, translateLogstash, translateIngest, ingestRead, yamlLoad, translatePipelines, pipelinesFromYML, parsePipelinesYML, pipelineConfigFiles, schemaFromElastic, profilesFromSystem, anAnalyze, anPlan, anFieldPlan, anReport, kqlParse, kqlToDSL, kqlTranslate, kibanaObjects, kibanaInventory, inventoryMarkdown, inventoryCSV, inventoryHTML, inventorySQLFiles, grafanaDashboard, grafanaReportMarkdown, watcherRead, watcherTranslate, watcherReportMarkdown, watcherReportCSV, watcherReportHTML, watcherSQLFiles, watcherScrub, watchSchedule, quartzToCron, schemaPullQueries, parseYAMLConfig, tableConfig, toYAML, DEFAULT_CONFIG, mergeConfig, verdictOf, coverage, VERDICTS, eqRunCase, eqRunComposite, eqCompareStatements, eqCompareRows, eqCompareRowsDetailed, eqCompareIds, eqCompareIdsDetailed, eqBucketRows, eqLeafMetrics, eqMetricColumns, eqSame, eqNormKey, eqPinNow, eqBoundWindow, eqTimeField, eqDuration, eqWindow, eqStateOf, eqSummarize, eqSentence, eqReportMarkdown, eqReportCSV, eqReportHTML, eqNormalizeEvent, eqAlign, eqEventDiffs, eqPipelineParts, eqVectorSource, eqLogstashSource, eqComparePipelineOutputs, eqEsError, eqCanon, EQ_ECS_MODES, EQ_STATES, assistRuby, assistRubyParse, AssistError, assistCases, assistApply, assistPrompt, assistFromModel, assistSummarize, assistSentence, assistReportMarkdown, assistReportCSV, assistReportHTML, ASSIST_STATES };`)();
+  return new Function(
+    `'use strict';\n${engineSource()}\nreturn { clickhouseOutput, chShapeLines, translateDSL, translateLogstash, translateIngest, ingestRead, yamlLoad, translatePipelines, pipelinesFromYML, parsePipelinesYML, pipelineConfigFiles, schemaFromElastic, profilesFromSystem, anAnalyze, anPlan, anFieldPlan, anReport, kqlParse, kqlToDSL, kqlTranslate, kibanaObjects, kibanaInventory, inventoryMarkdown, inventoryCSV, inventoryHTML, inventorySQLFiles, grafanaDashboard, grafanaReportMarkdown, watcherRead, watcherTranslate, watcherReportMarkdown, watcherReportCSV, watcherReportHTML, watcherSQLFiles, watcherScrub, watchSchedule, quartzToCron, schemaPullQueries, parseYAMLConfig, tableConfig, toYAML, DEFAULT_CONFIG, mergeConfig, verdictOf, coverage, VERDICTS, eqRunCase, eqRunComposite, eqCompareStatements, eqCompareRows, eqCompareRowsDetailed, eqCompareIds, eqCompareIdsDetailed, eqBucketRows, eqLeafMetrics, eqMetricColumns, eqSame, eqNormKey, eqPinNow, eqBoundWindow, eqTimeField, eqDuration, eqWindow, eqStateOf, eqSummarize, eqSentence, eqReportMarkdown, eqReportCSV, eqReportHTML, eqNormalizeEvent, eqAlign, eqEventDiffs, eqPipelineParts, eqVectorSource, eqLogstashSource, eqComparePipelineOutputs, eqEsError, eqCanon, EQ_ECS_MODES, EQ_STATES, assistRuby, assistRubyParse, AssistError, assistCases, assistApply, assistPrompt, assistFromModel, assistSummarize, assistSentence, assistReportMarkdown, assistReportCSV, assistReportHTML, ASSIST_STATES };`
+  )();
 }

@@ -20,16 +20,23 @@ const GEO = process.env.MAXMIND_TEST_DATA || '';
 
 // Pipelines d’un dossier ingest_pipeline d’une intégration ; un « .yml.link » (elastic-package) désigne un fichier partagé
 export function pipelineInputs(dir) {
-  return readdirSync(dir).filter(f => /\.(yml|yaml|json)(\.link)?$/.test(f)).sort().map(f => {
-    const name = f.replace(/\.(yml|yaml|json)(\.link)?$/, '');
-    if (!f.endsWith('.link')) return { name, text: readFileSync(join(dir, f), 'utf8') };
-    const target = resolve(dir, readFileSync(join(dir, f), 'utf8').trim().split(/\s+/)[0]);
-    return { name, text: existsSync(target) ? readFileSync(target, 'utf8') : '' };
-  }).filter(x => x.text);
+  return readdirSync(dir)
+    .filter(f => /\.(yml|yaml|json)(\.link)?$/.test(f))
+    .sort()
+    .map(f => {
+      const name = f.replace(/\.(yml|yaml|json)(\.link)?$/, '');
+      if (!f.endsWith('.link')) return { name, text: readFileSync(join(dir, f), 'utf8') };
+      const target = resolve(dir, readFileSync(join(dir, f), 'utf8').trim().split(/\s+/)[0]);
+      return { name, text: existsSync(target) ? readFileSync(target, 'utf8') : '' };
+    })
+    .filter(x => x.text);
 }
 
 export function needs(name, value) {
-  if (!value) { console.error(`${name} n’est pas défini : voir l’en-tête de tests/ingest/commun.mjs`); process.exit(2); }
+  if (!value) {
+    console.error(`${name} n’est pas défini : voir l’en-tête de tests/ingest/commun.mjs`);
+    process.exit(2);
+  }
 }
 
 // Une base GeoIP de la traduction remplacée par la base de test du même type
@@ -43,29 +50,50 @@ export function geoPath(path) {
  * sorties. Rend les documents produits, dans l’ordre ; un document refusé porte sa cause dans __echec.
  */
 export function play(r, docs, dir = join(WORK, 'jeu')) {
-  rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true });
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
   const cfg = JSON.parse(JSON.stringify(r.config));
-  cfg.data_dir = dir; cfg.api = { enabled: false };
+  cfg.data_dir = dir;
+  cfg.api = { enabled: false };
   for (const t of Object.values(cfg.enrichment_tables || {})) t.path = geoPath(t.path);
   cfg.sources = { agent_in_raw: { type: 'stdin', decoding: { codec: 'json' }, log_namespace: true } };
-  cfg.transforms = Object.assign({ agent_in: { type: 'remap', inputs: ['agent_in_raw'], source: '. = object!(.)' } }, cfg.transforms);
+  cfg.transforms = Object.assign(
+    { agent_in: { type: 'remap', inputs: ['agent_in_raw'], source: '. = object!(.)' } },
+    cfg.transforms
+  );
   cfg.transforms.marque = { type: 'remap', inputs: ['bilan.echecs'], source: '.__echec = %ingest_failure' };
-  cfg.sinks = { sortie: { type: 'file', inputs: ['bilan._unmatched', 'marque'], path: join(dir, 'sortie.ndjson'), encoding: { codec: 'json' } } };
+  cfg.sinks = {
+    sortie: {
+      type: 'file',
+      inputs: ['bilan._unmatched', 'marque'],
+      path: join(dir, 'sortie.ndjson'),
+      encoding: { codec: 'json' }
+    }
+  };
   writeFileSync(join(dir, 'config.json'), JSON.stringify(cfg));
   try {
     execFileSync(VECTOR, ['--quiet', '--config', join(dir, 'config.json')], {
       input: docs.map(d => JSON.stringify(d)).join('\n') + '\n',
       env: Object.assign({}, process.env, { VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION: 'true' }),
-      timeout: 120000, stdio: ['pipe', 'pipe', 'pipe']
+      timeout: 120000,
+      stdio: ['pipe', 'pipe', 'pipe']
     });
-  } catch (e) { throw new Error(`Vector a échoué :\n${String(e.stderr || e.message).slice(0, 4000)}`); }
+  } catch (e) {
+    throw new Error(`Vector a échoué :\n${String(e.stderr || e.message).slice(0, 4000)}`);
+  }
   const out = join(dir, 'sortie.ndjson');
-  return existsSync(out) ? readFileSync(out, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : [];
+  return existsSync(out)
+    ? readFileSync(out, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map(l => JSON.parse(l))
+    : [];
 }
 
 // Table aplatie « a.b.c » → valeur JSON, pour comparer deux documents champ par champ
 export function flat(o, p = '', out = {}) {
-  if (o && typeof o === 'object' && !Array.isArray(o)) { for (const k of Object.keys(o)) flat(o[k], p ? `${p}.${k}` : k, out); }
-  else out[p] = JSON.stringify(o);
+  if (o && typeof o === 'object' && !Array.isArray(o)) {
+    for (const k of Object.keys(o)) flat(o[k], p ? `${p}.${k}` : k, out);
+  } else out[p] = JSON.stringify(o);
   return out;
 }

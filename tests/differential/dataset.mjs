@@ -51,7 +51,8 @@ export function dataset() {
       bytes: Math.floor(rnd() * 100000),
       ratio: Math.round(rnd() * 10000) / 10000,
       user,
-      tags: i % 4 === 0 ? undefined : i % 4 === 1 ? [] : i % 4 === 2 ? ['a'] : pick([['a', 'b'], ['b', 'c', 'a'], ['c']]),
+      tags:
+        i % 4 === 0 ? undefined : i % 4 === 1 ? [] : i % 4 === 2 ? ['a'] : pick([['a', 'b'], ['b', 'c', 'a'], ['c']]),
       method: pick(['GET', 'POST', 'PUT']),
       message: messages[i % 10],
       // Les champs suivants sont tirés de i et non de rnd() : les valeurs des champs précédents ne bougent pas.
@@ -60,9 +61,20 @@ export function dataset() {
       // Entier facultatif, 0 compris : avec des valeurs par défaut, 0 ne se distingue plus d’un absent
       retries: i % 4 === 0 ? undefined : (i * 3) % 5,
       // Second champ plein texte : un mot peut être dans message et l’autre dans title
-      title: ['payment failed', 'upstream timeout', 'cart updated', 'Payment Timeout', 'user login', 'disk alert', 'retry scheduled'][i % 7],
+      title: [
+        'payment failed',
+        'upstream timeout',
+        'cart updated',
+        'Payment Timeout',
+        'user login',
+        'disk alert',
+        'retry scheduled'
+      ][i % 7],
       // Position : à quelques kilomètres du centre de Paris, ou à Londres (à 344 km, où les formules de distance divergent)
-      location: i % 97 === 3 ? { lat: 51.5074, lon: -0.1278 } : { lat: 48.8566 + (((i * 37) % 201) - 100) * 0.0005, lon: 2.3522 + (((i * 53) % 199) - 99) * 0.0007 }
+      location:
+        i % 97 === 3
+          ? { lat: 51.5074, lon: -0.1278 }
+          : { lat: 48.8566 + (((i * 37) % 201) - 100) * 0.0005, lon: 2.3522 + (((i * 53) % 199) - 99) * 0.0007 }
     });
   }
   return docs;
@@ -125,7 +137,9 @@ export function columns(variant) {
 }
 
 export function clickhouseDDL(variant) {
-  const cols = Object.entries(columns(variant)).map(([name, type]) => `    \`${name}\` ${type}`).join(',\n');
+  const cols = Object.entries(columns(variant))
+    .map(([name, type]) => `    \`${name}\` ${type}`)
+    .join(',\n');
   // L’index text est celui que la traduction recommande : la recherche plein texte est vérifiée index compris
   const index = '    INDEX idx_message_text lowerUTF8(message) TYPE text(tokenizer = splitByNonAlpha)';
   return `CREATE DATABASE IF NOT EXISTS logs;\nCREATE TABLE ${TABLE} (\n${cols},\n${index}\n) ENGINE = MergeTree ORDER BY (service, timestamp);`;
@@ -154,7 +168,8 @@ export function esDocument(d) {
   const o = {};
   for (const [k, v] of Object.entries(d)) {
     if (v === undefined || k === '_id') continue;
-    if (k === 'method') o.http = { method: v }; else o[k] = v;
+    if (k === 'method') o.http = { method: v };
+    else o[k] = v;
   }
   return o;
 }
@@ -165,7 +180,8 @@ export function clickhouseRow(d) {
     if (v === undefined) continue;
     if (k === '@timestamp') o.timestamp = v;
     else if (k === 'method') o['http.method'] = v;
-    else if (k === 'location') o.location = [v.lon, v.lat]; // Point : (longitude, latitude)
+    else if (k === 'location')
+      o.location = [v.lon, v.lat]; // Point : (longitude, latitude)
     else o[k] = v;
   }
   return o;
