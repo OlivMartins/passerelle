@@ -19,6 +19,7 @@
     "test:clickhouse": "node tests/clickhouse/run.mjs",
     "test:ui": "node tests/ui/run.mjs",
     "test:ingest": "node tests/ingest/valider.mjs && node tests/ingest/valider.mjs --clickhouse && node tests/ingest/tls.mjs && node tests/ingest/painless.mjs",
+    "couverture": "node scripts/couverture.mjs",
     "check": "biome ci",
     "lint": "biome lint",
     "format": "biome format --write"

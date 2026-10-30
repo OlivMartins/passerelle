@@ -15,6 +15,7 @@ import { INDEX, configOverride } from '../tests/differential/dataset.mjs';
 import { CASES as PIPELINE_CASES } from '../tests/pipelines/cases.mjs';
 import { translatedPipeline, translatedChain } from '../tests/pipelines/transport.mjs';
 import * as E from '../src/engine/index.js';
+import { drift, playedByDifferential, playedByPipelines } from './couverture.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const UPDATE = process.argv.includes('--update');
@@ -1450,6 +1451,73 @@ check(
   E.verdictOf(unknownCol) === 'review' && unknownCol.notes.some(n => /absente du schéma/.test(n.title)),
   'schéma déclaré : une colonne qu’il ne connaît pas est à vérifier, pas prête'
 );
+
+// Les chiffres du README (« traduit » et « vérifié par le banc ») sont ceux que le moteur et les bancs donnent
+{
+  const problems = drift();
+  check(!problems.length, 'README : les chiffres de couverture sont ceux du moteur et des bancs', problems.join(' ; '));
+
+  // Le décompte lui-même, sur des cas écrits pour l'éprouver
+  const range = { range: { n: { gte: 1 } } };
+  const dsl = playedByDifferential([
+    {
+      id: 'imbriqués',
+      dsl: {
+        query: {
+          bool: {
+            must: [{ match: { a: 'x' } }],
+            filter: range,
+            should: [{ dis_max: { queries: [{ term: { a: 1 } }] } }]
+          }
+        },
+        post_filter: { exists: { field: 'a' } },
+        aggs: {
+          f: {
+            filter: { prefix: { a: 'x' } },
+            aggs: { t: { terms: { field: 'a' }, aggs: { m: { avg: { field: 'n' } } } } }
+          },
+          g: { filters: { filters: { u: { wildcard: { a: 'x*' } } } }, meta: { range: 'pas une agrégation' } }
+        }
+      }
+    },
+    {
+      id: 'écart partout',
+      known: 'raison',
+      dsl: { query: { regexp: { a: 'x' } }, aggs: { h: { histogram: { field: 'n', interval: 1 } } } }
+    },
+    { id: 'hors de portée', unsupported: true, dsl: { query: { more_like_this: {} } } },
+    { id: 'écart dans un schéma', known: { D: 'raison' }, dsl: { query: { ids: { values: [] } } } }
+  ]);
+  const same = (got, want) => [...got].sort().join() === want.join();
+  check(
+    same(dsl.clean.queries, ['bool', 'dis_max', 'exists', 'ids', 'match', 'prefix', 'range', 'term', 'wildcard']),
+    'couverture : les requêtes jouées sont lues dans bool, dis_max, post_filter et les agrégations filter et filters',
+    [...dsl.clean.queries].sort().join(', ')
+  );
+  check(
+    same(dsl.clean.aggs, ['avg', 'filter', 'filters', 'terms']),
+    'couverture : les agrégations jouées sont lues dans les sous-agrégations, sans « meta »',
+    [...dsl.clean.aggs].sort().join(', ')
+  );
+  check(
+    same(dsl.diverging.queries, ['more_like_this', 'regexp']) && same(dsl.diverging.aggs, ['histogram']),
+    'couverture : un écart dans tous les schémas, ou une construction hors de portée, ne prouve rien ; un écart dans un seul schéma si',
+    `${[...dsl.diverging.queries]} / ${[...dsl.diverging.aggs]}`
+  );
+  const pipe = playedByPipelines(
+    ['date', 'mutate', 'grok'],
+    [
+      { id: 'a', filter: 'mutate { add_tag => ["date"] }' },
+      { id: 'b', chain: [{ id: 'x', filter: 'grok { match => { "message" => "%{GREEDYDATA:m}" } }' }] },
+      { id: 'c', known: 'raison', filter: 'mutate { rename => { "a" => "b" } }\n date { match => ["t", "ISO8601"] }' }
+    ]
+  );
+  check(
+    same(pipe.clean, ['grok', 'mutate']) && same(pipe.diverging, ['date', 'mutate']),
+    'couverture : un filtre Logstash compte quand son plugin est ouvert dans un bloc filter (pas quand son nom n’est qu’une valeur), chaînes de pipelines comprises, et pas s’il diverge',
+    `${[...pipe.clean]} / ${[...pipe.diverging]}`
+  );
+}
 
 // Graphe des modules du moteur : il n'importe que ses propres fichiers (il tourne dans le navigateur comme dans le
 // serveur), et le seul cycle toléré est celui, connu, de la base et du DSL (dsl-params et dsl-strict en dépendent

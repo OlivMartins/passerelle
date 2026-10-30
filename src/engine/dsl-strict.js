@@ -66,7 +66,7 @@ const BODY_TODO = {
 
 /* ---------- Clauses de requête ---------- */
 // field : forme { <champ>: valeur ou { paramètres } } ; queries : sous-requêtes à contrôler aussi
-const QUERY_SPECS = {
+export const QUERY_SPECS = {
   match_all: { params: [] },
   match_none: { params: [] },
   term: { field: true, params: ['value', 'case_insensitive'] },
@@ -285,7 +285,7 @@ const BOOL_KEYS = new Set([
 const METRIC = ['field', 'script', 'missing', 'format', 'value_type'];
 const PIPE = ['buckets_path', 'gap_policy', 'format'];
 const gapPolicy = { gap_policy: notDefault('skip') };
-const AGG_SPECS = {
+export const AGG_SPECS = {
   avg: { params: METRIC },
   sum: { params: METRIC },
   min: { params: METRIC },

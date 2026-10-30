@@ -4457,7 +4457,7 @@ Object.assign(IngestGen.prototype, {
   }
 });
 // Options lues par chaque processeur traduit (les autres sont signalées)
-const INGEST_OPTIONS = {
+export const INGEST_OPTIONS = {
   set: ['field', 'value', 'copy_from', 'override', 'ignore_empty_value', 'media_type'],
   remove: ['field', 'keep', 'ignore_missing'],
   sort: ['field', 'order', 'target_field'],

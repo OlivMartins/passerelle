@@ -2102,6 +2102,10 @@ class VrlGen {
     if (s.xpath) this.approx('xml xpath', 'Les expressions XPath ne sont pas reprises : naviguez dans l’objet parsé.');
   }
 }
+// Les filtres que la traduction connaît : un par méthode f_<nom> de VrlGen (scripts/couverture.mjs les compte)
+export const LOGSTASH_FILTERS = Object.getOwnPropertyNames(VrlGen.prototype)
+  .filter(n => n.startsWith('f_'))
+  .map(n => n.slice(2));
 function moves_note(matches) {
   return matches.some(([, pats]) => lsList(pats).some(x => /%\{\w+:\[/.test(String(x))));
 }
