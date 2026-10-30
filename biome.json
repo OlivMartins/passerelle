@@ -1,0 +1,47 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": {
+    "includes": ["src/**/*.js", "scripts/**/*.mjs", "tests/**/*.mjs", "tests/**/*.cjs"],
+    "ignoreUnknown": true
+  },
+  "assist": { "enabled": false },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120,
+    "lineEnding": "lf"
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "semicolons": "always",
+      "trailingCommas": "none",
+      "arrowParentheses": "asNeeded"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "none",
+      "correctness": {
+        "noConstantCondition": "error",
+        "noEmptyCharacterClassInRegex": "error",
+        "noSelfAssign": "error",
+        "noUnreachable": "error",
+        "noUndeclaredVariables": "error",
+        "noUnusedImports": "error",
+        "noUnusedVariables": "error",
+        "noUnusedLabels": "error"
+      },
+      "suspicious": {
+        "noConstantBinaryExpressions": "error",
+        "noDuplicateCase": "error",
+        "noDuplicateObjectKeys": "error",
+        "noFallthroughSwitchClause": "error",
+        "noSelfCompare": "error"
+      }
+    }
+  }
+}

@@ -2,6 +2,21 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Modifié
+
+- **Code** : le moteur (`src/engine/`), `src/node/`, `src/server.js` et l'interface sont des modules ES : chaque fichier déclare ce qu'il importe et ce qu'il exporte, `src/engine/index.js` réunit le moteur, qui n'importe rien de Node.js ni du navigateur. `scripts/bundle.mjs` (esbuild 0.28.2) réunit les modules en un fichier pour la page, le binaire et l'image conteneur ; `scripts/engine.mjs` et la concaténation dans une portée commune disparaissent, et les tests importent le moteur au lieu de l'évaluer. Les traductions sont inchangées : les instantanés de `tests/snapshots` le sont, octet pour octet.
+  - `src/node/common.js`, `config.js` et `vector.js` reprennent ce que `src/server.js` prêtait à `ops`, `verify` et `assist`.
+  - Le seul cycle d'import du moteur qui reste est celui de `base` et du DSL (`dsl`, `dsl-params`, `dsl-strict`) ; `scripts/test.mjs` en refuse tout autre.
+  - Le `Dockerfile` installe les dépendances de construction (`npm ci --ignore-scripts`) avant de construire.
+- **Mise en forme** : Biome (2.5.15) formate tout le code sur 120 colonnes et le contrôle en CI (`npm run check`). Le commit de mise en forme est dans `.git-blame-ignore-revs` : `git config blame.ignoreRevsFile .git-blame-ignore-revs`. Biome refuse aussi une variable non déclarée, un import ou une variable inutilisés, du code inatteignable ou une condition constante.
+- **README** : « traduit » et « vérifié par le banc » sont comptés à part, par `scripts/couverture.mjs`, d'après les tables du moteur et les cas des bancs. Le tableau de couverture listait 34 processeurs d'ingestion et 51 agrégations : `sort` et `rate`, traduits depuis longtemps, y manquaient (35 et 52). `scripts/test.mjs` échoue si le README ne dit plus ce que le moteur et les bancs montrent.
+
+### Corrigé
+
+- Du code mort : trois conditions toujours fausses (`dsl.js`, `assist.js`) et un `switch` du moteur d'ingestion dont `remove` retombait sur `removeKey`.
+
 ## [1.7.1] - 2026-10-30
 
 ### Modifié
@@ -66,7 +81,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 ### Modifié
 
 - Le script Painless que la traduction ne sait pas lire laisse désormais son code en commentaire sous « À REPRENDRE » (`passerelle assist` le retrouve à cet endroit), comme le filtre ruby de Logstash le faisait déjà.
-- Le code propre à Node.js (entrées-sorties de la ligne de commande) se range dans `src/node/`, assemblé entre le moteur et `src/server.js`.
+- Le code propre à Node.js (entrées-sorties de la ligne de commande) se range dans `src/node/`.
 - Chaque ligne de journal « requête » porte `request_id` (et `token`, `identity`, `trace_id` quand ils existent). Son `ip` est l'adresse du client, lue derrière un proxy de confiance (`peer` donne alors celle du proxy).
 - Le message sans jeton nomme aussi `server.tokens`. La section `server` n'est jamais diffusée par `/v1/config` ni par l'interface.
 

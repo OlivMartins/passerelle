@@ -28,6 +28,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # Mise en forme et règles de lint (biome.json) : un écart fait échouer la CI
+      - run: npm run check
       - run: npm test
       - run: npm run build:ui
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

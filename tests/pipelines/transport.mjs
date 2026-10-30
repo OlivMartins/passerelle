@@ -28,16 +28,29 @@ const fileOutput = name => `file { path => "/work/out/${name}.ndjson" codec => j
 export const outputFile = (prefix, name) => `${prefix}${name ? `.${name}` : ''}`;
 export function outputsOf(c) {
   const names = [];
-  const collect = output => output && output(name => { names.push(name); return ''; }, () => '');
+  const collect = output =>
+    output &&
+    output(
+      name => {
+        names.push(name);
+        return '';
+      },
+      () => ''
+    );
   if (c.chain) c.chain.forEach(m => collect(m.output));
   else collect(c.output);
   return names.length ? [...new Set(names)] : [''];
 }
-const outputBlock = (c, prefix) => `output {\n${c.output ? c.output(name => fileOutput(outputFile(prefix, name))) : fileOutput(prefix)}\n}\n`;
+const outputBlock = (c, prefix) =>
+  `output {\n${c.output ? c.output(name => fileOutput(outputFile(prefix, name))) : fileOutput(prefix)}\n}\n`;
 
 // Pipeline que traduit Passerelle et que joue Vector ; avec un mode ECS, ses sorties portent ce mode dans leur nom
 export function translatedPipeline(c, mode) {
-  return `input { stdin {${isJson(c) ? ' codec => json_lines' : ''}${inputOptions(c)} } }\n` + filterBlock(c) + outputBlock(c, mode ? `${c.id}.${mode}` : c.id);
+  return (
+    `input { stdin {${isJson(c) ? ' codec => json_lines' : ''}${inputOptions(c)} } }\n` +
+    filterBlock(c) +
+    outputBlock(c, mode ? `${c.id}.${mode}` : c.id)
+  );
 }
 
 /*
@@ -55,7 +68,10 @@ export function translatedChain(c, mode) {
   const prefix = `${c.id}.${mode}`;
   return c.chain.map((m, k) => ({
     id: m.id,
-    config: (k === 0 ? `input { stdin {${isJson(c) ? ' codec => json_lines' : ''}${inputOptions(c)} } }\n` : `input { pipeline { address => "${addressOf(c, mode, m.id)}" } }\n`) + chainMember(c, mode, m, prefix)
+    config:
+      (k === 0
+        ? `input { stdin {${isJson(c) ? ' codec => json_lines' : ''}${inputOptions(c)} } }\n`
+        : `input { pipeline { address => "${addressOf(c, mode, m.id)}" } }\n`) + chainMember(c, mode, m, prefix)
   }));
 }
 
@@ -84,9 +100,12 @@ const UNDECORATE = {
 // Pipeline que joue Logstash : mêmes filtres, même codec
 export function logstashPipeline(c, mode) {
   const file = `path => "/work/in/${c.id}.ndjson" mode => "read" exit_after_read => true sincedb_path => "/dev/null" file_completed_action => "log" file_completed_log_path => "/work/out/.lus"`;
-  return `input { file { ${file} codec => ${isJson(c) ? 'json' : 'plain'}${inputOptions(c)} } }\n`
-    + `filter {\n  ruby { code => '${UNDECORATE[mode]}\n  ' }\n}\n`
-    + filterBlock(c) + outputBlock(c, `${c.id}.${mode}`);
+  return (
+    `input { file { ${file} codec => ${isJson(c) ? 'json' : 'plain'}${inputOptions(c)} } }\n` +
+    `filter {\n  ruby { code => '${UNDECORATE[mode]}\n  ' }\n}\n` +
+    filterBlock(c) +
+    outputBlock(c, `${c.id}.${mode}`)
+  );
 }
 
 // Ensemble joué par Logstash : le premier pipeline lit le fichier du cas, comme un cas simple
@@ -95,9 +114,11 @@ export function logstashChain(c, mode) {
   const file = `path => "/work/in/${c.id}.ndjson" mode => "read" exit_after_read => true sincedb_path => "/dev/null" file_completed_action => "log" file_completed_log_path => "/work/out/.lus"`;
   return c.chain.map((m, k) => ({
     id: m.id,
-    text: k === 0
-      ? `input { file { ${file} codec => ${isJson(c) ? 'json' : 'plain'}${inputOptions(c)} } }\nfilter {\n  ruby { code => '${UNDECORATE[mode]}\n  ' }\n}\n` + chainMember(c, mode, m, prefix)
-      : `input { pipeline { address => "${addressOf(c, mode, m.id)}" } }\n` + chainMember(c, mode, m, prefix)
+    text:
+      k === 0
+        ? `input { file { ${file} codec => ${isJson(c) ? 'json' : 'plain'}${inputOptions(c)} } }\nfilter {\n  ruby { code => '${UNDECORATE[mode]}\n  ' }\n}\n` +
+          chainMember(c, mode, m, prefix)
+        : `input { pipeline { address => "${addressOf(c, mode, m.id)}" } }\n` + chainMember(c, mode, m, prefix)
   }));
 }
 
@@ -107,11 +128,14 @@ export function logstashChain(c, mode) {
  */
 // Fin du bloc { … } ouvert à l’indice donné ; les accolades d’une chaîne ne comptent pas
 function blockEnd(text, open) {
-  let depth = 0; let quote = null;
+  let depth = 0;
+  let quote = null;
   for (let i = open; i < text.length; i++) {
     const ch = text[i];
-    if (quote) { if (ch === '\\') i++; else if (ch === quote) quote = null; }
-    else if (ch === '"' || ch === "'") quote = ch;
+    if (quote) {
+      if (ch === '\\') i++;
+      else if (ch === quote) quote = null;
+    } else if (ch === '"' || ch === "'") quote = ch;
     else if (ch === '{') depth++;
     else if (ch === '}' && --depth === 0) return i;
   }
@@ -129,15 +153,30 @@ export function example(file) {
   const sinks = body(text, /(^|\n)output\s*\{/);
   const addField = body(input, /add_field\s*=>\s*\{/);
   const output = o => {
-    let out = ''; let from = 0; let m;
+    let out = '';
+    let from = 0;
+    let m;
     const kafka = /kafka\s*\{/g;
     while ((m = kafka.exec(sinks))) {
-      const open = m.index + m[0].length - 1; const end = blockEnd(sinks, open);
+      const open = m.index + m[0].length - 1;
+      const end = blockEnd(sinks, open);
       const topic = /topic_id\s*=>\s*"([^"]*)"/.exec(sinks.slice(open, end))[1];
-      out += sinks.slice(from, m.index) + o(topic.replace(/%\{[^}]*\}/g, '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, ''));
+      out +=
+        sinks.slice(from, m.index) +
+        o(
+          topic
+            .replace(/%\{[^}]*\}/g, '')
+            .replace(/[^A-Za-z0-9]+/g, '_')
+            .replace(/^_+|_+$/g, '')
+        );
       from = kafka.lastIndex = end + 1;
     }
     return out + sinks.slice(from);
   };
-  return { filter: body(text, /(^|\n)filter\s*\{/), codec: /codec\s*=>\s*json/.test(input) ? 'json' : 'plain', input: addField === null ? '' : `add_field => {${addField}}`, output };
+  return {
+    filter: body(text, /(^|\n)filter\s*\{/),
+    codec: /codec\s*=>\s*json/.test(input) ? 'json' : 'plain',
+    input: addField === null ? '' : `add_field => {${addField}}`,
+    output
+  };
 }

@@ -1,25 +1,97 @@
 /* Passerelle — moteur partie 2 : DSL Elasticsearch → SQL ClickHouse */
+import {
+  andJoin,
+  CH_KW,
+  chComment,
+  chIdent,
+  chInt,
+  chNum,
+  chStr,
+  chVal,
+  columnType,
+  escRe,
+  guessType,
+  hasSchema,
+  isObj,
+  isWrapped,
+  jsonDepth,
+  luceneParse,
+  makeNotes,
+  MAX_DSL_DEPTH,
+  orJoin,
+  painlessToSQL,
+  paren,
+  pArg,
+  parseColumnType,
+  scanTop,
+  simpleQueryParse,
+  tableConfig,
+  topHas,
+  tzArg,
+  zoneOf
+} from './base.js';
+import { applyStrictIssues, checkDSL } from './dsl-strict.js';
+import {
+  bindGrafana,
+  bindParams,
+  consumeParam,
+  extractTemplates,
+  grafanaParamsInSQL,
+  grafanaTime,
+  isParamMark,
+  paramsInSQL,
+  paramSource,
+  restoreDeep,
+  restoreTemplates
+} from './dsl-params.js';
+
 const DM_UNIT = { y: 'YEAR', M: 'MONTH', w: 'WEEK', d: 'DAY', h: 'HOUR', H: 'HOUR', m: 'MINUTE', s: 'SECOND' };
-const DM_ROUND = { y: 'toStartOfYear', M: 'toStartOfMonth', w: 'toMonday', d: 'toStartOfDay', h: 'toStartOfHour', H: 'toStartOfHour', m: 'toStartOfMinute' };
-const FR_UNIT = { y: ['année', 'années', 'f'], M: ['mois', 'mois', 'm'], w: ['semaine', 'semaines', 'f'], d: ['jour', 'jours', 'm'], h: ['heure', 'heures', 'f'], H: ['heure', 'heures', 'f'], m: ['minute', 'minutes', 'f'], s: ['seconde', 'secondes', 'f'] };
+const DM_ROUND = {
+  y: 'toStartOfYear',
+  M: 'toStartOfMonth',
+  w: 'toMonday',
+  d: 'toStartOfDay',
+  h: 'toStartOfHour',
+  H: 'toStartOfHour',
+  m: 'toStartOfMinute'
+};
+const FR_UNIT = {
+  y: ['année', 'années', 'f'],
+  M: ['mois', 'mois', 'm'],
+  w: ['semaine', 'semaines', 'f'],
+  d: ['jour', 'jours', 'm'],
+  h: ['heure', 'heures', 'f'],
+  H: ['heure', 'heures', 'f'],
+  m: ['minute', 'minutes', 'f'],
+  s: ['seconde', 'secondes', 'f']
+};
 const ISO_RE = /^\d{4}-\d{2}(-\d{2})?([T ][\d:.,]+)?(Z|[+-]\d{2}:?\d{2})?$/;
 
-function parseDateMath(v) {
+export function parseDateMath(v) {
   if (typeof v !== 'string') return null;
   const s = v.replace(/\s+/g, '');
   let base, rest;
-  if (s.startsWith('now')) { base = { now: true }; rest = s.slice(3); }
-  else {
+  if (s.startsWith('now')) {
+    base = { now: true };
+    rest = s.slice(3);
+  } else {
     const k = s.indexOf('||');
     if (k < 0) return ISO_RE.test(s) ? { abs: s, steps: [], ops: [], round: null } : null;
-    base = { abs: s.slice(0, k) }; rest = s.slice(k + 2);
+    base = { abs: s.slice(0, k) };
+    rest = s.slice(k + 2);
   }
   // Suite d’opérations appliquées dans l’ordre : décalages (+1d, -2M) et arrondis (/d), l’arrondi pouvant être suivi d’un décalage
   if (!/^(?:[+-]\d+[yMwdhHms]|\/[yMwdhHms])*$/.test(rest)) return null;
-  const steps = [...rest.matchAll(/([+-])(\d+)([yMwdhHms])|\/([yMwdhHms])/g)].map(x => (x[4] ? { round: x[4] } : { sign: x[1], n: +x[2], unit: x[3] }));
+  const steps = [...rest.matchAll(/([+-])(\d+)([yMwdhHms])|\/([yMwdhHms])/g)].map(x =>
+    x[4] ? { round: x[4] } : { sign: x[1], n: +x[2], unit: x[3] }
+  );
   const rounds = steps.filter(x => x.round);
   // ops : les décalages seuls ; round : unité du dernier arrondi (null s’il n’y en a pas)
-  return Object.assign(base, { steps, ops: steps.filter(x => !x.round), round: rounds.length ? rounds[rounds.length - 1].round : null });
+  return Object.assign(base, {
+    steps,
+    ops: steps.filter(x => !x.round),
+    round: rounds.length ? rounds[rounds.length - 1].round : null
+  });
 }
 /*
  * Expression SQL d’une date « date math » d’Elasticsearch (now-7d/d, 2026-03-10||+1M/M…).
@@ -33,7 +105,10 @@ function dateMathSQL(ctx, dm, tz, roundUp) {
   if (dm.now) e = zone && calendar ? `now(${chStr(zone)})` : 'now()';
   else e = `parseDateTime64BestEffort(${chStr(dm.abs)}, 3${zone ? `, ${chStr(zone)}` : ''})`;
   for (const step of dm.steps || dm.ops) {
-    if (!step.round) { e = `${e} ${step.sign} INTERVAL ${step.n} ${DM_UNIT[step.unit]}`; continue; }
+    if (!step.round) {
+      e = `${e} ${step.sign} INTERVAL ${step.n} ${DM_UNIT[step.unit]}`;
+      continue;
+    }
     if (!DM_ROUND[step.round]) continue;
     e = `${DM_ROUND[step.round]}(${e})`;
     // Semaine, mois et année s’arrondissent en Date, que ClickHouse relirait ensuite dans le fuseau du serveur
@@ -57,47 +132,77 @@ const epochMillisSQL = v => `fromUnixTimestamp64Milli(toInt64(${chNum(v, 'date e
 // Borne de date d’une agrégation (hard_bounds, date_range…) : epoch millis, date math ou date écrite en clair
 function dateBoundSQL(ctx, v, tz) {
   if (isEpoch(v)) return epochMillisSQL(v);
-  if (isParamMark(v) && ctx.opts && ctx.opts.grafana && grafanaTime(paramSource(ctx, v))) { consumeParam(ctx, v); return grafanaTime(paramSource(ctx, v)); }
+  if (isParamMark(v) && ctx.opts && ctx.opts.grafana && grafanaTime(paramSource(ctx, v))) {
+    consumeParam(ctx, v);
+    return grafanaTime(paramSource(ctx, v));
+  }
   return dateMathSQL(ctx, parseDateMath(String(v)) || { abs: String(v), steps: [], ops: [], round: null }, tz);
 }
 // Valeur de curseur d’une clé de regroupement : la clé d’un date_histogram arrive d’Elasticsearch en epoch millis
 function cursorValueSQL(key, v) {
   if (!key.date || !isEpoch(v)) return chVal(v);
-  return key.date.asDate ? `toDate(${epochMillisSQL(v)}${key.date.zone ? `, ${chStr(key.date.zone)}` : ''})` : epochMillisSQL(v);
+  return key.date.asDate
+    ? `toDate(${epochMillisSQL(v)}${key.date.zone ? `, ${chStr(key.date.zone)}` : ''})`
+    : epochMillisSQL(v);
 }
 function humanSince(dm) {
   if (!dm || !dm.now || dm.ops.length !== 1 || dm.ops[0].sign !== '-') return null;
-  const { n, unit } = dm.ops[0]; const [sg, pl, g] = FR_UNIT[unit];
+  const { n, unit } = dm.ops[0];
+  const [sg, pl, g] = FR_UNIT[unit];
   if (n === 1) return g === 'f' ? `la dernière ${sg}` : `le dernier ${sg}`;
   return g === 'f' ? `les ${n} dernières ${pl}` : `les ${n} derniers ${pl}`;
 }
 function humanDate(v) {
   const dm = parseDateMath(v);
   if (dm && dm.now && !dm.ops.length) return 'maintenant';
-  if (dm && dm.now) { const o = dm.ops[0]; return `il y a ${o.n} ${o.n > 1 ? FR_UNIT[o.unit][1] : FR_UNIT[o.unit][0]}`; }
+  if (dm && dm.now) {
+    const o = dm.ops[0];
+    return `il y a ${o.n} ${o.n > 1 ? FR_UNIT[o.unit][1] : FR_UNIT[o.unit][0]}`;
+  }
   return String(v);
 }
 
-function makeDslCtx(cfg) {
+export function makeDslCtx(cfg) {
   const notes = makeNotes();
   const ctx = {
-    cfg, notes, stats: { ok: 0, approx: 0, ko: 0 },
-    runtime: {}, human: { period: null, filters: [], excludes: [], text: [], groups: [], metrics: [], hits: null, runtime: [] },
-    cap: [], humanOff: 0, dateFields: new Set(), textCols: new Set(), groupCols: new Set(), leadingWildcard: false,
+    cfg,
+    notes,
+    stats: { ok: 0, approx: 0, ko: 0 },
+    runtime: {},
+    human: { period: null, filters: [], excludes: [], text: [], groups: [], metrics: [], hits: null, runtime: [] },
+    cap: [],
+    humanOff: 0,
+    dateFields: new Set(),
+    textCols: new Set(),
+    groupCols: new Set(),
+    leadingWildcard: false,
     // Schéma des colonnes : table en cours, colonnes Nullable rencontrées, et constructions dont la justesse en dépend
-    table: null, schema: hasSchema(cfg), nullableCols: new Set(), schemaGaps: new Set(),
+    table: null,
+    schema: hasSchema(cfg),
+    nullableCols: new Set(),
+    schemaGaps: new Set(),
     // Listes de valeurs sorties du SQL (clickhouse.lists.threshold), par nom
     lists: new Map(),
     // Modèles remplacés par des marqueurs (dsl-params.js)
     params: []
   };
   ctx.mapField = f => mapField(ctx, f);
-  ctx.kindOf = f => { const t = fieldType(ctx, f); return t ? t.kind : null; };
+  ctx.kindOf = f => {
+    const t = fieldType(ctx, f);
+    return t ? t.kind : null;
+  };
   // Scripts Painless : attribut sans type déclaré, converti en nombre quand le script le traite comme tel
-  ctx.untyped = f => { const t = fieldTarget(ctx, f); return t.kind === 'attr' && !t.declared; };
+  ctx.untyped = f => {
+    const t = fieldTarget(ctx, f);
+    return t.kind === 'attr' && !t.declared;
+  };
   ctx.asNumber = sql => {
     ctx.stats.approx++;
-    ctx.notes.add('warn', 'Attribut converti en nombre dans un script', 'Le script traite comme un nombre un attribut dont le type n’est pas déclaré : la valeur est convertie à la lecture (NULL si elle ne s’y prête pas). Déclarez-le dans clickhouse.attribute_types pour une conversion exacte, entière ou décimale.');
+    ctx.notes.add(
+      'warn',
+      'Attribut converti en nombre dans un script',
+      'Le script traite comme un nombre un attribut dont le type n’est pas déclaré : la valeur est convertie à la lecture (NULL si elle ne s’y prête pas). Déclarez-le dans clickhouse.attribute_types pour une conversion exacte, entière ou décimale.'
+    );
     const conv = `accurateCastOrNull(${sql}, 'Float64')`;
     ctx.nullableCols.add(bareSQL(conv));
     return conv;
@@ -118,12 +223,13 @@ function makeDslCtx(cfg) {
  *   sql       valeur, convertie si son type est connu ; une conversion ratée ou une clé absente donnent NULL
  *   presence  le document a le champ (mapContains, chemin non NULL, liste des clés) ; null si on ne peut le savoir
  */
-const ATTR_REF = /^([A-Za-z_][A-Za-z0-9_]*)\[\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")\s*\]$/;
+export const ATTR_REF = /^([A-Za-z_][A-Za-z0-9_]*)\[\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")\s*\]$/;
 function fieldTarget(ctx, field) {
   const name = String(field).replace(/\.keyword$/, '');
   if (!ctx.targets) ctx.targets = new Map();
   if (ctx.targets.has(name)) return ctx.targets.get(name);
-  const ch = ctx.cfg.clickhouse; const fm = ch.field_mapping || {};
+  const ch = ctx.cfg.clickhouse;
+  const fm = ch.field_mapping || {};
   const mapped = Object.prototype.hasOwnProperty.call(fm, name) && fm[name] ? String(fm[name]) : null;
   const ref = mapped ? ATTR_REF.exec(mapped) : null;
   let target;
@@ -138,7 +244,8 @@ function fieldTarget(ctx, field) {
         if (p !== '*' && !new RegExp(globToRe(p)).test(name)) continue;
         const weight = p.replace(/\*/g, '').length;
         // labels: [labels.*] : la colonne porte le nom de l’objet, ses clés sont relatives (labels.env → labels['env'])
-        if (!best || weight > best.weight) best = { column, weight, key: p === `${column}.*` ? name.slice(column.length + 1) : name };
+        if (!best || weight > best.weight)
+          best = { column, weight, key: p === `${column}.*` ? name.slice(column.length + 1) : name };
       }
     }
     target = best ? attrTarget(ctx, best.column, best.key, name) : { kind: 'column', column: name };
@@ -147,16 +254,24 @@ function fieldTarget(ctx, field) {
   return target;
 }
 // Chemin d’une colonne JSON : chaque segment est un identifiant (ClickHouse range « a.b » et { a: { b } } au même chemin)
-const jsonPath = (column, key) => `${chIdent(column)}.${String(key).split('.').map(s => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(s) && !CH_KW.has(s.toLowerCase()) ? s : '`' + s.replace(/`/g, '\\`') + '`')).join('.')}`;
+const jsonPath = (column, key) =>
+  `${chIdent(column)}.${String(key)
+    .split('.')
+    .map(s =>
+      /^[A-Za-z_][A-Za-z0-9_]*$/.test(s) && !CH_KW.has(s.toLowerCase()) ? s : '`' + s.replace(/`/g, '\\`') + '`'
+    )
+    .join('.')}`;
 // Conversion d’une valeur lue comme chaîne vers le type déclaré : NULL quand elle ne s’y prête pas
 function convertSQL(expr, type) {
   const t = parseColumnType(type);
   if (t.kind === 'date') return `parseDateTime64BestEffortOrNull(${expr}, 3, 'UTC')`;
-  if (t.kind === 'int' || t.kind === 'float' || t.kind === 'bool') return `accurateCastOrNull(${expr}, ${chStr(String(type).replace(/^Nullable\((.*)\)$/, '$1'))})`;
+  if (t.kind === 'int' || t.kind === 'float' || t.kind === 'bool')
+    return `accurateCastOrNull(${expr}, ${chStr(String(type).replace(/^Nullable\((.*)\)$/, '$1'))})`;
   return null;
 }
 function attrTarget(ctx, column, key, field) {
-  const ch = ctx.cfg.clickhouse; const ct = columnType(ctx.cfg, ctx.table, column);
+  const ch = ctx.cfg.clickhouse;
+  const ct = columnType(ctx.cfg, ctx.table, column);
   const declared = isObj(ch.attribute_types) ? ch.attribute_types[field] || ch.attribute_types[key] : undefined;
   const keysColumn = columnType(ctx.cfg, ctx.table, `${column}Keys`) ? `${column}Keys` : null;
   const t = { kind: 'attr', column, key, field };
@@ -173,7 +288,12 @@ function attrTarget(ctx, column, key, field) {
       // Chemin dynamique : NULL quand il est absent ; converti vers le type déclaré, ou lu comme une chaîne
       const conv = declared ? convertSQL(`CAST(${raw} AS Nullable(String))`, declared) : null;
       const pt = declared ? parseColumnType(declared) : { kind: 'string' };
-      Object.assign(t, { sql: conv || `CAST(${raw} AS Nullable(String))`, type: { array: false, nullable: true, kind: pt.kind }, presence: hasKey || `isNotNull(${raw})`, dynamic: true });
+      Object.assign(t, {
+        sql: conv || `CAST(${raw} AS Nullable(String))`,
+        type: { array: false, nullable: true, kind: pt.kind },
+        presence: hasKey || `isNotNull(${raw})`,
+        dynamic: true
+      });
     }
   } else {
     t.store = 'map';
@@ -182,12 +302,20 @@ function attrTarget(ctx, column, key, field) {
     const conv = declared && vt.kind === 'string' ? convertSQL(raw, declared) : null;
     const kind = conv ? parseColumnType(declared).kind : vt.kind;
     // Une clé absente d’une Map rend la valeur par défaut (chaîne vide, 0) : seul mapContains dit si le champ existe
-    Object.assign(t, { sql: conv || raw, type: { array: false, nullable: !!conv, kind }, presence: `mapContains(${chIdent(column)}, ${chStr(key)})` });
+    Object.assign(t, {
+      sql: conv || raw,
+      type: { array: false, nullable: !!conv, kind },
+      presence: `mapContains(${chIdent(column)}, ${chStr(key)})`
+    });
   }
   t.absence = t.presence ? negateWith(t.presence, false) : null;
   // declared : le type des valeurs est connu (chemin JSON typé, attribute_types, ou Map de nombres)
   t.declared = !!declared || (t.store === 'json' && !t.dynamic) || t.type.kind !== 'string';
-  t.type.presence = t.presence; t.type.absence = t.absence; t.type.attr = true; t.type.store = t.store; t.type.declared = t.declared;
+  t.type.presence = t.presence;
+  t.type.absence = t.absence;
+  t.type.attr = true;
+  t.type.store = t.store;
+  t.type.declared = t.declared;
   return t;
 }
 // Colonne ClickHouse d’un champ Elasticsearch : sous-champ .keyword retiré, puis field_mapping (attribut : sa colonne)
@@ -196,12 +324,15 @@ function fieldColumn(ctx, field) {
   return t.column;
 }
 // Type de la colonne d’après clickhouse.columns ; null pour un champ runtime ou une colonne que le schéma ne décrit pas
-function fieldType(ctx, field) {
+export function fieldType(ctx, field) {
   if (ctx.runtime[String(field).replace(/\.keyword$/, '')]) return null;
   const t = fieldTarget(ctx, field);
   return t.kind === 'attr' ? t.type : columnType(ctx.cfg, ctx.table, t.column);
 }
-const isArrayField = (ctx, field) => { const t = fieldType(ctx, field); return !!t && t.array; };
+export const isArrayField = (ctx, field) => {
+  const t = fieldType(ctx, field);
+  return !!t && t.array;
+};
 /*
  * Valeur d’un champ lue pour un usage précis : nombre (mesure, plage numérique, histogramme) ou date. Un attribut dont
  * le type n’est pas déclaré est une chaîne : il est alors converti, avec une remarque, au lieu de laisser ClickHouse
@@ -210,9 +341,14 @@ const isArrayField = (ctx, field) => { const t = fieldType(ctx, field); return !
 function fieldAs(ctx, field, want) {
   const f = mapField(ctx, field);
   const t = fieldTarget(ctx, field);
-  if (ctx.runtime[String(field).replace(/\.keyword$/, '')] || t.kind !== 'attr' || t.type.kind !== 'string' || !want) return f;
+  if (ctx.runtime[String(field).replace(/\.keyword$/, '')] || t.kind !== 'attr' || t.type.kind !== 'string' || !want)
+    return f;
   const type = want === 'date' ? 'DateTime64(3)' : 'Float64';
-  ctx.notes.add('warn', `Attribut ${t.key} converti en ${want === 'date' ? 'date' : 'nombre'}`, `${t.column} range ses valeurs en chaînes et le type de « ${t.key} » n’est pas déclaré : la valeur est convertie à la lecture (NULL si elle ne s’y prête pas). Déclarez-le dans clickhouse.attribute_types pour une conversion exacte, ou typez le chemin de la colonne JSON.`);
+  ctx.notes.add(
+    'warn',
+    `Attribut ${t.key} converti en ${want === 'date' ? 'date' : 'nombre'}`,
+    `${t.column} range ses valeurs en chaînes et le type de « ${t.key} » n’est pas déclaré : la valeur est convertie à la lecture (NULL si elle ne s’y prête pas). Déclarez-le dans clickhouse.attribute_types pour une conversion exacte, ou typez le chemin de la colonne JSON.`
+  );
   ctx.stats.approx++;
   const conv = convertSQL(t.store === 'json' && !t.dynamic ? `toString(${f})` : f, type);
   ctx.nullableCols.add(bareSQL(conv));
@@ -223,21 +359,29 @@ const bareSQL = s => String(s).replace(/'(?:[^'\\]|\\.)*'/g, "''");
 // Valeur littérale comparée à un attribut chaîne : Elasticsearch compare le texte de la valeur (500 et « 500 »)
 function valueFor(ctx, field, v) {
   const t = fieldTarget(ctx, field);
-  if (t.kind === 'attr' && t.type.kind === 'string' && !ctx.runtime[String(field).replace(/\.keyword$/, '')] && (typeof v === 'number' || typeof v === 'boolean')) return chStr(String(v));
+  if (
+    t.kind === 'attr' &&
+    t.type.kind === 'string' &&
+    !ctx.runtime[String(field).replace(/\.keyword$/, '')] &&
+    (typeof v === 'number' || typeof v === 'boolean')
+  )
+    return chStr(String(v));
   return chVal(v);
 }
 /*
  * « Le champ n’a pas de valeur » et son contraire, selon le type de la colonne :
  * tableau vide, chaîne vide quand elle représente l’absence (empty_as_missing), clé absente d’un attribut, NULL sinon.
  */
-function absentSQL(ctx, field) {
-  const f = mapField(ctx, field); const t = fieldType(ctx, field);
+export function absentSQL(ctx, field) {
+  const f = mapField(ctx, field);
+  const t = fieldType(ctx, field);
   if (t && t.array) return `empty(${f})`;
   if (t && t.absence) return t.absence;
   return emptyIsMissing(ctx, t) ? `${f} = ''` : `isNull(${f})`;
 }
-function presentSQL(ctx, field) {
-  const f = mapField(ctx, field); const t = fieldType(ctx, field);
+export function presentSQL(ctx, field) {
+  const f = mapField(ctx, field);
+  const t = fieldType(ctx, field);
   if (t && t.array) return `notEmpty(${f})`;
   if (t && t.presence) return t.presence;
   return emptyIsMissing(ctx, t) ? `${f} != ''` : `isNotNull(${f})`;
@@ -251,18 +395,29 @@ function onValues(ctx, field, predicate) {
   return isArrayField(ctx, field) ? `arrayExists(x -> ${predicate('x')}, ${f})` : predicate(f);
 }
 // Une chaîne vide représente-t-elle un champ absent dans cette colonne ? (convention clickhouse.empty_as_missing)
-const emptyIsMissing = (ctx, t) => !!t && !t.attr && !t.nullable && !t.array && t.kind === 'string' && !!ctx.cfg.clickhouse.empty_as_missing;
+const emptyIsMissing = (ctx, t) =>
+  !!t && !t.attr && !t.nullable && !t.array && t.kind === 'string' && !!ctx.cfg.clickhouse.empty_as_missing;
 function H(ctx, kind, text) {
   if (ctx.humanOff) return;
-  if (ctx.cap.length) { ctx.cap[ctx.cap.length - 1].push(text); return; }
-  if (kind === 'period') { ctx.human.period = text; return; }
+  if (ctx.cap.length) {
+    ctx.cap[ctx.cap.length - 1].push(text);
+    return;
+  }
+  if (kind === 'period') {
+    ctx.human.period = text;
+    return;
+  }
   ctx.human[kind].push(text);
 }
-function mapField(ctx, field) {
+export function mapField(ctx, field) {
   let name = String(field);
   if (name.endsWith('.keyword')) {
     const base = name.slice(0, -8);
-    ctx.notes.add('info', 'Suffixe .keyword retiré', `« ${name} » devient « ${base} » : ClickHouse stocke la valeur brute, sans sous-champ analysé.`);
+    ctx.notes.add(
+      'info',
+      'Suffixe .keyword retiré',
+      `« ${name} » devient « ${base} » : ClickHouse stocke la valeur brute, sans sous-champ analysé.`
+    );
     name = base;
   }
   if (ctx.runtime[name] && !ctx.runtime[name].busy) {
@@ -280,19 +435,31 @@ function mapField(ctx, field) {
     if (!ctx.attrSeen) ctx.attrSeen = new Set();
     if (!ctx.attrSeen.has(target.column)) {
       ctx.attrSeen.add(target.column);
-      ctx.notes.add('info', `Attributs lus dans ${target.column}`, target.store === 'map'
-        ? `Les champs sans colonne propre sont lus dans la Map ${target.column} : une clé absente y vaut la chaîne vide, l’existence se teste donc par mapContains(). Les valeurs y sont des chaînes ; celles dont le type est déclaré dans clickhouse.attribute_types sont converties à la lecture.`
-        : `Les champs sans colonne propre sont lus dans la colonne JSON ${target.column}. Un chemin typé y garde son type ; un chemin dynamique est lu comme une chaîne, ou converti vers le type déclaré dans clickhouse.attribute_types.`);
+      ctx.notes.add(
+        'info',
+        `Attributs lus dans ${target.column}`,
+        target.store === 'map'
+          ? `Les champs sans colonne propre sont lus dans la Map ${target.column} : une clé absente y vaut la chaîne vide, l’existence se teste donc par mapContains(). Les valeurs y sont des chaînes ; celles dont le type est déclaré dans clickhouse.attribute_types sont converties à la lecture.`
+          : `Les champs sans colonne propre sont lus dans la colonne JSON ${target.column}. Un chemin typé y garde son type ; un chemin dynamique est lu comme une chaîne, ou converti vers le type déclaré dans clickhouse.attribute_types.`
+      );
     }
     return target.sql;
   }
   name = target.column;
-  if (name === '_id') ctx.notes.add('warn', 'Champ _id', 'Elasticsearch génère _id ; dans ClickHouse il faut une colonne équivalente (par ex. un UUID ou un identifiant métier).');
+  if (name === '_id')
+    ctx.notes.add(
+      'warn',
+      'Champ _id',
+      'Elasticsearch génère _id ; dans ClickHouse il faut une colonne équivalente (par ex. un UUID ou un identifiant métier).'
+    );
   ctx.columns.add(name);
   const type = columnType(ctx.cfg, ctx.table, name);
   if (type && type.nullable) ctx.nullableCols.add(chIdent(name));
   // Schéma déclaré : une colonne qu’il ne connaît pas ferait échouer la requête (UNKNOWN_IDENTIFIER)
-  if (!type && ctx.schema && ctx.table) { if (!ctx.unknownCols) ctx.unknownCols = new Set(); ctx.unknownCols.add(name); }
+  if (!type && ctx.schema && ctx.table) {
+    if (!ctx.unknownCols) ctx.unknownCols = new Set();
+    ctx.unknownCols.add(name);
+  }
   return chIdent(name);
 }
 function isTextField(ctx, field) {
@@ -310,7 +477,9 @@ function groupColumn(ctx, field) {
 }
 // Le mot est cherché dans la colonne mise en minuscules : lowerUTF8() traite aussi les lettres accentuées, là où
 // hasTokenCaseInsensitive() et lower() ne connaissent que l’ASCII (« échec » ne trouverait pas « Échec »)
-function hasTok(f, t) { return `hasToken(lowerUTF8(${f}), ${chStr(t)})`; }
+function hasTok(f, t) {
+  return `hasToken(lowerUTF8(${f}), ${chStr(t)})`;
+}
 function todo(ctx, what, detail) {
   ctx.stats.ko++;
   ctx.notes.add('err', `${what} non traduit`, detail);
@@ -328,13 +497,23 @@ function msmCount(msm, n) {
   if (typeof msm === 'number') return msm < 0 ? Math.max(n + msm, 0) : Math.min(msm, n);
   const s = String(msm).trim();
   let m = /^(-?)(\d+)%$/.exec(s);
-  if (m) { const k = Math.floor(n * (+m[2]) / 100); return m[1] ? n - k : k; }
-  if (/^-?\d+$/.test(s)) { const k = +s; return k < 0 ? Math.max(n + k, 0) : Math.min(k, n); }
+  if (m) {
+    const k = Math.floor((n * +m[2]) / 100);
+    return m[1] ? n - k : k;
+  }
+  if (/^-?\d+$/.test(s)) {
+    const k = +s;
+    return k < 0 ? Math.max(n + k, 0) : Math.min(k, n);
+  }
   return null;
 }
-function likeEscape(v) { return String(v).replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_'); }
+function likeEscape(v) {
+  return String(v).replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+}
 // case_insensitive : Elasticsearch ne replie que les lettres ASCII, comme lower(). Les autres doivent correspondre telles quelles.
-function asciiLower(v) { return String(v).replace(/[A-Z]+/g, m => m.toLowerCase()); }
+function asciiLower(v) {
+  return String(v).replace(/[A-Z]+/g, m => m.toLowerCase());
+}
 /*
  * regexp avec case_insensitive : Elasticsearch replie la casse des caractères cités un à un, y compris dans une
  * classe, mais pas celle des intervalles : [a-z] ne trouve pas « A », [0-9a] le trouve. (?i) est donc activé pour
@@ -342,14 +521,30 @@ function asciiLower(v) { return String(v).replace(/[A-Z]+/g, m => m.toLowerCase(
  */
 function regexFoldCase(re) {
   const unit = (s, i) => (s[i] === '\\' ? s.slice(i, i + 2) : s[i]);
-  let out = '(?i)'; let i = 0;
+  let out = '(?i)';
+  let i = 0;
   while (i < re.length) {
-    if (re[i] !== '[') { const u = unit(re, i); out += u; i += u.length; continue; }
-    let j = i + 1; let cls = '';
-    if (re[j] === '^') { cls += '^'; j++; }
+    if (re[i] !== '[') {
+      const u = unit(re, i);
+      out += u;
+      i += u.length;
+      continue;
+    }
+    let j = i + 1;
+    let cls = '';
+    if (re[j] === '^') {
+      cls += '^';
+      j++;
+    }
     for (let first = true; j < re.length && (first || re[j] !== ']'); first = false) {
-      const a = unit(re, j); j += a.length;
-      if (re[j] === '-' && j + 1 < re.length && re[j + 1] !== ']') { const b = unit(re, j + 1); cls += `${a}-${b}`; j += 1 + b.length; continue; }
+      const a = unit(re, j);
+      j += a.length;
+      if (re[j] === '-' && j + 1 < re.length && re[j + 1] !== ']') {
+        const b = unit(re, j + 1);
+        cls += `${a}-${b}`;
+        j += 1 + b.length;
+        continue;
+      }
       cls += /^[A-Za-z]$/.test(a) ? a.toLowerCase() + a.toUpperCase() : a;
     }
     // Classe non fermée : l’expression est invalide, elle est rendue telle quelle pour que ClickHouse la refuse aussi
@@ -359,14 +554,25 @@ function regexFoldCase(re) {
   }
   return out;
 }
-function globToRe(g) { return '^' + String(g).split('*').map(escRe).join('.*') + '$'; }
-function textFieldsOr(ctx, fields) { const tf = ctx.cfg.clickhouse.text_fields || []; return fields && fields.length ? fields : (tf.length ? tf : ['message']); }
+export function globToRe(g) {
+  return '^' + String(g).split('*').map(escRe).join('.*') + '$';
+}
+function textFieldsOr(ctx, fields) {
+  const tf = ctx.cfg.clickhouse.text_fields || [];
+  return fields && fields.length ? fields : tf.length ? tf : ['message'];
+}
 
 /* ---------- Clauses de requête ---------- */
 function splitTopAnd(s) {
   if (isWrapped(s) || /\bBETWEEN\b/.test(s) || topHas(s, /^ OR /)) return [s];
-  const out = []; let last = 0;
-  scanTop(s, i => { if (s.startsWith(' AND ', i)) { out.push(s.slice(last, i)); last = i + 5; } });
+  const out = [];
+  let last = 0;
+  scanTop(s, i => {
+    if (s.startsWith(' AND ', i)) {
+      out.push(s.slice(last, i));
+      last = i + 5;
+    }
+  });
   out.push(s.slice(last));
   return out.map(x => x.trim()).filter(Boolean);
 }
@@ -375,43 +581,74 @@ function splitTopAnd(s) {
  * que dans un test de nullité. Dans WHERE, NULL vaut faux, ce qui convient à un filtre positif. Mais
  * NOT NULL reste NULL : la ligne est écartée, alors qu’Elasticsearch garde un document qui n’a pas le champ.
  */
-function mayBeNull(ctx, s) {
+export function mayBeNull(ctx, s) {
   if (!ctx.nullableCols.size) return false;
   const bare = String(s).replace(/'(?:[^'\\]|\\.)*'/g, "''");
   for (const col of ctx.nullableCols) {
     const c = escRe(col);
     const uses = bare.match(new RegExp(`(?<![A-Za-z0-9_.\`])${c}(?![A-Za-z0-9_.\`(])`, 'g')) || [];
-    const guarded = bare.match(new RegExp(`\\b(?:isNull|isNotNull)\\(${c}\\)|\\bifNull\\(${c},|(?<![A-Za-z0-9_.\`])${c} IS (?:NOT )?NULL`, 'g')) || [];
+    const guarded =
+      bare.match(
+        new RegExp(`\\b(?:isNull|isNotNull)\\(${c}\\)|\\bifNull\\(${c},|(?<![A-Za-z0-9_.\`])${c} IS (?:NOT )?NULL`, 'g')
+      ) || [];
     if (uses.length > guarded.length) return true;
   }
   return false;
 }
 const OPPOSITE = { isNull: 'isNotNull', isNotNull: 'isNull', empty: 'notEmpty', notEmpty: 'empty' };
 /* Négation d’un prédicat, fidèle à must_not : un document qui n’a pas le champ ne correspond pas à la clause, donc il est gardé */
-function negate(ctx, s) { return negateWith(s, mayBeNull(ctx, s)); }
+function negate(ctx, s) {
+  return negateWith(s, mayBeNull(ctx, s));
+}
 function negateWith(s, nullable) {
   if (!topHas(s, /^ (AND|OR) /) && !/^NOT /.test(s)) {
     const test = /^(isNull|isNotNull|empty|notEmpty)\((.*)\)$/.exec(s);
     if (test && isWrapped(`(${test[2]})`)) return `${OPPOSITE[test[1]]}(${test[2]})`;
-    let eq = -1, cnt = 0, inn = -1;
-    scanTop(s, i => { if (s.startsWith(' = ', i)) { eq = i; cnt++; } if (s.startsWith(' IN (', i)) inn = i; });
+    let eq = -1,
+      cnt = 0,
+      inn = -1;
+    scanTop(s, i => {
+      if (s.startsWith(' = ', i)) {
+        eq = i;
+        cnt++;
+      }
+      if (s.startsWith(' IN (', i)) inn = i;
+    });
     if (cnt === 1 && inn < 0) {
-      const lhs = s.slice(0, eq); const neg = `${lhs} != ${s.slice(eq + 3)}`;
+      const lhs = s.slice(0, eq);
+      const neg = `${lhs} != ${s.slice(eq + 3)}`;
       return nullable ? `(${neg} OR ${lhs} IS NULL)` : neg;
     }
     if (inn > 0 && cnt === 0) {
-      const lhs = s.slice(0, inn); const neg = `${lhs} NOT IN (${s.slice(inn + 5)}`;
+      const lhs = s.slice(0, inn);
+      const neg = `${lhs} NOT IN (${s.slice(inn + 5)}`;
       return nullable ? `(${neg} OR ${lhs} IS NULL)` : neg;
     }
-    let ne = -1, neCount = 0;
-    scanTop(s, i => { if (s.startsWith(' != ', i)) { ne = i; neCount++; } });
+    let ne = -1,
+      neCount = 0;
+    scanTop(s, i => {
+      if (s.startsWith(' != ', i)) {
+        ne = i;
+        neCount++;
+      }
+    });
     if (!nullable && cnt === 0 && inn < 0 && neCount === 1) return `${s.slice(0, ne)} = ${s.slice(ne + 4)}`;
     // Comparaison seule : a >= b devient a < b, plus lisible que NOT (a >= b)
     const FLIP = { ' >= ': ' < ', ' <= ': ' > ', ' > ': ' <= ', ' < ': ' >= ' };
-    let at = -1, found = null, comparisons = 0;
-    scanTop(s, i => { const op = Object.keys(FLIP).find(o => s.startsWith(o, i)); if (op) { at = i; found = op; comparisons++; } });
+    let at = -1,
+      found = null,
+      comparisons = 0;
+    scanTop(s, i => {
+      const op = Object.keys(FLIP).find(o => s.startsWith(o, i));
+      if (op) {
+        at = i;
+        found = op;
+        comparisons++;
+      }
+    });
     if (comparisons === 1 && cnt === 0 && inn < 0 && neCount === 0) {
-      const lhs = s.slice(0, at); const neg = `${lhs}${FLIP[found]}${s.slice(at + found.length)}`;
+      const lhs = s.slice(0, at);
+      const neg = `${lhs}${FLIP[found]}${s.slice(at + found.length)}`;
       return nullable ? `(${neg} OR ${lhs} IS NULL)` : neg;
     }
   }
@@ -435,12 +672,14 @@ function runtimeFilter(ctx, field, values) {
   const rt = ctx.runtime[String(field).replace(/\.keyword$/, '')];
   if (!rt || rt.busy || !rt.tree) return undefined;
   const wanted = new Set(values.map(String));
-  const constant = v => (v.lit !== undefined ? v.lit : v.ty === 'num' && /^-?\d+(\.\d+)?$/.test(v.sql) ? Number(v.sql) : undefined);
+  const constant = v =>
+    v.lit !== undefined ? v.lit : v.ty === 'num' && /^-?\d+(\.\d+)?$/.test(v.sql) ? Number(v.sql) : undefined;
   // Expressions booléennes : true, false, une condition SQL, { and: [...] } ou { or: [...] }
   const both = (op, a, b) => ({ [op]: [a, b].flatMap(x => (isObj(x) && x[op] ? x[op] : [x])) });
   const and = (a, b) => (a === false || b === false ? false : a === true ? b : b === true ? a : both('and', a, b));
   const or = (a, b) => (a === true || b === true ? true : a === false ? b : b === false ? a : both('or', a, b));
-  let leaves = 0; let invertible = true;
+  let leaves = 0;
+  let invertible = true;
   // Condition sous laquelle la branche émet une valeur recherchée. Les simplifications suivent l’arbre :
   // « c OU (NON c ET suite) » se réduit à « c OU suite », comme le fait un lecteur du script.
   const match = (function walk(node) {
@@ -451,7 +690,8 @@ function runtimeFilter(ctx, field, values) {
       leaves++;
       return wanted.has(String(value));
     }
-    const then = walk(node.t); const otherwise = walk(node.e);
+    const then = walk(node.t);
+    const otherwise = walk(node.e);
     if (then === true && otherwise === true) return true;
     if (then === true) return or(node.c, otherwise);
     if (otherwise === true) return or(negate(ctx, node.c), then);
@@ -468,28 +708,49 @@ function runtimeFilter(ctx, field, values) {
     const lists = e.or.map(conds);
     if (lists.some(l => !l.length || l.includes(null))) return null;
     const branches = mergeIntervals(lists);
-    return branches === null ? null : branches.length === 1 ? andJoin(branches[0]) : orJoin(branches.map(b => andJoin(b)));
+    return branches === null
+      ? null
+      : branches.length === 1
+        ? andJoin(branches[0])
+        : orJoin(branches.map(b => andJoin(b)));
   }
   const sql = sqlOf(match);
   if (sql === null) return null;
   if (sql.length > 400) return undefined;
-  ctx.notes.add('opt', `Filtre sur « ${rt.name} » remonté aux colonnes`, `Le champ runtime « ${rt.name} » classe les lignes selon des conditions simples. Le filtre sur sa valeur est réécrit avec ces conditions : ClickHouse n’a plus à calculer le champ pour chaque ligne, et peut s’appuyer sur la clé de tri et les index des colonnes sources.`);
+  ctx.notes.add(
+    'opt',
+    `Filtre sur « ${rt.name} » remonté aux colonnes`,
+    `Le champ runtime « ${rt.name} » classe les lignes selon des conditions simples. Le filtre sur sa valeur est réécrit avec ces conditions : ClickHouse n’a plus à calculer le champ pour chaque ligne, et peut s’appuyer sur la clé de tri et les index des colonnes sources.`
+  );
   return sql;
 }
 const BOUND = /^(.+) (>=|>|<=|<) (-?\d+(?:\.\d+)?)$/;
 // Parmi les comparaisons d’une même expression à des nombres, garde la borne basse et la borne haute les plus strictes
 function tightenBounds(conds) {
-  const out = []; const bounds = new Map();
+  const out = [];
+  const bounds = new Map();
   for (const c of conds) {
     const m = topHas(c, /^ (AND|OR) /) ? null : BOUND.exec(c);
-    if (!m) { out.push(c); continue; }
-    const lhs = m[1]; const lower = m[2][0] === '>'; const strict = m[2].length === 1; const n = Number(m[3]);
-    if (!bounds.has(lhs)) { bounds.set(lhs, { lo: null, hi: null }); out.push({ lhs }); }
-    const side = lower ? 'lo' : 'hi'; const cur = bounds.get(lhs)[side];
+    if (!m) {
+      out.push(c);
+      continue;
+    }
+    const lhs = m[1];
+    const lower = m[2][0] === '>';
+    const strict = m[2].length === 1;
+    const n = Number(m[3]);
+    if (!bounds.has(lhs)) {
+      bounds.set(lhs, { lo: null, hi: null });
+      out.push({ lhs });
+    }
+    const side = lower ? 'lo' : 'hi';
+    const cur = bounds.get(lhs)[side];
     const tighter = !cur || (lower ? n > cur.n : n < cur.n) || (n === cur.n && strict);
     if (tighter) bounds.get(lhs)[side] = { n, strict, sql: c };
   }
-  return out.flatMap(x => (typeof x === 'string' ? [x] : [bounds.get(x.lhs).lo, bounds.get(x.lhs).hi].filter(Boolean).map(b => b.sql)));
+  return out.flatMap(x =>
+    typeof x === 'string' ? [x] : [bounds.get(x.lhs).lo, bounds.get(x.lhs).hi].filter(Boolean).map(b => b.sql)
+  );
 }
 // Réunit les branches qui sont des intervalles contigus d’une même expression : [100, 1000[ et [1000, +∞[ donnent [100, +∞[.
 // Renvoie null si la réunion couvre toutes les valeurs : il n’y a alors rien à écrire de sûr.
@@ -506,13 +767,24 @@ function mergeIntervals(branches) {
     return iv;
   };
   const items = branches.map(conds => ({ conds, iv: interval(conds) }));
-  for (let changed = true; changed;) {
+  for (let changed = true; changed; ) {
     changed = false;
     search: for (let i = 0; i < items.length; i++) {
       for (let j = 0; j < items.length; j++) {
-        const a = items[i].iv; const b = items[j].iv;
+        const a = items[i].iv;
+        const b = items[j].iv;
         // a finit là où b commence, et une seule des deux bornes inclut ce point
-        if (i === j || !a || !b || a.lhs !== b.lhs || !a.hi || !b.lo || a.hi.n !== b.lo.n || a.hi.strict === b.lo.strict) continue;
+        if (
+          i === j ||
+          !a ||
+          !b ||
+          a.lhs !== b.lhs ||
+          !a.hi ||
+          !b.lo ||
+          a.hi.n !== b.lo.n ||
+          a.hi.strict === b.lo.strict
+        )
+          continue;
         items[i] = { iv: { lhs: a.lhs, lo: a.lo, hi: b.hi } };
         items.splice(j, 1);
         changed = true;
@@ -520,7 +792,11 @@ function mergeIntervals(branches) {
       }
     }
   }
-  const render = iv => [iv.lo && `${iv.lhs} ${iv.lo.strict ? '>' : '>='} ${iv.lo.n}`, iv.hi && `${iv.lhs} ${iv.hi.strict ? '<' : '<='} ${iv.hi.n}`].filter(Boolean);
+  const render = iv =>
+    [
+      iv.lo && `${iv.lhs} ${iv.lo.strict ? '>' : '>='} ${iv.lo.n}`,
+      iv.hi && `${iv.lhs} ${iv.hi.strict ? '<' : '<='} ${iv.hi.n}`
+    ].filter(Boolean);
   const out = items.map(x => (x.iv ? render(x.iv) : x.conds));
   return out.some(conds => !conds.length) ? null : out;
 }
@@ -536,15 +812,22 @@ function mergeIntervals(branches) {
 const SQL_LITERAL = /^(?:'(?:[^'\\]|\\.)*'|-?\d+(?:\.\d+)?|true|false)$/;
 // Découpe « 'a', 'b,c', 3 » en littéraux SQL ; null si un élément n’en est pas un
 function literalList(text) {
-  const out = []; let cur = ''; let quoted = false;
+  const out = [];
+  let cur = '';
+  let quoted = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
     if (quoted) {
       cur += c;
-      if (c === '\\') cur += text[++i] || ''; else if (c === "'") quoted = false;
-    } else if (c === "'") { quoted = true; cur += c; }
-    else if (c === ',') { out.push(cur.trim()); cur = ''; }
-    else cur += c;
+      if (c === '\\') cur += text[++i] || '';
+      else if (c === "'") quoted = false;
+    } else if (c === "'") {
+      quoted = true;
+      cur += c;
+    } else if (c === ',') {
+      out.push(cur.trim());
+      cur = '';
+    } else cur += c;
   }
   out.push(cur.trim());
   return out.every(x => SQL_LITERAL.test(x)) ? out : null;
@@ -552,8 +835,16 @@ function literalList(text) {
 // « col = 'a' » ou « col IN ('a', 'b') » : renvoie { lhs, values } ; null pour toute autre forme
 function equalityOf(s) {
   if (typeof s !== 'string' || topHas(s, /^ (AND|OR) /) || /^NOT /.test(s)) return null;
-  let eq = -1, eqs = 0, inn = -1;
-  scanTop(s, i => { if (s.startsWith(' = ', i)) { eq = i; eqs++; } if (s.startsWith(' IN (', i)) inn = i; });
+  let eq = -1,
+    eqs = 0,
+    inn = -1;
+  scanTop(s, i => {
+    if (s.startsWith(' = ', i)) {
+      eq = i;
+      eqs++;
+    }
+    if (s.startsWith(' IN (', i)) inn = i;
+  });
   if (eqs === 1 && inn < 0) {
     const rhs = s.slice(eq + 3);
     return SQL_LITERAL.test(rhs) ? { lhs: s.slice(0, eq), values: [rhs] } : null;
@@ -567,7 +858,8 @@ function equalityOf(s) {
 // Empreinte d’une liste, indépendante de l’ordre des valeurs (deux FNV-1a de 32 bits, 12 chiffres hexadécimaux)
 function listFingerprint(values) {
   const text = [...values].sort().join('\n');
-  let a = 0x811c9dc5, b = 0x9747b28c;
+  let a = 0x811c9dc5,
+    b = 0x9747b28c;
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
     a = Math.imul(a ^ c, 0x01000193);
@@ -581,7 +873,8 @@ function inList(ctx, lhs, values) {
   if (unique.length === 1) return `${lhs} = ${unique[0]}`;
   const lists = ctx.cfg.clickhouse.lists || {};
   const threshold = Number(lists.threshold) || 0;
-  const strings = unique.every(v => v[0] === "'"); const integers = unique.every(v => /^-?\d+$/.test(v));
+  const strings = unique.every(v => v[0] === "'");
+  const integers = unique.every(v => /^-?\d+$/.test(v));
   if (!threshold || unique.length <= threshold || !(strings || integers)) return `${lhs} IN (${unique.join(', ')})`;
   const fingerprint = listFingerprint(unique);
   const name = (isObj(lists.names) && lists.names[fingerprint]) || `l_${fingerprint}`;
@@ -592,11 +885,18 @@ function inList(ctx, lhs, values) {
 // OU entre des conditions, en réunissant dans un même IN celles qui comparent une même colonne à des constantes
 function anyOf(ctx, list) {
   if (!list.length || list.some(x => x === null || x === '1' || x === 'true')) return orJoin(list);
-  const out = []; const groups = new Map();
+  const out = [];
+  const groups = new Map();
   for (const s of list) {
     const e = equalityOf(s);
-    if (!e) { out.push(s); continue; }
-    if (!groups.has(e.lhs)) { groups.set(e.lhs, { lhs: e.lhs, values: [] }); out.push(groups.get(e.lhs)); }
+    if (!e) {
+      out.push(s);
+      continue;
+    }
+    if (!groups.has(e.lhs)) {
+      groups.set(e.lhs, { lhs: e.lhs, values: [] });
+      out.push(groups.get(e.lhs));
+    }
     groups.get(e.lhs).values.push(...e.values);
   }
   return orJoin(out.map(x => (typeof x === 'string' ? x : inList(ctx, x.lhs, x.values))));
@@ -607,35 +907,49 @@ function anyOf(ctx, list) {
  */
 function containsAnyOf(ctx, clauses) {
   if (clauses.length < 2) return null;
-  let field = null; let insensitive = null; const needles = [];
+  let field = null;
+  let insensitive = null;
+  const needles = [];
   for (const c of clauses) {
     if (!isObj(c) || Object.keys(c)[0] !== 'wildcard') return null;
     const [f, raw] = fieldEntry(c.wildcard);
     const pattern = String(isObj(raw) ? (raw.value !== undefined ? raw.value : raw.wildcard) : raw);
     const ci = isObj(raw) && !!raw.case_insensitive;
     const m = /^\*([^*?\\]+)\*$/.exec(pattern);
-    if (!m || (field !== null && (f !== field || ci !== insensitive)) || isTextField(ctx, f) || isArrayField(ctx, f)) return null;
-    field = f; insensitive = ci; needles.push(m[1]);
+    if (!m || (field !== null && (f !== field || ci !== insensitive)) || isTextField(ctx, f) || isArrayField(ctx, f))
+      return null;
+    field = f;
+    insensitive = ci;
+    needles.push(m[1]);
   }
   ctx.stats.ok += clauses.length;
   H(ctx, 'filters', `${field} contient l’un de ${needles.length} motifs`);
-  ctx.notes.add('opt', 'Liste de motifs → multiSearchAny', 'Les motifs *texte* sur un même champ sont cherchés en une passe par multiSearchAny, plutôt que par une suite de LIKE.');
+  ctx.notes.add(
+    'opt',
+    'Liste de motifs → multiSearchAny',
+    'Les motifs *texte* sur un même champ sont cherchés en une passe par multiSearchAny, plutôt que par une suite de LIKE.'
+  );
   return `multiSearchAny${insensitive ? 'CaseInsensitive' : ''}(${mapField(ctx, field)}, [${[...new Set(needles)].map(chStr).join(', ')}])`;
 }
 function conjunctsOf(ctx, q) {
   if (isObj(q) && Object.keys(q)[0] === 'bool') return boolParts(ctx, q.bool).flatMap(splitTopAnd);
-  const s = tq(ctx, q); return s === null ? [] : splitTopAnd(s);
+  const s = tq(ctx, q);
+  return s === null ? [] : splitTopAnd(s);
 }
 function boolParts(ctx, b) {
   const arr = v => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
-  const must = arr(b.must), filter = arr(b.filter), not = arr(b.must_not), should = arr(b.should);
+  const must = arr(b.must),
+    filter = arr(b.filter),
+    not = arr(b.must_not),
+    should = arr(b.should);
   const parts = [];
   for (const c of must.concat(filter)) parts.push(...conjunctsOf(ctx, c));
   if (not.length) {
     ctx.cap.push([]);
     const ns = not.map(c => tq(ctx, c));
     const caught = ctx.cap.pop();
-    if (!ctx.humanOff) caught.forEach(x => (ctx.cap.length ? ctx.cap[ctx.cap.length - 1].push('pas ' + x) : ctx.human.excludes.push(x)));
+    if (!ctx.humanOff)
+      caught.forEach(x => (ctx.cap.length ? ctx.cap[ctx.cap.length - 1].push('pas ' + x) : ctx.human.excludes.push(x)));
     // Chaque clause est niée séparément : (a != x) AND (b != y) se lit mieux que NOT (a = x OR b = y)
     if (ns.some(n => n === null)) parts.push('false');
     else parts.push(...[...new Set(ns)].map(n => negate(ctx, n)));
@@ -644,16 +958,35 @@ function boolParts(ctx, b) {
   if (should.length) {
     let k = msmCount(b.minimum_should_match, should.length);
     if (k === null) k = must.length || filter.length ? 0 : 1;
-    if (k === 0) ctx.notes.add('info', 'Clauses should ignorées', 'À côté de must/filter, les clauses should ne font que moduler le score de pertinence, qui n’existe pas en SQL.');
+    if (k === 0)
+      ctx.notes.add(
+        'info',
+        'Clauses should ignorées',
+        'À côté de must/filter, les clauses should ne font que moduler le score de pertinence, qui n’existe pas en SQL.'
+      );
     else {
       const searches = k === 1 ? containsAnyOf(ctx, should) : null;
-      if (searches) { parts.push(searches); return parts; }
+      if (searches) {
+        parts.push(searches);
+        return parts;
+      }
       ctx.cap.push([]);
       const cs = should.map(c => tq(ctx, c));
       const caught = ctx.cap.pop();
-      if (caught.length) H(ctx, 'filters', k === 1 ? (caught.length > 6 ? `l’une de ${caught.length} conditions` : caught.join(' ou ')) : `au moins ${k} parmi : ${caught.join(', ')}`);
-      if (k === 1) { const o = anyOf(ctx, cs); if (o !== null) parts.push(o); }
-      else if (k >= cs.length) parts.push(...cs.filter(x => x !== null));
+      if (caught.length)
+        H(
+          ctx,
+          'filters',
+          k === 1
+            ? caught.length > 6
+              ? `l’une de ${caught.length} conditions`
+              : caught.join(' ou ')
+            : `au moins ${k} parmi : ${caught.join(', ')}`
+        );
+      if (k === 1) {
+        const o = anyOf(ctx, cs);
+        if (o !== null) parts.push(o);
+      } else if (k >= cs.length) parts.push(...cs.filter(x => x !== null));
       else parts.push(`${cs.map(c => (c === null ? '1' : countable(ctx, c))).join(' + ')} >= ${k}`);
     }
   }
@@ -665,34 +998,61 @@ function rangeClause(ctx, field, spec0) {
     if (spec.from !== undefined && spec.from !== null) spec[spec.include_lower === false ? 'gt' : 'gte'] = spec.from;
     if (spec.to !== undefined && spec.to !== null) spec[spec.include_upper === false ? 'lt' : 'lte'] = spec.to;
   }
-  const tz = spec.time_zone; const fmt = spec.format || '';
+  const tz = spec.time_zone;
+  const fmt = spec.format || '';
   // Champ multivalué : il suffit qu’une valeur soit dans la plage
   const multi = isArrayField(ctx, field);
-  const parts = []; let isDate = false; let lower = null, upper = null; const hum = [];
-  const OPS = [['gte', '>=', '≥'], ['gt', '>', '>'], ['lte', '<=', '≤'], ['lt', '<', '<']];
+  const parts = [];
+  let isDate = false;
+  let lower = null,
+    upper = null;
+  const hum = [];
+  const OPS = [
+    ['gte', '>=', '≥'],
+    ['gt', '>', '>'],
+    ['lte', '<=', '≤'],
+    ['lt', '<', '<']
+  ];
   // Champ date : connu comme tel, ou comparé à une date. Un nombre y est alors un instant en epoch millis.
-  const dateField = isDateField(ctx, field) || !!fmt || OPS.some(([op]) => typeof spec[op] === 'string' && parseDateMath(spec[op]) !== null);
+  const dateField =
+    isDateField(ctx, field) ||
+    !!fmt ||
+    OPS.some(([op]) => typeof spec[op] === 'string' && parseDateMath(spec[op]) !== null);
   // Attribut rangé en chaîne : converti en date ou en nombre selon les bornes, comme Elasticsearch compare selon le type du champ
-  const numeric = OPS.some(([op]) => typeof spec[op] === 'number' || (typeof spec[op] === 'string' && /^-?\d+(\.\d+)?$/.test(spec[op])));
+  const numeric = OPS.some(
+    ([op]) => typeof spec[op] === 'number' || (typeof spec[op] === 'string' && /^-?\d+(\.\d+)?$/.test(spec[op]))
+  );
   const f = fieldAs(ctx, field, dateField ? 'date' : numeric ? 'num' : null);
   // Tableau de bord Grafana : la période entière ($__from, $__to) devient la macro $__timeFilter du plugin ClickHouse,
   // à la milliseconde sur une colonne DateTime64
-  const gt = v => isParamMark(v) && ctx.opts && ctx.opts.grafana ? grafanaTime(paramSource(ctx, v)) : null;
-  if (!multi && gt(spec.gte) === '$__fromTime_ms' && gt(spec.lte) === '$__toTime_ms' && spec.gt === undefined && spec.lt === undefined) {
-    consumeParam(ctx, spec.gte); consumeParam(ctx, spec.lte);
-    const col = fieldColumn(ctx, field); const cols = ctx.cfg.clickhouse.columns || {};
+  const gt = v => (isParamMark(v) && ctx.opts && ctx.opts.grafana ? grafanaTime(paramSource(ctx, v)) : null);
+  if (
+    !multi &&
+    gt(spec.gte) === '$__fromTime_ms' &&
+    gt(spec.lte) === '$__toTime_ms' &&
+    spec.gt === undefined &&
+    spec.lt === undefined
+  ) {
+    consumeParam(ctx, spec.gte);
+    consumeParam(ctx, spec.lte);
+    const col = fieldColumn(ctx, field);
+    const cols = ctx.cfg.clickhouse.columns || {};
     const raw = String(cols[`${ctx.table}.${col}`] || cols[col] || '');
     const macro = /^(Nullable\()?DateTime64/.test(raw) ? '$__timeFilter_ms' : '$__timeFilter';
     const parts2 = [`${macro}(${f})`];
     const timeKey = ctx.cfg.clickhouse.time_key;
     if (timeKey && col === ctx.cfg.clickhouse.time_field) parts2.push(`$__timeFilter(${chIdent(timeKey)})`);
-    ctx.dateFields.add(f); H(ctx, 'period', 'la période du tableau de bord'); ctx.stats.ok++;
+    ctx.dateFields.add(f);
+    H(ctx, 'period', 'la période du tableau de bord');
+    ctx.stats.ok++;
     return andJoin(parts2);
   }
   for (const [op, sym, hs] of OPS) {
     const v = spec[op];
     if (v === undefined || v === null) continue;
-    let sql, s = sym, date = false;
+    let sql,
+      s = sym,
+      date = false;
     const dm = parseDateMath(v);
     const pattern = customDateFormat(fmt);
     if (pattern && typeof v === 'string') {
@@ -702,8 +1062,12 @@ function rangeClause(ctx, field, spec0) {
       const zone = zoneOf(ctx.cfg, tz);
       sql = `parseDateTime64InJodaSyntax(${chStr(v)}, ${chStr(pattern)}${zone ? `, ${chStr(zone)}` : ''})`;
       if ((op === 'gt' || op === 'lte') && !/[Hhkms]/.test(pattern)) {
-        if (!/d/.test(pattern)) throw new Error(`borne ${op} avec le format ${fmt} : l’arrondi au mois ou à l’année est à traduire à la main`);
-        sql += ' + INTERVAL 1 DAY'; s = op === 'gt' ? '>=' : '<';
+        if (!/d/.test(pattern))
+          throw new Error(
+            `borne ${op} avec le format ${fmt} : l’arrondi au mois ou à l’année est à traduire à la main`
+          );
+        sql += ' + INTERVAL 1 DAY';
+        s = op === 'gt' ? '>=' : '<';
       }
       date = true;
     } else if (dm) {
@@ -715,7 +1079,8 @@ function rangeClause(ctx, field, spec0) {
       if (upper2 && dayOnly) sql += ' + INTERVAL 1 DAY';
       if (upper2 && (dm.round || dayOnly)) s = op === 'gt' ? '>=' : '<';
       date = true;
-      if (op[0] === 'g') lower = { dm, v }; else upper = { dm, v };
+      if (op[0] === 'g') lower = { dm, v };
+      else upper = { dm, v };
     } else if (dateField && isParamMark(v) && ctx.opts && ctx.opts.grafana && grafanaTime(paramSource(ctx, v))) {
       // Tableau de bord Grafana : début ou fin de la période, macro du plugin ClickHouse
       consumeParam(ctx, v);
@@ -726,12 +1091,17 @@ function rangeClause(ctx, field, spec0) {
       // essaie les formats dans l’ordre (strict_date_optional_time||epoch_millis) : le premier décide.
       const zone = zoneOf(ctx.cfg, tz);
       const first = String(fmt).split('||')[0];
-      sql = /epoch_millis/.test(first) ? `fromUnixTimestamp64Milli(toInt64(${chStr(v)}))`
-        : /epoch_second/.test(first) ? `toDateTime(toInt64(${chStr(v)}))`
+      sql = /epoch_millis/.test(first)
+        ? `fromUnixTimestamp64Milli(toInt64(${chStr(v)}))`
+        : /epoch_second/.test(first)
+          ? `toDateTime(toInt64(${chStr(v)}))`
           : `parseDateTime64BestEffort(${chStr(v)}, 3${zone ? `, ${chStr(zone)}` : ''})`;
       date = true;
     } else if (dateField && isEpoch(v)) {
-      sql = /epoch_second/.test(fmt) && !/epoch_millis/.test(fmt) ? `toDateTime(${chNum(v, 'date en epoch secondes')})` : epochMillisSQL(v);
+      sql =
+        /epoch_second/.test(fmt) && !/epoch_millis/.test(fmt)
+          ? `toDateTime(${chNum(v, 'date en epoch secondes')})`
+          : epochMillisSQL(v);
       date = true;
     } else if (typeof v === 'string' && /^now|\|\|/.test(v.trim())) {
       // Elasticsearch refuse aussi une expression de date qu’il ne sait pas lire
@@ -742,7 +1112,8 @@ function rangeClause(ctx, field, spec0) {
     // time_key : colonne DateTime égale à toDateTime(time_field), placée dans la clé primaire (TimestampTime des anciens
     // schémas OpenTelemetry). La borne s’y reporte, arrondie à la seconde, pour que ClickHouse écarte les blocs hors période.
     const timeKey = ctx.cfg.clickhouse.time_key;
-    if (date && timeKey && !multi && fieldColumn(ctx, field) === ctx.cfg.clickhouse.time_field) parts.push(`${chIdent(timeKey)} ${s[0] === '>' ? '>=' : '<='} toDateTime(${sql})`);
+    if (date && timeKey && !multi && fieldColumn(ctx, field) === ctx.cfg.clickhouse.time_field)
+      parts.push(`${chIdent(timeKey)} ${s[0] === '>' ? '>=' : '<='} toDateTime(${sql})`);
     hum.push(`${hs} ${date ? humanDate(v) : v}`);
   }
   if (isDate) {
@@ -753,7 +1124,8 @@ function rangeClause(ctx, field, spec0) {
   } else H(ctx, 'filters', `${field} ${hum.join(' et ')}`);
   ctx.stats.ok++;
   if (multi) return `arrayExists(x -> ${parts.join(' AND ')}, ${f})`;
-  if (parts.length === 2 && spec.gte !== undefined && spec.lte !== undefined && !isDate) return `${f} BETWEEN ${chVal(spec.gte)} AND ${chVal(spec.lte)}`;
+  if (parts.length === 2 && spec.gte !== undefined && spec.lte !== undefined && !isDate)
+    return `${f} BETWEEN ${chVal(spec.gte)} AND ${chVal(spec.lte)}`;
   return andJoin(parts);
 }
 // Motif de date personnalisé (dd/MM/yyyy), par opposition aux formats nommés d’Elasticsearch
@@ -781,16 +1153,25 @@ function customDateFormat(fmt) {
  * En mode « tokens » (par défaut), un mot simple n’est cherché que par hasToken : « user » trouve aussi
  * « user_id », ce qu’Elasticsearch ne fait pas. Le mode « strict » ajoute la vérification à chaque mot.
  */
-function esTokens(text, keepCase) {
+export function esTokens(text, keepCase) {
   const chars = [...(keepCase ? String(text) : String(text).toLowerCase())];
-  const letter = c => /\p{L}/u.test(c); const digit = c => /\p{N}/u.test(c);
-  const out = []; let cur = '';
+  const letter = c => /\p{L}/u.test(c);
+  const digit = c => /\p{N}/u.test(c);
+  const out = [];
+  let cur = '';
   for (let i = 0; i < chars.length; i++) {
     const c = chars[i];
-    if (letter(c) || digit(c) || c === '_') { cur += c; continue; }
+    if (letter(c) || digit(c) || c === '_') {
+      cur += c;
+      continue;
+    }
     // Un point ou une apostrophe entre deux lettres, un point ou une virgule entre deux chiffres, ne coupent pas le mot
-    const prev = cur ? chars[i - 1] : ''; const next = chars[i + 1] || '';
-    if (cur && ((/[.'’]/.test(c) && letter(prev) && letter(next)) || (/[.,']/.test(c) && digit(prev) && digit(next)))) { cur += c; continue; }
+    const prev = cur ? chars[i - 1] : '';
+    const next = chars[i + 1] || '';
+    if (cur && ((/[.'’]/.test(c) && letter(prev) && letter(next)) || (/[.,']/.test(c) && digit(prev) && digit(next)))) {
+      cur += c;
+      continue;
+    }
     if (cur) out.push(cur);
     cur = '';
   }
@@ -808,9 +1189,13 @@ const strictText = ctx => ctx.cfg.clickhouse.text_match === 'strict';
  */
 function wordsRegex(tokens, strict, prefix, slop) {
   const W = '\\p{L}\\p{N}_';
-  const first = tokens[0]; const last = tokens[tokens.length - 1];
-  const digitFirst = /^\p{N}/u.test(first); const digitLast = /\p{N}$/u.test(last);
-  let left = `(?:^|[^${W}])`; let right = `(?:$|[^${W}])`; let sep = '[^\\p{L}\\p{N}]+';
+  const first = tokens[0];
+  const last = tokens[tokens.length - 1];
+  const digitFirst = /^\p{N}/u.test(first);
+  const digitLast = /\p{N}$/u.test(last);
+  let left = `(?:^|[^${W}])`;
+  let right = `(?:$|[^${W}])`;
+  let sep = '[^\\p{L}\\p{N}]+';
   if (strict) {
     left = digitFirst ? `(?:^|[^${W}.,']|(?:^|[^\\p{N}])[.,'])` : `(?:^|[^${W}.'’]|(?:^|[^\\p{L}_])[.'’])`;
     right = digitLast ? `(?:$|[^${W}.,']|[.,'](?:$|[^\\p{N}]))` : `(?:$|[^${W}.'’]|[.'’](?:$|[^\\p{L}_]))`;
@@ -826,7 +1211,9 @@ function wordCond(ctx, f, token) {
   const pre = [...new Set(parts)].map(p => hasTok(f, p));
   if (strictText(ctx)) return andJoin(pre.concat([`match(${f}, ${chStr(wordsRegex([token], true, false))})`]));
   // Mot simple : hasToken suffit. Mot à séparateurs : ses fragments doivent en plus se suivre.
-  return parts.length === 1 && parts[0] === token ? pre[0] : andJoin(pre.concat([`positionCaseInsensitiveUTF8(${f}, ${chStr(token)}) > 0`]));
+  return parts.length === 1 && parts[0] === token
+    ? pre[0]
+    : andJoin(pre.concat([`positionCaseInsensitiveUTF8(${f}, ${chStr(token)}) > 0`]));
 }
 // Le document contient ces mots à la suite ; prefix : le dernier n’est qu’un début de mot
 function phraseCond(ctx, f, tokens, prefix, slop) {
@@ -841,19 +1228,34 @@ function matchClause(ctx, field, o, type) {
   const f = mapField(ctx, field);
   if (!isTextField(ctx, field)) {
     ctx.stats.ok++;
-    if (/prefix/.test(type)) { H(ctx, 'filters', `${field} commence par « ${q} »`); return `startsWith(${f}, ${chStr(q)})`; }
+    if (/prefix/.test(type)) {
+      H(ctx, 'filters', `${field} commence par « ${q} »`);
+      return `startsWith(${f}, ${chStr(q)})`;
+    }
     H(ctx, 'filters', `${field} = ${q}`);
     return `${f} = ${valueFor(ctx, field, q)}`;
   }
   textIndexNote(ctx, f);
   const words = esTokens(q);
   // Aucun mot après analyse : aucun document, sauf zero_terms_query: all
-  if (!words.length) { ctx.stats.ok++; return o.zero_terms_query === 'all' ? null : 'false'; }
-  if (!strictText(ctx)) ctx.notes.add('info', 'Recherche plein texte par tokens', 'Chaque mot est cherché par hasToken() dans la colonne mise en minuscules, ce qu’un index text sait exploiter. Un mot simple trouve aussi ses occurrences collées à un autre par « _ », « . » ou une apostrophe (user dans user_id), ce qu’Elasticsearch ne fait pas. Pour une équivalence stricte, clickhouse.text_match: strict ajoute à chaque mot une vérification par expression régulière.');
+  if (!words.length) {
+    ctx.stats.ok++;
+    return o.zero_terms_query === 'all' ? null : 'false';
+  }
+  if (!strictText(ctx))
+    ctx.notes.add(
+      'info',
+      'Recherche plein texte par tokens',
+      'Chaque mot est cherché par hasToken() dans la colonne mise en minuscules, ce qu’un index text sait exploiter. Un mot simple trouve aussi ses occurrences collées à un autre par « _ », « . » ou une apostrophe (user dans user_id), ce qu’Elasticsearch ne fait pas. Pour une équivalence stricte, clickhouse.text_match: strict ajoute à chaque mot une vérification par expression régulière.'
+    );
   if (type === 'match') {
     if (o.fuzziness !== undefined && String(o.fuzziness) !== '0') {
       ctx.stats.approx++;
-      ctx.notes.add('warn', 'Fuzziness ignorée', `La tolérance aux fautes de frappe sur « ${field} » est ignorée : recherche exacte par token. Voir ngramDistance() si nécessaire.`);
+      ctx.notes.add(
+        'warn',
+        'Fuzziness ignorée',
+        `La tolérance aux fautes de frappe sur « ${field} » est ignorée : recherche exacte par token. Voir ngramDistance() si nécessaire.`
+      );
     } else ctx.stats.ok++;
     const unique = [...new Set(words)];
     const conds = unique.map(w => wordCond(ctx, f, w));
@@ -861,7 +1263,8 @@ function matchClause(ctx, field, o, type) {
     H(ctx, 'text', `${field} contient ${unique.map(t => `« ${t} »`).join(op === 'and' ? ' et ' : ' ou ')}`);
     if (op === 'and') return andJoin(conds);
     const k = msmCount(o.minimum_should_match, conds.length);
-    if (k && k > 1) return k >= conds.length ? andJoin(conds) : `${conds.map(c => countable(ctx, c)).join(' + ')} >= ${k}`;
+    if (k && k > 1)
+      return k >= conds.length ? andJoin(conds) : `${conds.map(c => countable(ctx, c)).join(' + ')} >= ${k}`;
     return orJoin(conds);
   }
   ctx.stats.ok++;
@@ -871,39 +1274,72 @@ function matchClause(ctx, field, o, type) {
     // Mots dans l’ordre, avec au plus slop mots entre deux : exact pour deux mots et slop 1. Elasticsearch accepte
     // aussi les mots inversés (dès slop 2), et compte le slop sur toute la phrase, pas entre chaque paire.
     if (slop && words.length > 1 && (slop >= 2 || words.length > 2)) {
-      ctx.stats.ok--; ctx.stats.approx++;
-      ctx.notes.add('warn', `Proximité (slop ${slop}) sur ${field}`, 'Les mots sont cherchés dans l’ordre, avec au plus ' + slop + ' mots entre deux. Elasticsearch trouve aussi les mots inversés et répartit le slop sur toute la phrase.');
+      ctx.stats.ok--;
+      ctx.stats.approx++;
+      ctx.notes.add(
+        'warn',
+        `Proximité (slop ${slop}) sur ${field}`,
+        'Les mots sont cherchés dans l’ordre, avec au plus ' +
+          slop +
+          ' mots entre deux. Elasticsearch trouve aussi les mots inversés et répartit le slop sur toute la phrase.'
+      );
     }
     return phraseCond(ctx, f, words, false, slop);
   }
   H(ctx, 'text', `${field} contient « ${String(q).trim()}… »`);
   if (type === 'match_phrase_prefix') return phraseCond(ctx, f, words, true);
   // match_bool_prefix : chaque mot peut suffire, le dernier n’étant qu’un début de mot
-  return orJoin(words.slice(0, -1).map(w => wordCond(ctx, f, w)).concat([phraseCond(ctx, f, words.slice(-1), true)]));
+  return orJoin(
+    words
+      .slice(0, -1)
+      .map(w => wordCond(ctx, f, w))
+      .concat([phraseCond(ctx, f, words.slice(-1), true)])
+  );
 }
 function tq(ctx, q) {
   // « filtering » signale à mapField qu’un champ est lu depuis une clause de requête
   ctx.filtering = (ctx.filtering || 0) + 1;
-  try { return clauseSQL(ctx, q); }
-  finally { ctx.filtering--; }
+  try {
+    return clauseSQL(ctx, q);
+  } finally {
+    ctx.filtering--;
+  }
 }
 function clauseSQL(ctx, q) {
   if (!isObj(q) || !Object.keys(q).length) return null;
-  const type = Object.keys(q)[0]; const body = q[type];
+  const type = Object.keys(q)[0];
+  const body = q[type];
   switch (type) {
-    case 'match_all': ctx.stats.ok++; return null;
-    case 'match_none': ctx.stats.ok++; return 'false';
-    case 'bool': return andJoin(boolParts(ctx, body));
+    case 'match_all':
+      ctx.stats.ok++;
+      return null;
+    case 'match_none':
+      ctx.stats.ok++;
+      return 'false';
+    case 'bool':
+      return andJoin(boolParts(ctx, body));
     case 'term': {
       const [field, raw] = fieldEntry(body);
-      let v = raw, ci = false;
-      if (isObj(raw)) { v = raw.value; ci = !!raw.case_insensitive; }
+      let v = raw,
+        ci = false;
+      if (isObj(raw)) {
+        v = raw.value;
+        ci = !!raw.case_insensitive;
+      }
       H(ctx, 'filters', `${field} = ${v}`);
       const sources = ci ? undefined : runtimeFilter(ctx, field, [v]);
-      if (sources !== undefined) { ctx.stats.ok++; return sources; }
-      const f = mapField(ctx, field); ctx.stats.ok++;
+      if (sources !== undefined) {
+        ctx.stats.ok++;
+        return sources;
+      }
+      const f = mapField(ctx, field);
+      ctx.stats.ok++;
       // Champ texte : term compare la valeur, sans l’analyser, à chacun des mots (en minuscules) du champ
-      if (isTextField(ctx, field) && !ci) { textIndexNote(ctx, f); const t = esTokens(String(v)); return t.length === 1 && t[0] === String(v) ? wordCond(ctx, f, t[0]) : 'false'; }
+      if (isTextField(ctx, field) && !ci) {
+        textIndexNote(ctx, f);
+        const t = esTokens(String(v));
+        return t.length === 1 && t[0] === String(v) ? wordCond(ctx, f, t[0]) : 'false';
+      }
       if (ci) return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(v))}`);
       // Date donnée en epoch millis, comme dans range
       if (typeof v === 'number' && isDateField(ctx, field)) return `${f} = ${epochMillisSQL(v)}`;
@@ -915,29 +1351,60 @@ function clauseSQL(ctx, q) {
     }
     case 'terms': {
       const [field, vals] = fieldEntry(body);
-      if (!Array.isArray(vals)) return todo(ctx, 'terms lookup', 'La recherche de termes dans un autre index demande une sous-requête ClickHouse (IN (SELECT …)) écrite à la main.');
+      if (!Array.isArray(vals))
+        return todo(
+          ctx,
+          'terms lookup',
+          'La recherche de termes dans un autre index demande une sous-requête ClickHouse (IN (SELECT …)) écrite à la main.'
+        );
       H(ctx, 'filters', `${field} ∈ {${vals.slice(0, 4).join(', ')}${vals.length > 4 ? '…' : ''}}`);
       const sources = runtimeFilter(ctx, field, vals);
-      if (sources !== undefined) { ctx.stats.ok++; return sources; }
-      const f = mapField(ctx, field); ctx.stats.ok++;
-      if (isArrayField(ctx, field)) return vals.length === 1 ? `has(${f}, ${chVal(vals[0])})` : `hasAny(${f}, [${vals.map(chVal).join(', ')}])`;
+      if (sources !== undefined) {
+        ctx.stats.ok++;
+        return sources;
+      }
+      const f = mapField(ctx, field);
+      ctx.stats.ok++;
+      if (isArrayField(ctx, field))
+        return vals.length === 1 ? `has(${f}, ${chVal(vals[0])})` : `hasAny(${f}, [${vals.map(chVal).join(', ')}])`;
       const ft = fieldType(ctx, field);
-      const listed = inList(ctx, f, vals.map(v => (typeof v === 'number' && isDateField(ctx, field) ? epochMillisSQL(v) : valueFor(ctx, field, v))));
+      const listed = inList(
+        ctx,
+        f,
+        vals.map(v => (typeof v === 'number' && isDateField(ctx, field) ? epochMillisSQL(v) : valueFor(ctx, field, v)))
+      );
       // Attribut d’une Map : la chaîne vide est aussi la valeur d’une clé absente
       return vals.includes('') && ft && ft.presence ? `${ft.presence} AND ${paren(listed, 'AND')}` : listed;
     }
-    case 'range': { const [field, spec] = fieldEntry(body); return rangeClause(ctx, field, spec); }
+    case 'range': {
+      const [field, spec] = fieldEntry(body);
+      return rangeClause(ctx, field, spec);
+    }
     case 'exists': {
-      const f = mapField(ctx, body.field); const type = fieldType(ctx, body.field);
+      const f = mapField(ctx, body.field);
+      const type = fieldType(ctx, body.field);
       H(ctx, 'filters', `${body.field} renseigné`);
       // Un champ existe s’il a au moins une valeur : tableau non vide, colonne non NULL, ou chaîne non vide selon la convention
-      if (type && type.array) { ctx.stats.ok++; return `notEmpty(${f})`; }
+      if (type && type.array) {
+        ctx.stats.ok++;
+        return `notEmpty(${f})`;
+      }
       // Attribut : clé présente dans la Map, chemin JSON renseigné
-      if (type && type.presence) { ctx.stats.ok++; return type.presence; }
-      if (type && !type.nullable && emptyIsMissing(ctx, type)) { ctx.stats.ok++; return `${f} != ''`; }
+      if (type && type.presence) {
+        ctx.stats.ok++;
+        return type.presence;
+      }
+      if (type && !type.nullable && emptyIsMissing(ctx, type)) {
+        ctx.stats.ok++;
+        return `${f} != ''`;
+      }
       if (type && !type.nullable) {
         ctx.stats.approx++;
-        ctx.notes.add('warn', `exists sur ${body.field}`, 'La colonne n’est pas Nullable : un champ absent y prend la valeur par défaut et ne se distingue plus d’un champ renseigné, la condition est donc toujours vraie. Si la chaîne vide représente l’absence, activez clickhouse.empty_as_missing.');
+        ctx.notes.add(
+          'warn',
+          `exists sur ${body.field}`,
+          'La colonne n’est pas Nullable : un champ absent y prend la valeur par défaut et ne se distingue plus d’un champ renseigné, la condition est donc toujours vraie. Si la chaîne vide représente l’absence, activez clickhouse.empty_as_missing.'
+        );
         return `isNotNull(${f})`;
       }
       ctx.stats.ok++;
@@ -946,12 +1413,18 @@ function clauseSQL(ctx, q) {
     }
     case 'prefix': {
       const [field, raw] = fieldEntry(body);
-      const v = isObj(raw) ? raw.value : raw; const ci = isObj(raw) && raw.case_insensitive;
+      const v = isObj(raw) ? raw.value : raw;
+      const ci = isObj(raw) && raw.case_insensitive;
       ctx.stats.ok++;
       H(ctx, 'filters', `${field} commence par « ${v} »`);
       // Champ texte : l’un des mots commence par la valeur, comme pour fuzzy
-      if (isTextField(ctx, field)) { const f = mapField(ctx, field); return `arrayExists(t -> startsWith(t, ${chStr(ci ? asciiLower(v) : v)}), tokens(lowerUTF8(${f})))`; }
-      return onValues(ctx, field, x => (ci ? `startsWith(lower(${x}), ${chStr(asciiLower(v))})` : `startsWith(${x}, ${chStr(v)})`));
+      if (isTextField(ctx, field)) {
+        const f = mapField(ctx, field);
+        return `arrayExists(t -> startsWith(t, ${chStr(ci ? asciiLower(v) : v)}), tokens(lowerUTF8(${f})))`;
+      }
+      return onValues(ctx, field, x =>
+        ci ? `startsWith(lower(${x}), ${chStr(asciiLower(v))})` : `startsWith(${x}, ${chStr(v)})`
+      );
     }
     case 'wildcard': {
       const [field, raw] = fieldEntry(body);
@@ -965,13 +1438,23 @@ function clauseSQL(ctx, q) {
         else if (v[i] === '*' || v[i] === '?') toks.push({ wild: v[i] });
         else toks.push({ lit: v[i] });
       }
-      const wild = toks.some(t => t.wild); const plain = toks.map(t => t.lit || '').join('');
+      const wild = toks.some(t => t.wild);
+      const plain = toks.map(t => t.lit || '').join('');
       if (toks.length === 1 && toks[0].wild === '*') return tq(ctx, { exists: { field } });
       H(ctx, 'filters', `${field} ~ ${v}`);
-      if (!wild && ci) { ctx.stats.ok++; return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(plain))}`); }
-      if (!wild) { ctx.stats.ok++; return isArrayField(ctx, field) ? `has(${f}, ${chStr(plain)})` : `${f} = ${chStr(plain)}`; }
+      if (!wild && ci) {
+        ctx.stats.ok++;
+        return onValues(ctx, field, x => `lower(${x}) = ${chStr(asciiLower(plain))}`);
+      }
+      if (!wild) {
+        ctx.stats.ok++;
+        return isArrayField(ctx, field) ? `has(${f}, ${chStr(plain)})` : `${f} = ${chStr(plain)}`;
+      }
       const prefixOnly = toks.length > 1 && toks[toks.length - 1].wild === '*' && toks.slice(0, -1).every(t => !t.wild);
-      if (prefixOnly && !ci && !isTextField(ctx, field)) { ctx.stats.ok++; return onValues(ctx, field, x => `startsWith(${x}, ${chStr(plain)})`); }
+      if (prefixOnly && !ci && !isTextField(ctx, field)) {
+        ctx.stats.ok++;
+        return onValues(ctx, field, x => `startsWith(${x}, ${chStr(plain)})`);
+      }
       const like = toks.map(t => (t.wild ? (t.wild === '*' ? '%' : '_') : likeEscape(t.lit))).join('');
       if (toks[0].wild) ctx.leadingWildcard = f;
       if (isTextField(ctx, field)) {
@@ -979,7 +1462,9 @@ function clauseSQL(ctx, q) {
         ctx.stats.ok++;
         textIndexNote(ctx, f);
         const W = '[\\p{L}\\p{N}_]';
-        const pattern = toks.map(t => (t.wild === '*' ? `${W}*` : t.wild === '?' ? W : escRe(t.lit.toLowerCase()))).join('');
+        const pattern = toks
+          .map(t => (t.wild === '*' ? `${W}*` : t.wild === '?' ? W : escRe(t.lit.toLowerCase())))
+          .join('');
         return `match(${f}, ${chStr(`(?i)(?:^|[^\\p{L}\\p{N}_])${pattern}(?:$|[^\\p{L}\\p{N}_])`)})`;
       }
       ctx.stats.ok++;
@@ -992,9 +1477,21 @@ function clauseSQL(ctx, q) {
       const v = String(isObj(raw) ? raw.value : raw);
       const ci = isObj(raw) && raw.case_insensitive;
       const f = mapField(ctx, field);
-      if (/[@#&~<>]/.test(v)) { ctx.stats.approx++; ctx.notes.add('warn', 'Syntaxe regexp Lucene', 'Les opérateurs Lucene @ # & ~ <n-m> n’existent pas en RE2 : vérifiez l’expression.'); }
-      else if (ci && /[^\x00-\x7f]/.test(v)) { ctx.stats.approx++; ctx.notes.add('warn', 'regexp insensible à la casse', 'ClickHouse replie la casse des lettres accentuées du motif. Elasticsearch le fait selon sa version : oui en 9.5, non en 7.17 et 8.19, où « É » ne trouve pas « é ».'); }
-      else ctx.stats.ok++;
+      if (/[@#&~<>]/.test(v)) {
+        ctx.stats.approx++;
+        ctx.notes.add(
+          'warn',
+          'Syntaxe regexp Lucene',
+          'Les opérateurs Lucene @ # & ~ <n-m> n’existent pas en RE2 : vérifiez l’expression.'
+        );
+      } else if (ci && /[^\x00-\x7f]/.test(v)) {
+        ctx.stats.approx++;
+        ctx.notes.add(
+          'warn',
+          'regexp insensible à la casse',
+          'ClickHouse replie la casse des lettres accentuées du motif. Elasticsearch le fait selon sa version : oui en 9.5, non en 7.17 et 8.19, où « É » ne trouve pas « é ».'
+        );
+      } else ctx.stats.ok++;
       H(ctx, 'filters', `${field} correspond à /${v}/`);
       const re = chStr('^(?:' + (ci ? regexFoldCase(v) : v) + ')$');
       // Champ texte : l’expression porte sur chacun des mots, comme pour fuzzy
@@ -1004,22 +1501,35 @@ function clauseSQL(ctx, q) {
     case 'fuzzy': {
       const [field, raw] = fieldEntry(body);
       const o = isObj(raw) ? raw : {};
-      const v = String(isObj(raw) ? raw.value : raw); const len = [...v].length;
+      const v = String(isObj(raw) ? raw.value : raw);
+      const len = [...v].length;
       // AUTO, ou AUTO:bas,haut : distance 0 sous « bas » caractères, 1 sous « haut », 2 au-delà
-      const fz = String(o.fuzziness !== undefined ? o.fuzziness : 'AUTO'); const auto = /^AUTO(?::(\d+),(\d+))?$/i.exec(fz);
-      const lo = auto && auto[1] ? +auto[1] : 3; const hi = auto && auto[2] ? +auto[2] : 6;
+      const fz = String(o.fuzziness !== undefined ? o.fuzziness : 'AUTO');
+      const auto = /^AUTO(?::(\d+),(\d+))?$/i.exec(fz);
+      const lo = auto && auto[1] ? +auto[1] : 3;
+      const hi = auto && auto[2] ? +auto[2] : 6;
       // prefix_length : les n premiers caractères doivent être identiques ; au-delà de la longueur, la valeur exacte
       const n = +o.prefix_length || 0;
       const d = n >= len ? 0 : /^\d+$/.test(fz) ? +fz : len < lo ? 0 : len < hi ? 1 : 2;
-      const f = mapField(ctx, field); ctx.stats.approx++;
-      ctx.notes.add('info', 'fuzzy → distance d’édition', 'Distance calculée à la volée (editDistanceUTF8 et damerauLevenshteinDistance) : coûteux sur de gros volumes, à combiner avec un filtre sélectif. L’inversion de deux lettres accentuées compte pour deux modifications, pour une seule chez Elasticsearch. max_expansions est sans objet : tous les termes proches sont trouvés.');
+      const f = mapField(ctx, field);
+      ctx.stats.approx++;
+      ctx.notes.add(
+        'info',
+        'fuzzy → distance d’édition',
+        'Distance calculée à la volée (editDistanceUTF8 et damerauLevenshteinDistance) : coûteux sur de gros volumes, à combiner avec un filtre sélectif. L’inversion de deux lettres accentuées compte pour deux modifications, pour une seule chez Elasticsearch. max_expansions est sans objet : tous les termes proches sont trouvés.'
+      );
       H(ctx, 'filters', `${field} ≈ ${v}`);
       // Elasticsearch compte l’inversion de deux lettres voisines pour une modification (transpositions: true par défaut).
       // damerauLevenshteinDistance le fait mais compte en octets : least() garde editDistanceUTF8 pour les lettres
       // accentuées, où une transposition reste comptée deux fois.
-      const dist = (a, b) => (o.transpositions === false ? `editDistanceUTF8(${a}, ${b})` : `least(editDistanceUTF8(${a}, ${b}), damerauLevenshteinDistance(${a}, ${b}))`);
+      const dist = (a, b) =>
+        o.transpositions === false
+          ? `editDistanceUTF8(${a}, ${b})`
+          : `least(editDistanceUTF8(${a}, ${b}), damerauLevenshteinDistance(${a}, ${b}))`;
       // Avec un préfixe commun, la distance des termes entiers est celle des suffixes : startsWith() suffit
-      const near = (x, val) => (n > 0 && d > 0 ? `startsWith(${x}, ${chStr([...val].slice(0, n).join(''))}) AND ` : '') + `${dist(x, chStr(val))} <= ${d}`;
+      const near = (x, val) =>
+        (n > 0 && d > 0 ? `startsWith(${x}, ${chStr([...val].slice(0, n).join(''))}) AND ` : '') +
+        `${dist(x, chStr(val))} <= ${d}`;
       if (isTextField(ctx, field)) return `arrayExists(t -> ${near('t', v.toLowerCase())}, tokens(lowerUTF8(${f})))`;
       return near(f, v);
     }
@@ -1027,46 +1537,112 @@ function clauseSQL(ctx, q) {
       ctx.stats.ok++;
       return `${mapField(ctx, '_id')} IN (${(body.values || []).map(chVal).join(', ')})`;
     }
-    case 'match': case 'match_phrase': case 'match_phrase_prefix': case 'match_bool_prefix': {
+    case 'match':
+    case 'match_phrase':
+    case 'match_phrase_prefix':
+    case 'match_bool_prefix': {
       const [field, raw] = fieldEntry(body);
       return matchClause(ctx, field, isObj(raw) ? raw : { query: raw }, type);
     }
-    case 'multi_match': case 'combined_fields': {
+    case 'multi_match':
+    case 'combined_fields': {
       let fields = (body.fields || ['*']).map(f => String(f).replace(/\^[\d.]+$/, ''));
-      if (fields.some(f => f.includes('*') && f !== '*')) ctx.notes.add('warn', 'Champs à motif', 'Les noms de champs avec * sont remplacés par les champs texte de la configuration.');
+      if (fields.some(f => f.includes('*') && f !== '*'))
+        ctx.notes.add(
+          'warn',
+          'Champs à motif',
+          'Les noms de champs avec * sont remplacés par les champs texte de la configuration.'
+        );
       fields = [...new Set(fields.flatMap(f => (f.includes('*') ? textFieldsOr(ctx) : [f])))];
       const mtype = body.type || 'best_fields';
       const op = String(body.operator || 'or').toLowerCase();
-      if (/phrase/.test(mtype)) return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query }, mtype === 'phrase' ? 'match_phrase' : 'match_phrase_prefix')));
+      if (/phrase/.test(mtype))
+        return orJoin(
+          fields.map(f =>
+            matchClause(ctx, f, { query: body.query }, mtype === 'phrase' ? 'match_phrase' : 'match_phrase_prefix')
+          )
+        );
       // bool_prefix : chaque mot peut suffire, dans n’importe quel champ, le dernier n’étant qu’un début de mot
-      if (mtype === 'bool_prefix') return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query }, 'match_bool_prefix')));
+      if (mtype === 'bool_prefix')
+        return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query }, 'match_bool_prefix')));
       // cross_fields et combined_fields : les mots peuvent se répartir entre les champs.
       // best_fields et most_fields avec and : tous les mots dans un même champ (branche finale).
       if (type === 'combined_fields' || (op === 'and' && mtype === 'cross_fields')) {
         const toks = [...new Set(esTokens(body.query))];
-        const tf = fields.filter(f => isTextField(ctx, f)); const kf = fields.filter(f => !isTextField(ctx, f));
+        const tf = fields.filter(f => isTextField(ctx, f));
+        const kf = fields.filter(f => !isTextField(ctx, f));
         ctx.stats.ok++;
         tf.forEach(f => textIndexNote(ctx, mapField(ctx, f)));
         H(ctx, 'text', `${fields.join(', ')} contiennent ${toks.map(t => `« ${t} »`).join(' et ')}`);
-        const tokConds = tf.length ? andJoin(toks.map(t => orJoin(tf.map(f => wordCond(ctx, mapField(ctx, f), t))))) : null;
-        return orJoin([tokConds].concat(kf.map(f => `${mapField(ctx, f)} = ${chVal(body.query)}`)).filter(x => x !== null));
+        const tokConds = tf.length
+          ? andJoin(toks.map(t => orJoin(tf.map(f => wordCond(ctx, mapField(ctx, f), t)))))
+          : null;
+        return orJoin(
+          [tokConds].concat(kf.map(f => `${mapField(ctx, f)} = ${chVal(body.query)}`)).filter(x => x !== null)
+        );
       }
-      return orJoin(fields.map(f => matchClause(ctx, f, { query: body.query, operator: body.operator, minimum_should_match: body.minimum_should_match, fuzziness: body.fuzziness, zero_terms_query: body.zero_terms_query }, 'match')));
+      return orJoin(
+        fields.map(f =>
+          matchClause(
+            ctx,
+            f,
+            {
+              query: body.query,
+              operator: body.operator,
+              minimum_should_match: body.minimum_should_match,
+              fuzziness: body.fuzziness,
+              zero_terms_query: body.zero_terms_query
+            },
+            'match'
+          )
+        )
+      );
     }
-    case 'query_string': case 'simple_query_string': {
-      const defFields = body.default_field ? (body.default_field === '*' ? textFieldsOr(ctx) : [body.default_field]) : body.fields ? body.fields.map(f => String(f).replace(/\^[\d.]+$/, '')) : textFieldsOr(ctx);
+    case 'query_string':
+    case 'simple_query_string': {
+      const defFields = body.default_field
+        ? body.default_field === '*'
+          ? textFieldsOr(ctx)
+          : [body.default_field]
+        : body.fields
+          ? body.fields.map(f => String(f).replace(/\^[\d.]+$/, ''))
+          : textFieldsOr(ctx);
       const simple = type === 'simple_query_string';
       // « * » seul, sur tous les champs (défaut d’Elasticsearch, index.query.default_field: *) : tous les documents
-      if (!body.fields && (!body.default_field || body.default_field === '*') && /^\s*\*\s*$/.test(String(body.query || ''))) { ctx.stats.ok++; return null; }
+      if (
+        !body.fields &&
+        (!body.default_field || body.default_field === '*') &&
+        /^\s*\*\s*$/.test(String(body.query || ''))
+      ) {
+        ctx.stats.ok++;
+        return null;
+      }
       let ast;
-      try { ast = simple ? simpleQueryParse(body.query, body.default_operator) : luceneParse(body.query, body.default_operator); }
-      catch (e) { return todo(ctx, 'query_string', `${e.message} — requête : ${body.query}`); }
-      if (ast === null) { ctx.stats.ok++; return 'false'; }
+      try {
+        ast = simple
+          ? simpleQueryParse(body.query, body.default_operator)
+          : luceneParse(body.query, body.default_operator);
+      } catch (e) {
+        return todo(ctx, 'query_string', `${e.message} — requête : ${body.query}`);
+      }
+      if (ast === null) {
+        ctx.stats.ok++;
+        return 'false';
+      }
       ctx.cap.push([]);
       // Options des termes « mot~ » : transmises à chaque fuzzy produit
       const outer = ctx.fuzzyOpts;
-      ctx.fuzzyOpts = { prefix_length: body.fuzzy_prefix_length, transpositions: body.fuzzy_transpositions, fuzziness: simple ? undefined : body.fuzziness };
-      const out = luceneSQL(ctx, ast, defFields, simple ? (c, f, tok) => simpleLeaf(c, f, tok, body.default_operator) : luceneLeaf);
+      ctx.fuzzyOpts = {
+        prefix_length: body.fuzzy_prefix_length,
+        transpositions: body.fuzzy_transpositions,
+        fuzziness: simple ? undefined : body.fuzziness
+      };
+      const out = luceneSQL(
+        ctx,
+        ast,
+        defFields,
+        simple ? (c, f, tok) => simpleLeaf(c, f, tok, body.default_operator) : luceneLeaf
+      );
       ctx.fuzzyOpts = outer;
       ctx.cap.pop();
       H(ctx, 'text', `la recherche « ${body.query} » est satisfaite`);
@@ -1074,33 +1650,74 @@ function clauseSQL(ctx, q) {
     }
     case 'nested': {
       ctx.stats.approx++;
-      ctx.notes.add('warn', `Requête nested (${body.path})`, 'Les objets nested deviennent des colonnes Array ou Nested : remplacez la condition à plat par arrayExists((x, y) -> …, col.x, col.y) pour garder la corrélation entre sous-champs.');
+      ctx.notes.add(
+        'warn',
+        `Requête nested (${body.path})`,
+        'Les objets nested deviennent des colonnes Array ou Nested : remplacez la condition à plat par arrayExists((x, y) -> …, col.x, col.y) pour garder la corrélation entre sous-champs.'
+      );
       return tq(ctx, body.query);
     }
-    case 'constant_score': return tq(ctx, body.filter);
-    case 'dis_max': return anyOf(ctx, (body.queries || []).map(x => tq(ctx, x)));
-    case 'function_score': case 'script_score':
-      ctx.notes.add('info', `${type} : score ignoré`, 'Le calcul de score n’a pas d’équivalent : seule la requête filtrante est conservée.');
+    case 'constant_score':
+      return tq(ctx, body.filter);
+    case 'dis_max':
+      return anyOf(
+        ctx,
+        (body.queries || []).map(x => tq(ctx, x))
+      );
+    case 'function_score':
+    case 'script_score':
+      ctx.notes.add(
+        'info',
+        `${type} : score ignoré`,
+        'Le calcul de score n’a pas d’équivalent : seule la requête filtrante est conservée.'
+      );
       return tq(ctx, body.query || { match_all: {} });
     case 'boosting':
-      ctx.notes.add('info', 'boosting : partie négative ignorée', 'La partie negative ne fait que baisser le score ; seule la partie positive filtre.');
+      ctx.notes.add(
+        'info',
+        'boosting : partie négative ignorée',
+        'La partie negative ne fait que baisser le score ; seule la partie positive filtre.'
+      );
       return tq(ctx, body.positive);
     case 'script': {
-      const sc = body.script || body; const src = typeof sc === 'string' ? sc : sc.source;
-      try { const r = painlessToSQL(ctx, src, { mode: 'expr', params: sc.params || {} }); ctx.stats.ok++; H(ctx, 'filters', 'condition scriptée'); return r.sql; }
-      catch (e) { return todo(ctx, 'script de requête', e.message); }
+      const sc = body.script || body;
+      const src = typeof sc === 'string' ? sc : sc.source;
+      try {
+        const r = painlessToSQL(ctx, src, { mode: 'expr', params: sc.params || {} });
+        ctx.stats.ok++;
+        H(ctx, 'filters', 'condition scriptée');
+        return r.sql;
+      } catch (e) {
+        return todo(ctx, 'script de requête', e.message);
+      }
     }
     case 'geo_distance': {
-      const field = Object.keys(body).find(k => !['distance', 'distance_type', 'validation_method', '_name', 'boost', 'ignore_unmapped'].includes(k));
-      let pt = body[field]; let lat, lon;
-      if (Array.isArray(pt)) [lon, lat] = pt; else if (isObj(pt)) ({ lat, lon } = pt); else if (typeof pt === 'string') [lat, lon] = pt.split(',').map(Number);
-      lat = chNum(lat, 'geo_distance (latitude)'); lon = chNum(lon, 'geo_distance (longitude)');
+      const field = Object.keys(body).find(
+        k => !['distance', 'distance_type', 'validation_method', '_name', 'boost', 'ignore_unmapped'].includes(k)
+      );
+      let pt = body[field];
+      let lat, lon;
+      if (Array.isArray(pt)) [lon, lat] = pt;
+      else if (isObj(pt)) ({ lat, lon } = pt);
+      else if (typeof pt === 'string') [lat, lon] = pt.split(',').map(Number);
+      lat = chNum(lat, 'geo_distance (latitude)');
+      lon = chNum(lon, 'geo_distance (longitude)');
       const meters = geoMeters(body.distance);
       const gt = fieldTarget(ctx, field);
       // Un attribut (Map ou JSON) n'est pas un Point : .1 et .2 y échoueraient à l'exécution
-      if (gt.kind === 'attr') return todo(ctx, 'geo_distance', `« ${field} » est un attribut (${gt.column}) : une position n’y est pas un Point ClickHouse. Rangez-la dans une colonne Point (lon, lat) ou dans deux colonnes, et adaptez la requête.`);
-      const f = mapField(ctx, field); ctx.stats.approx++;
-      ctx.notes.add('warn', 'geo_distance', `Suppose une colonne Point (lon, lat) « ${field} ». Adaptez si la position est stockée en deux colonnes.`);
+      if (gt.kind === 'attr')
+        return todo(
+          ctx,
+          'geo_distance',
+          `« ${field} » est un attribut (${gt.column}) : une position n’y est pas un Point ClickHouse. Rangez-la dans une colonne Point (lon, lat) ou dans deux colonnes, et adaptez la requête.`
+        );
+      const f = mapField(ctx, field);
+      ctx.stats.approx++;
+      ctx.notes.add(
+        'warn',
+        'geo_distance',
+        `Suppose une colonne Point (lon, lat) « ${field} ». Adaptez si la position est stockée en deux colonnes.`
+      );
       H(ctx, 'filters', `${field} à moins de ${body.distance}`);
       // Formule d’Elasticsearch (haversine, rayon moyen de 6 371 008,7714 m) : geoDistance() suit l’ellipsoïde
       // et greatCircleDistance() un autre rayon, d’où des points en bord de cercle classés autrement.
@@ -1114,22 +1731,50 @@ function clauseSQL(ctx, q) {
 }
 function luceneSQL(ctx, n, defFields, leaf) {
   // « a OR b OR c » est analysé en ((a OR b) OR c) : les opérandes sont remis à plat avant d’être réunis
-  const operands = op => (function flat(x) { return x.op === op ? x.a.flatMap(flat) : [x]; })(n).map(x => luceneSQL(ctx, x, defFields, leaf));
+  const operands = op =>
+    (function flat(x) {
+      return x.op === op ? x.a.flatMap(flat) : [x];
+    })(n).map(x => luceneSQL(ctx, x, defFields, leaf));
   if (n.op === 'and') return andJoin(operands('and'));
   if (n.op === 'or') return anyOf(ctx, operands('or'));
-  if (n.op === 'not') { const s = luceneSQL(ctx, n.a[0], defFields, leaf); ctx.schemaGaps.add('must_not'); return s === null ? 'false' : negate(ctx, s); }
+  if (n.op === 'not') {
+    const s = luceneSQL(ctx, n.a[0], defFields, leaf);
+    ctx.schemaGaps.add('must_not');
+    return s === null ? 'false' : negate(ctx, s);
+  }
   const fields = n.field ? [n.field] : defFields;
   return orJoin(fields.map(f => leaf(ctx, f, n.tok)));
 }
 // Distance de geo_distance en mètres, lue comme Elasticsearch (DistanceUnit) : nombre, suffixe d’unité facultatif
 // (mètres par défaut) ; une unité inconnue fait refuser la requête, comme Elasticsearch la refuse
-const GEO_UNITS = [[['in', 'inch'], 0.0254], [['yd', 'yards'], 0.9144], [['ft', 'feet'], 0.3048], [['km', 'kilometers'], 1000], [['NM', 'nmi', 'nauticalmiles'], 1852], [['mm', 'millimeters'], 0.001], [['cm', 'centimeters'], 0.01], [['mi', 'miles'], 1609.344], [['m', 'meters'], 1]];
+const GEO_UNITS = [
+  [['in', 'inch'], 0.0254],
+  [['yd', 'yards'], 0.9144],
+  [['ft', 'feet'], 0.3048],
+  [['km', 'kilometers'], 1000],
+  [['NM', 'nmi', 'nauticalmiles'], 1852],
+  [['mm', 'millimeters'], 0.001],
+  [['cm', 'centimeters'], 0.01],
+  [['mi', 'miles'], 1609.344],
+  [['m', 'meters'], 1]
+];
 function geoMeters(distance) {
   if (typeof distance === 'number' && Number.isFinite(distance)) return distance;
   const s = String(distance).trim();
-  let num = s, factor = 1;
-  for (const [names, f] of GEO_UNITS) { const u = names.find(n => s.endsWith(n)); if (u) { num = s.slice(0, -u.length).trim(); factor = f; break; } }
-  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(num)) throw new Error(`geo_distance : distance illisible ${JSON.stringify(distance)} (unités : ${GEO_UNITS.flatMap(u => u[0]).join(', ')})`);
+  let num = s,
+    factor = 1;
+  for (const [names, f] of GEO_UNITS) {
+    const u = names.find(n => s.endsWith(n));
+    if (u) {
+      num = s.slice(0, -u.length).trim();
+      factor = f;
+      break;
+    }
+  }
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(num))
+    throw new Error(
+      `geo_distance : distance illisible ${JSON.stringify(distance)} (unités : ${GEO_UNITS.flatMap(u => u[0]).join(', ')})`
+    );
   return Number((Number(num) * factor).toPrecision(12));
 }
 // Terme « mot~n » : la distance écrite l’emporte sur l’option fuzziness de la requête
@@ -1141,7 +1786,8 @@ function fuzzyTerm(ctx, value, n) {
 }
 // Terme d’une requête simple_query_string : pas de syntaxe champ:valeur, d’intervalle ni de joker interne
 function simpleLeaf(ctx, field, tok, defaultOp) {
-  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.slop ? { query: tok.v, slop: tok.slop } : tok.v } });
+  if (tok.t === 'phrase')
+    return tq(ctx, { match_phrase: { [field]: tok.slop ? { query: tok.v, slop: tok.slop } : tok.v } });
   if (tok.t === 'fuzzy') return tq(ctx, { fuzzy: { [field]: fuzzyTerm(ctx, tok.v, tok.n) } });
   if (tok.t === 'prefix') return tq(ctx, { wildcard: { [field]: { value: tok.v + '*' } } });
   if (isTextField(ctx, field)) return tq(ctx, { match: { [field]: { query: tok.v, operator: defaultOp || 'or' } } });
@@ -1149,12 +1795,14 @@ function simpleLeaf(ctx, field, tok, defaultOp) {
 }
 function luceneLeaf(ctx, field, tok) {
   if (field === '_exists_') return tq(ctx, { exists: { field: tok.v } });
-  if (tok.t === 'phrase') return tq(ctx, { match_phrase: { [field]: tok.slop ? { query: tok.v, slop: tok.slop } : tok.v } });
+  if (tok.t === 'phrase')
+    return tq(ctx, { match_phrase: { [field]: tok.slop ? { query: tok.v, slop: tok.slop } : tok.v } });
   if (tok.t === 'regex') return tq(ctx, { regexp: { [field]: tok.v } });
   if (tok.t === 'range') {
     const m = /^\s*(\S+)\s+TO\s+(\S+)\s*$/i.exec(tok.v);
     if (!m) return todo(ctx, 'intervalle Lucene', tok.v);
-    const spec = {}; const num = x => (/^-?\d+(\.\d+)?$/.test(x) ? Number(x) : x);
+    const spec = {};
+    const num = x => (/^-?\d+(\.\d+)?$/.test(x) ? Number(x) : x);
     if (m[1] !== '*') spec[tok.lo ? 'gte' : 'gt'] = num(m[1]);
     if (m[2] !== '*') spec[tok.hi ? 'lte' : 'lt'] = num(m[2]);
     return tq(ctx, { range: { [field]: spec } });
@@ -1164,7 +1812,11 @@ function luceneLeaf(ctx, field, tok) {
   if (fz) return tq(ctx, { fuzzy: { [field]: fuzzyTerm(ctx, v.slice(0, fz.index), fz[1] || null) } });
   if (v === '*') return tq(ctx, { exists: { field } });
   const m = /^(>=|<=|>|<)(.+)$/.exec(v);
-  if (m) { const op = { '>=': 'gte', '<=': 'lte', '>': 'gt', '<': 'lt' }[m[1]]; const x = /^-?\d+(\.\d+)?$/.test(m[2]) ? Number(m[2]) : m[2]; return tq(ctx, { range: { [field]: { [op]: x } } }); }
+  if (m) {
+    const op = { '>=': 'gte', '<=': 'lte', '>': 'gt', '<': 'lt' }[m[1]];
+    const x = /^-?\d+(\.\d+)?$/.test(m[2]) ? Number(m[2]) : m[2];
+    return tq(ctx, { range: { [field]: { [op]: x } } });
+  }
   if (/[*?]/.test(v)) return tq(ctx, { wildcard: { [field]: { value: v } } });
   if (isTextField(ctx, field)) return tq(ctx, { match: { [field]: { query: v } } });
   return tq(ctx, { term: { [field]: /^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v } });
@@ -1172,7 +1824,9 @@ function luceneLeaf(ctx, field, tok) {
 
 /* ---------- Construction SQL ---------- */
 function sqlSelect(o, ind) {
-  ind = ind || ''; const I = ind + '    '; const L = [];
+  ind = ind || '';
+  const I = ind + '    ';
+  const L = [];
   if (o.with && o.with.length) L.push(ind + 'WITH', o.with.map(w => I + w).join(',\n'));
   L.push(ind + 'SELECT', o.select.map(s => I + s).join(',\n'));
   L.push(ind + 'FROM ' + o.from);
@@ -1180,18 +1834,84 @@ function sqlSelect(o, ind) {
   if (o.groupBy && o.groupBy.length) L.push(ind + 'GROUP BY ' + o.groupBy.join(', '));
   if (o.having && o.having.length) L.push(ind + 'HAVING ' + o.having.map(h => paren(h, 'AND')).join(' AND '));
   if (o.orderBy && o.orderBy.length) L.push(ind + 'ORDER BY ' + o.orderBy.join(', '));
-  if (o.limitBy) L.push(ind + `LIMIT ${o.limitBy.n}${o.limitBy.offset ? ' OFFSET ' + o.limitBy.offset : ''} BY ${o.limitBy.by.join(', ')}`);
-  if (o.limit !== undefined && o.limit !== null) L.push(ind + `LIMIT ${o.limit}${o.offset ? ' OFFSET ' + o.offset : ''}`);
+  if (o.limitBy)
+    L.push(
+      ind + `LIMIT ${o.limitBy.n}${o.limitBy.offset ? ' OFFSET ' + o.limitBy.offset : ''} BY ${o.limitBy.by.join(', ')}`
+    );
+  if (o.limit !== undefined && o.limit !== null)
+    L.push(ind + `LIMIT ${o.limit}${o.offset ? ' OFFSET ' + o.offset : ''}`);
   if (o.settings && o.settings.length) L.push(ind + 'SETTINGS ' + o.settings.join(', '));
   return L.join('\n');
 }
-function indent(s, pre) { return s.split('\n').map(l => pre + l).join('\n'); }
+export function indent(s, pre) {
+  return s
+    .split('\n')
+    .map(l => pre + l)
+    .join('\n');
+}
 
 /* ---------- Agrégations ---------- */
-const METRIC_TYPES = new Set(['avg', 'sum', 'min', 'max', 'value_count', 'cardinality', 'stats', 'extended_stats', 'percentiles', 'percentile_ranks', 'weighted_avg', 'top_metrics', 'median_absolute_deviation', 'geo_bounds', 'geo_centroid', 'scripted_metric', 'string_stats', 'boxplot', 'rate', 't_test', 'matrix_stats']);
-const PIPE_TYPES = new Set(['bucket_selector', 'bucket_sort', 'bucket_script', 'cumulative_sum', 'derivative', 'moving_fn', 'moving_avg', 'serial_diff', 'cumulative_cardinality', 'normalize', 'inference']);
-const SIBLING_PIPES = new Set(['avg_bucket', 'sum_bucket', 'min_bucket', 'max_bucket', 'stats_bucket', 'extended_stats_bucket', 'percentiles_bucket']);
-const CAL = { minute: ['toStartOfMinute', 'MINUTE', 'minute'], '1m': ['toStartOfMinute', 'MINUTE', 'minute'], hour: ['toStartOfHour', 'HOUR', 'heure'], '1h': ['toStartOfHour', 'HOUR', 'heure'], day: ['toStartOfDay', 'DAY', 'jour'], '1d': ['toStartOfDay', 'DAY', 'jour'], week: ['toMonday', 'WEEK', 'semaine'], '1w': ['toMonday', 'WEEK', 'semaine'], month: ['toStartOfMonth', 'MONTH', 'mois'], '1M': ['toStartOfMonth', 'MONTH', 'mois'], quarter: ['toStartOfQuarter', 'QUARTER', 'trimestre'], '1q': ['toStartOfQuarter', 'QUARTER', 'trimestre'], year: ['toStartOfYear', 'YEAR', 'année'], '1y': ['toStartOfYear', 'YEAR', 'année'] };
+const METRIC_TYPES = new Set([
+  'avg',
+  'sum',
+  'min',
+  'max',
+  'value_count',
+  'cardinality',
+  'stats',
+  'extended_stats',
+  'percentiles',
+  'percentile_ranks',
+  'weighted_avg',
+  'top_metrics',
+  'median_absolute_deviation',
+  'geo_bounds',
+  'geo_centroid',
+  'scripted_metric',
+  'string_stats',
+  'boxplot',
+  'rate',
+  't_test',
+  'matrix_stats'
+]);
+const PIPE_TYPES = new Set([
+  'bucket_selector',
+  'bucket_sort',
+  'bucket_script',
+  'cumulative_sum',
+  'derivative',
+  'moving_fn',
+  'moving_avg',
+  'serial_diff',
+  'cumulative_cardinality',
+  'normalize',
+  'inference'
+]);
+const SIBLING_PIPES = new Set([
+  'avg_bucket',
+  'sum_bucket',
+  'min_bucket',
+  'max_bucket',
+  'stats_bucket',
+  'extended_stats_bucket',
+  'percentiles_bucket'
+]);
+const CAL = {
+  minute: ['toStartOfMinute', 'MINUTE', 'minute'],
+  '1m': ['toStartOfMinute', 'MINUTE', 'minute'],
+  hour: ['toStartOfHour', 'HOUR', 'heure'],
+  '1h': ['toStartOfHour', 'HOUR', 'heure'],
+  day: ['toStartOfDay', 'DAY', 'jour'],
+  '1d': ['toStartOfDay', 'DAY', 'jour'],
+  week: ['toMonday', 'WEEK', 'semaine'],
+  '1w': ['toMonday', 'WEEK', 'semaine'],
+  month: ['toStartOfMonth', 'MONTH', 'mois'],
+  '1M': ['toStartOfMonth', 'MONTH', 'mois'],
+  quarter: ['toStartOfQuarter', 'QUARTER', 'trimestre'],
+  '1q': ['toStartOfQuarter', 'QUARTER', 'trimestre'],
+  year: ['toStartOfYear', 'YEAR', 'année'],
+  '1y': ['toStartOfYear', 'YEAR', 'année']
+};
 const FIXED_UNIT = { ms: 'MILLISECOND', s: 'SECOND', m: 'MINUTE', h: 'HOUR', d: 'DAY' };
 const FIXED_FR = { ms: 'ms', s: 's', m: 'min', h: 'h', d: 'j' };
 const aggType = def => Object.keys(def).find(k => !['aggs', 'aggregations', 'meta'].includes(k));
@@ -1206,7 +1926,11 @@ const aggChildren = def => def.aggs || def.aggregations || {};
  * translateDSL relève ces colonnes par une première passe, puis traduit pour de bon.
  */
 const aliasGuard = { columns: new Set(), renamed: new Map() };
-function rawAlias(name) { return String(name).replace(/[^A-Za-z0-9_]/g, '_').replace(/^(\d)/, '_$1'); }
+export function rawAlias(name) {
+  return String(name)
+    .replace(/[^A-Za-z0-9_]/g, '_')
+    .replace(/^(\d)/, '_$1');
+}
 function aliasOf(name) {
   const raw = rawAlias(name);
   if (!aliasGuard.columns.has(raw)) return chIdent(raw);
@@ -1218,15 +1942,34 @@ function aliasOf(name) {
 function valueExpr(ctx, body, want) {
   let e;
   if (body.script) {
-    const sc = body.script; const src = typeof sc === 'string' ? sc : sc.source;
+    const sc = body.script;
+    const src = typeof sc === 'string' ? sc : sc.source;
     // Script de valeur (champ et script) : _value est la valeur du champ, que le script transforme
-    const valueSQL = typeof body.field === 'string' ? (want ? fieldAs(ctx, body.field, want) : mapField(ctx, body.field)) : undefined;
-    e = painlessToSQL(ctx, src, Object.assign({ mode: 'expr', params: sc.params || {} }, valueSQL ? { valueSQL } : {})).sql;
+    const valueSQL =
+      typeof body.field === 'string' ? (want ? fieldAs(ctx, body.field, want) : mapField(ctx, body.field)) : undefined;
+    e = painlessToSQL(
+      ctx,
+      src,
+      Object.assign({ mode: 'expr', params: sc.params || {} }, valueSQL ? { valueSQL } : {})
+    ).sql;
   } else e = want ? fieldAs(ctx, body.field, want) : mapField(ctx, body.field);
   if (body.missing !== undefined) e = `ifNull(${e}, ${chVal(body.missing)})`;
   return e;
 }
-const HM = { avg: 'moyenne', sum: 'somme', min: 'minimum', max: 'maximum', value_count: 'nombre de valeurs', cardinality: 'nombre distinct', stats: 'statistiques', extended_stats: 'statistiques étendues', percentiles: 'percentiles', percentile_ranks: 'rangs centiles', weighted_avg: 'moyenne pondérée', top_metrics: 'dernière valeur' };
+const HM = {
+  avg: 'moyenne',
+  sum: 'somme',
+  min: 'minimum',
+  max: 'maximum',
+  value_count: 'nombre de valeurs',
+  cardinality: 'nombre distinct',
+  stats: 'statistiques',
+  extended_stats: 'statistiques étendues',
+  percentiles: 'percentiles',
+  percentile_ranks: 'rangs centiles',
+  weighted_avg: 'moyenne pondérée',
+  top_metrics: 'dernière valeur'
+};
 /*
  * Appel d’agrégat. « cond » ajoute le combinateur -If. « mayBeEmpty » signale un calcul qui peut ne porter
  * sur aucune ligne (mesure globale, sous-filtre, tranche ajoutée par WITH FILL) : Elasticsearch répond alors
@@ -1240,67 +1983,135 @@ function aggCall(fn, args, cond, mayBeEmpty) {
 /* Renvoie [{alias, render(cond, mayBeEmpty)}] */
 function metricDef(ctx, name, type, body, parent) {
   const A = aliasOf(name);
-  const colType = typeof body.field === 'string' && !body.script && body.missing === undefined ? fieldType(ctx, body.field) : null;
+  const colType =
+    typeof body.field === 'string' && !body.script && body.missing === undefined ? fieldType(ctx, body.field) : null;
   // Sur un champ multivalué, avg, sum, min et max portent sur toutes les valeurs : combinateur -Array
-  const simple = (fn, x) => [{ alias: A, render: (c, e) => aggCall(colType && colType.array && /^(avg|sum|min|max)$/.test(fn) ? `${fn}Array` : fn, x, c, e) }];
+  const simple = (fn, x) => [
+    {
+      alias: A,
+      render: (c, e) => aggCall(colType && colType.array && /^(avg|sum|min|max)$/.test(fn) ? `${fn}Array` : fn, x, c, e)
+    }
+  ];
   const fieldName = body.field || (body.script ? 'script' : '?');
   if (HM[type]) H(ctx, 'metrics', `${HM[type]} de ${fieldName}`);
   switch (type) {
-    case 'avg': case 'sum': case 'min': case 'max': {
-      ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
+    case 'avg':
+    case 'sum':
+    case 'min':
+    case 'max': {
+      ctx.stats.ok++;
+      const x = valueExpr(ctx, body, 'num');
       // Une somme sans valeur vaut 0 pour Elasticsearch ; sum() d’une expression Nullable rend NULL
       return simple(type, type === 'sum' && !(colType && colType.array) && mayBeNull(ctx, x) ? `ifNull(${x}, 0)` : x);
     }
     case 'value_count': {
       // Nombre de valeurs : chaque élément d’un tableau compte, un champ absent ne compte pas
-      ctx.stats.ok++; const x = valueExpr(ctx, body);
+      ctx.stats.ok++;
+      const x = valueExpr(ctx, body);
       if (colType && colType.array) return [{ alias: A, render: c => aggCall('sum', `length(${x})`, c) }];
-      if (emptyIsMissing(ctx, colType)) return [{ alias: A, render: c => `countIf(${x} != ''${c ? ` AND ${c}` : ''})` }];
+      if (emptyIsMissing(ctx, colType))
+        return [{ alias: A, render: c => `countIf(${x} != ''${c ? ` AND ${c}` : ''})` }];
       // Attribut : une clé absente ne compte pas, même si la Map rend une chaîne vide
-      if (colType && colType.presence && !colType.nullable) return [{ alias: A, render: c => `countIf(${colType.presence}${c ? ` AND ${c}` : ''})` }];
+      if (colType && colType.presence && !colType.nullable)
+        return [{ alias: A, render: c => `countIf(${colType.presence}${c ? ` AND ${c}` : ''})` }];
       return simple('count', x);
     }
     case 'cardinality':
       ctx.stats.ok++;
-      ctx.notes.add('info', 'cardinality → uniq()', 'uniq() est approximatif comme HyperLogLog d’Elasticsearch (erreur < 2 %). Utilisez uniqExact() pour un compte exact, plus coûteux en mémoire.');
+      ctx.notes.add(
+        'info',
+        'cardinality → uniq()',
+        'uniq() est approximatif comme HyperLogLog d’Elasticsearch (erreur < 2 %). Utilisez uniqExact() pour un compte exact, plus coûteux en mémoire.'
+      );
       if (colType && colType.array) return simple('uniqArray', valueExpr(ctx, body));
-      if (emptyIsMissing(ctx, colType)) { const x = valueExpr(ctx, body); return [{ alias: A, render: c => `uniqIf(${x}, ${x} != ''${c ? ` AND ${c}` : ''})` }]; }
-      if (colType && colType.presence && !colType.nullable) { const x = valueExpr(ctx, body); return [{ alias: A, render: c => `uniqIf(${x}, ${colType.presence}${c ? ` AND ${c}` : ''})` }]; }
+      if (emptyIsMissing(ctx, colType)) {
+        const x = valueExpr(ctx, body);
+        return [{ alias: A, render: c => `uniqIf(${x}, ${x} != ''${c ? ` AND ${c}` : ''})` }];
+      }
+      if (colType && colType.presence && !colType.nullable) {
+        const x = valueExpr(ctx, body);
+        return [{ alias: A, render: c => `uniqIf(${x}, ${colType.presence}${c ? ` AND ${c}` : ''})` }];
+      }
       return simple('uniq', valueExpr(ctx, body));
-    case 'stats': case 'extended_stats': {
-      ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
+    case 'stats':
+    case 'extended_stats': {
+      ctx.stats.ok++;
+      const x = valueExpr(ctx, body, 'num');
       // Champ multivalué : chaque valeur compte (combinateur -Array), count est le nombre de valeurs
       const arr = !!(colType && colType.array);
-      const cols = [['count', 'count'], ['min', 'min'], ['max', 'max'], ['avg', 'avg'], ['sum', 'sum']];
+      const cols = [
+        ['count', 'count'],
+        ['min', 'min'],
+        ['max', 'max'],
+        ['avg', 'avg'],
+        ['sum', 'sum']
+      ];
       if (type === 'extended_stats') cols.push(['varPop', 'variance'], ['stddevPop', 'std_deviation']);
       const sumArg = !arr && mayBeNull(ctx, x) ? `ifNull(${x}, 0)` : x;
-      const out = cols.map(([fn, suf]) => ({ alias: aliasOf(`${name}_${suf}`), render: (c, e) => (arr && fn === 'count' ? aggCall('sum', `length(${x})`, c) : aggCall(arr ? `${fn}Array` : fn, fn === 'sum' ? sumArg : x, c, e)) }));
+      const out = cols.map(([fn, suf]) => ({
+        alias: aliasOf(`${name}_${suf}`),
+        render: (c, e) =>
+          arr && fn === 'count'
+            ? aggCall('sum', `length(${x})`, c)
+            : aggCall(arr ? `${fn}Array` : fn, fn === 'sum' ? sumArg : x, c, e)
+      }));
       // Sans document, Elasticsearch renvoie 0 pour sum mais null pour sum_of_squares
       const square = arr ? `arrayMap(v -> v * v, ${x})` : `${pArg(x)} * ${pArg(x)}`;
-      if (type === 'extended_stats') out.push({ alias: aliasOf(`${name}_sum_of_squares`), render: (c, e) => aggCall(`${arr ? 'sumArray' : 'sum'}${e ? 'OrNull' : ''}`, square, c, false) });
+      if (type === 'extended_stats')
+        out.push({
+          alias: aliasOf(`${name}_sum_of_squares`),
+          render: (c, e) => aggCall(`${arr ? 'sumArray' : 'sum'}${e ? 'OrNull' : ''}`, square, c, false)
+        });
       return out;
     }
     case 'percentiles': {
-      ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
-      const ps = (body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => +(chNum(p, 'percentiles.percents') / 100).toFixed(4));
-      ctx.notes.add('info', 'percentiles → quantilesTDigest()', 'Même algorithme (t-digest) qu’Elasticsearch : résultats comparables. Le résultat est un tableau dans l’ordre des percentiles demandés.');
+      ctx.stats.ok++;
+      const x = valueExpr(ctx, body, 'num');
+      const ps = (body.percents || [1, 5, 25, 50, 75, 95, 99]).map(
+        p => +(chNum(p, 'percentiles.percents') / 100).toFixed(4)
+      );
+      ctx.notes.add(
+        'info',
+        'percentiles → quantilesTDigest()',
+        'Même algorithme (t-digest) qu’Elasticsearch : résultats comparables. Le résultat est un tableau dans l’ordre des percentiles demandés.'
+      );
       const fnq = colType && colType.array ? 'quantilesTDigestArray' : 'quantilesTDigest';
       // Groupe qui peut être vide (mesure globale ou filtrée) : quantilesTDigest rend nan là où Elasticsearch rend null
-      return [{ alias: A, render: (c, e) => { const q = c ? `${fnq}If(${ps.join(', ')})(${x}, ${c})` : `${fnq}(${ps.join(', ')})(${x})`; return e ? `arrayMap(v -> if(isNaN(v), NULL, v), ${q})` : q; } }];
+      return [
+        {
+          alias: A,
+          render: (c, e) => {
+            const q = c ? `${fnq}If(${ps.join(', ')})(${x}, ${c})` : `${fnq}(${ps.join(', ')})(${x})`;
+            return e ? `arrayMap(v -> if(isNaN(v), NULL, v), ${q})` : q;
+          }
+        }
+      ];
     }
     case 'percentile_ranks': {
-      ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
-      return (body.values || []).map(v => chNum(v, 'percentile_ranks.values')).map(v => ({ alias: aliasOf(`${name}_${String(v).replace(/\W/g, '_')}`), render: c => (c ? `round(100 * countIf(${pArg(x)} <= ${v} AND ${c}) / countIf(${x}, ${c}), 3)` : `round(100 * countIf(${pArg(x)} <= ${v}) / count(${x}), 3)`) }));
+      ctx.stats.ok++;
+      const x = valueExpr(ctx, body, 'num');
+      return (body.values || [])
+        .map(v => chNum(v, 'percentile_ranks.values'))
+        .map(v => ({
+          alias: aliasOf(`${name}_${String(v).replace(/\W/g, '_')}`),
+          render: c =>
+            c
+              ? `round(100 * countIf(${pArg(x)} <= ${v} AND ${c}) / countIf(${x}, ${c}), 3)`
+              : `round(100 * countIf(${pArg(x)} <= ${v}) / count(${x}), 3)`
+        }));
     }
     case 'weighted_avg': {
-      ctx.stats.ok++; const v = valueExpr(ctx, body.value || {}, 'num'); const w = valueExpr(ctx, body.weight || {}, 'num');
+      ctx.stats.ok++;
+      const v = valueExpr(ctx, body.value || {}, 'num');
+      const w = valueExpr(ctx, body.weight || {}, 'num');
       return [{ alias: A, render: (c, e) => aggCall('avgWeighted', `${v}, ${w}`, c, e) }];
     }
     case 'top_metrics': {
       ctx.stats.ok++;
       const ms = [].concat(body.metrics || []);
       // Tri écrit en objet ou en liste d’un seul tri, comme dans une recherche (Grafana envoie une liste)
-      if (Array.isArray(body.sort) && body.sort.length !== 1) throw new Error(`top_metrics : un seul tri attendu, ${body.sort.length} reçus (Elasticsearch le refuse aussi)`);
+      if (Array.isArray(body.sort) && body.sort.length !== 1)
+        throw new Error(`top_metrics : un seul tri attendu, ${body.sort.length} reçus (Elasticsearch le refuse aussi)`);
       const sort = (Array.isArray(body.sort) ? body.sort[0] : body.sort) || {};
       const sf = isObj(sort) ? Object.keys(sort)[0] : String(sort);
       const dir = isObj(sort) ? String(isObj(sort[sf]) ? sort[sf].order : sort[sf]).toLowerCase() : 'asc';
@@ -1310,34 +2121,56 @@ function metricDef(ctx, name, type, body, parent) {
       // le groupe ; pour un tri décroissant, la clé (nombre ou date) change de signe. Clé de type inconnu : groupArray trié.
       const st0 = fieldType(ctx, sf);
       // Attribut sans type déclaré : un tri de top_metrics porte forcément sur un nombre ou une date, il est converti
-      const st = st0 && st0.attr && st0.kind === 'string' && !st0.declared ? Object.assign({}, st0, { kind: 'float' }) : st0;
+      const st =
+        st0 && st0.attr && st0.kind === 'string' && !st0.declared ? Object.assign({}, st0, { kind: 'float' }) : st0;
       const s = st !== st0 ? fieldAs(ctx, sf, 'num') : mapField(ctx, sf);
       const kind = isDateField(ctx, sf) ? 'date' : st && (st.kind === 'int' || st.kind === 'float') ? 'num' : null;
-      if (st && !kind) throw new Error(`top_metrics : tri sur ${sf}, qui n’est ni un nombre ni une date (Elasticsearch le refuse aussi)`);
+      if (st && !kind)
+        throw new Error(
+          `top_metrics : tri sur ${sf}, qui n’est ni un nombre ni une date (Elasticsearch le refuse aussi)`
+        );
       const key = kind === 'date' ? `toUnixTimestamp64Milli(toDateTime64(${s}, 3))` : s;
       const topN = (f, c) => {
         const tuple = `(${dir === 'desc' && kind ? `-${pArg(key)}` : s}, ${f})`;
         if (kind) return `arrayMap(t -> t.2, groupArraySorted${c ? 'If' : ''}(${n})(${tuple}${c ? `, ${c}` : ''}))`;
         return `arrayMap(t -> t.2, arraySlice(${dir === 'desc' ? 'arrayReverseSort' : 'arraySort'}(t -> t.1, groupArray${c ? 'If' : ''}(${tuple}${c ? `, ${c}` : ''})), 1, ${n}))`;
       };
-      return ms.map(m => { const f = mapField(ctx, m.field); return { alias: aliasOf(ms.length > 1 ? `${name}_${m.field}` : name), render: c => (n > 1 ? topN(f, c) : c ? `${fn}If(${f}, ${s}, ${c})` : `${fn}(${f}, ${s})`) }; });
+      return ms.map(m => {
+        const f = mapField(ctx, m.field);
+        return {
+          alias: aliasOf(ms.length > 1 ? `${name}_${m.field}` : name),
+          render: c => (n > 1 ? topN(f, c) : c ? `${fn}If(${f}, ${s}, ${c})` : `${fn}(${f}, ${s})`)
+        };
+      });
     }
     case 'rate': {
       // rate : valeur par unité de temps, dans les tranches d’un date_histogram parent. Elasticsearch divise la somme (ou le
       // nombre de valeurs, ou de documents sans champ) par la durée de la tranche exprimée dans l’unité demandée ;
       // une tranche calendaire (mois) n’a pas toujours la même durée, d’où dateDiff. Le date_histogram peut être un
       // ancêtre plus lointain (date_histogram › terms › rate) : Elasticsearch retient le plus proche.
-      const anc = parent && parent.rateInfo ? parent : (ctx.levelAncestors || []).slice().reverse().find(l => l.rateInfo);
+      const anc =
+        parent && parent.rateInfo
+          ? parent
+          : (ctx.levelAncestors || [])
+              .slice()
+              .reverse()
+              .find(l => l.rateInfo);
       const B = anc && anc.rateInfo;
       if (!B) throw new Error('rate ne se calcule que sous un date_histogram (Elasticsearch le refuse ailleurs)');
-      const SEC = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800 }; const MONTHS = { month: 1, quarter: 3, year: 12 };
-      const CAL_SEC = { MINUTE: 60, HOUR: 3600, DAY: 86400, WEEK: 604800 }; const CAL_MONTHS = { MONTH: 1, QUARTER: 3, YEAR: 12 };
+      const SEC = { second: 1, minute: 60, hour: 3600, day: 86400, week: 604800 };
+      const MONTHS = { month: 1, quarter: 3, year: 12 };
+      const CAL_SEC = { MINUTE: 60, HOUR: 3600, DAY: 86400, WEEK: 604800 };
+      const CAL_MONTHS = { MONTH: 1, QUARTER: 3, YEAR: 12 };
       const unit = body.unit === undefined ? null : String(body.unit);
-      if (unit !== null && !SEC[unit] && !MONTHS[unit]) throw new Error(`rate : unité inconnue « ${unit} » (second, minute, hour, day, week, month, quarter, year)`);
+      if (unit !== null && !SEC[unit] && !MONTHS[unit])
+        throw new Error(`rate : unité inconnue « ${unit} » (second, minute, hour, day, week, month, quarter, year)`);
       const bucketMonths = B.kind === 'calendar' ? CAL_MONTHS[B.unit] : undefined;
       let divisor = null;
       if (unit && MONTHS[unit]) {
-        if (!bucketMonths) throw new Error(`rate : l’unité ${unit} demande un date_histogram au mois, au trimestre ou à l’année (Elasticsearch le refuse sinon)`);
+        if (!bucketMonths)
+          throw new Error(
+            `rate : l’unité ${unit} demande un date_histogram au mois, au trimestre ou à l’année (Elasticsearch le refuse sinon)`
+          );
         divisor = bucketMonths / MONTHS[unit];
       } else if (unit) {
         if (bucketMonths) divisor = `(dateDiff('second', ${B.key}, ${B.key} + ${B.step}) / ${SEC[unit]})`;
@@ -1346,24 +2179,46 @@ function metricDef(ctx, name, type, body, parent) {
         else divisor = `($__interval_s / ${SEC[unit]})`;
       }
       const mode = String(body.mode || 'sum');
-      if (mode !== 'sum' && mode !== 'value_count') throw new Error(`rate : mode inconnu « ${mode} » (sum ou value_count)`);
+      if (mode !== 'sum' && mode !== 'value_count')
+        throw new Error(`rate : mode inconnu « ${mode} » (sum ou value_count)`);
       const counted = !body.field && !body.script;
       const x = counted ? null : valueExpr(ctx, body, mode === 'sum' ? 'num' : undefined);
-      const base = c => (counted ? (c ? `countIf(${c})` : 'count()') : mode === 'value_count' ? aggCall('count', x, c) : aggCall('sum', mayBeNull(ctx, x) ? `ifNull(${x}, 0)` : x, c));
+      const base = c =>
+        counted
+          ? c
+            ? `countIf(${c})`
+            : 'count()'
+          : mode === 'value_count'
+            ? aggCall('count', x, c)
+            : aggCall('sum', mayBeNull(ctx, x) ? `ifNull(${x}, 0)` : x, c);
       ctx.stats.ok++;
-      H(ctx, 'metrics', `taux${body.field ? ` de ${body.field}` : ' de documents'}${unit ? ` par ${{ second: 'seconde', minute: 'minute', hour: 'heure', day: 'jour', week: 'semaine', month: 'mois', quarter: 'trimestre', year: 'année' }[unit]}` : ''}`);
+      H(
+        ctx,
+        'metrics',
+        `taux${body.field ? ` de ${body.field}` : ' de documents'}${unit ? ` par ${{ second: 'seconde', minute: 'minute', hour: 'heure', day: 'jour', week: 'semaine', month: 'mois', quarter: 'trimestre', year: 'année' }[unit]}` : ''}`
+      );
       // Une fraction de tranche (taux par an d’une tranche mensuelle) s’écrit en multiplication : × 12 plutôt que / 0,0833…
       const scaled = c => {
         if (divisor === null || divisor === 1) return `toFloat64(${base(c)})`;
         if (typeof divisor !== 'number') return `${base(c)} / ${divisor}`;
-        if (divisor < 1 && Number.isInteger(+(1 / divisor).toFixed(9))) return `${base(c)} * ${+(1 / divisor).toFixed(9)}`;
+        if (divisor < 1 && Number.isInteger(+(1 / divisor).toFixed(9)))
+          return `${base(c)} * ${+(1 / divisor).toFixed(9)}`;
         return `${base(c)} / ${Number.isInteger(divisor) ? divisor : +divisor.toFixed(12)}`;
       };
       return [{ alias: A, render: c => scaled(c) }];
     }
     case 'boxplot': {
-      ctx.stats.ok++; const x = valueExpr(ctx, body, 'num');
-      return [{ alias: A, render: c => (c ? `quantilesTDigestIf(0, 0.25, 0.5, 0.75, 1)(${x}, ${c})` : `quantilesTDigest(0, 0.25, 0.5, 0.75, 1)(${x})`) }];
+      ctx.stats.ok++;
+      const x = valueExpr(ctx, body, 'num');
+      return [
+        {
+          alias: A,
+          render: c =>
+            c
+              ? `quantilesTDigestIf(0, 0.25, 0.5, 0.75, 1)(${x}, ${c})`
+              : `quantilesTDigest(0, 0.25, 0.5, 0.75, 1)(${x})`
+        }
+      ];
     }
     default:
       todo(ctx, `agrégation ${type}`, `« ${name} » (${type}) n’a pas d’équivalent automatique.`);
@@ -1377,14 +2232,23 @@ function resolveBucketsPath(level, path) {
   const [head, sub] = p.split(/[.\[]/);
   const clean = head.replace(/>.*/, '');
   // filtre._count : le nombre de documents du sous-filtre (colonne <filtre>_doc_count)
-  if (sub === '_count') { const c = level.metrics.find(x => x.alias === aliasOf(`${clean}_doc_count`)); if (c) return c.alias; }
-  const m = level.metrics.find(x => x.alias === aliasOf(`${clean}_${sub}`)) || level.metrics.find(x => x.alias === aliasOf(clean));
+  if (sub === '_count') {
+    const c = level.metrics.find(x => x.alias === aliasOf(`${clean}_doc_count`));
+    if (c) return c.alias;
+  }
+  const m =
+    level.metrics.find(x => x.alias === aliasOf(`${clean}_${sub}`)) ||
+    level.metrics.find(x => x.alias === aliasOf(clean));
   return m ? m.alias : aliasOf(clean);
 }
 // Accepte les trois écritures d’Elasticsearch : "champ", { champ: "desc" } et { champ: { order: "desc" } }
 function parseOrder(order, def) {
   if (!order) return def;
-  const arr = Array.isArray(order) ? order : typeof order === 'string' ? [order] : Object.entries(order).map(([k, v]) => ({ [k]: v }));
+  const arr = Array.isArray(order)
+    ? order
+    : typeof order === 'string'
+      ? [order]
+      : Object.entries(order).map(([k, v]) => ({ [k]: v }));
   return arr.map(o => {
     if (typeof o === 'string') return { by: o === '_term' ? '_key' : o, dir: 'asc' };
     const k = Object.keys(o)[0];
@@ -1394,9 +2258,9 @@ function parseOrder(order, def) {
   });
 }
 // terms et multi_terms : Elasticsearch départage toujours les égalités par clé croissante, même avec un order explicite
-const withKeyTiebreak = order => order.some(o => o.by === '_key') ? order : [...order, { by: '_key', dir: 'asc' }];
+const withKeyTiebreak = order => (order.some(o => o.by === '_key') ? order : [...order, { by: '_key', dir: 'asc' }]);
 // Elasticsearch écrit les bornes d’une plage comme des doubles Java : 100 devient « 100.0 »
-function javaDouble(v) {
+export function javaDouble(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return String(v);
   return Number.isInteger(n) && Math.abs(n) < 1e7 ? `${n}.0` : String(n);
@@ -1416,27 +2280,65 @@ function setBuckets(L, alias, items, disjoint) {
   if (disjoint) {
     L.keys.push({ sql: `multiIf(${items.map(i => `${i.cond}, ${chStr(i.key)}`).join(', ')}, '')`, alias });
     L.keyWhere = `${alias} != ''`;
-  } else L.keys.push({ sql: `arrayJoin(arrayFilter(x -> x != '', [${items.map(i => `if(${i.cond}, ${chStr(i.key)}, '')`).join(', ')}]))`, alias });
+  } else
+    L.keys.push({
+      sql: `arrayJoin(arrayFilter(x -> x != '', [${items.map(i => `if(${i.cond}, ${chStr(i.key)}, '')`).join(', ')}]))`,
+      alias
+    });
   L.order = [{ by: `indexOf(${names}, ${alias})`, dir: 'asc', raw: true }];
 }
 function buildLevel(ctx, name, def) {
-  const type = aggType(def); const body = def[type] || {};
-  const L = { name, type, keys: [], where: [], having: [], order: [{ by: '_count', dir: 'desc' }, { by: '_key', dir: 'asc' }], size: null, limitable: false, fill: null, global: false, metrics: [], pipes: [], windows: [], sorted: false };
+  const type = aggType(def);
+  const body = def[type] || {};
+  const L = {
+    name,
+    type,
+    keys: [],
+    where: [],
+    having: [],
+    order: [
+      { by: '_count', dir: 'desc' },
+      { by: '_key', dir: 'asc' }
+    ],
+    size: null,
+    limitable: false,
+    fill: null,
+    global: false,
+    metrics: [],
+    pipes: [],
+    windows: [],
+    sorted: false
+  };
   // Un regroupement qui porte le nom de son propre champ (service: terms service) ne masque rien : pas de suffixe
-  const ownColumn = typeof body.field === 'string' && !body.script && body.missing === undefined && /^(terms|significant_terms|rare_terms|significant_text)$/.test(type) ? mapField(ctx, body.field) : null;
+  const ownColumn =
+    typeof body.field === 'string' &&
+    !body.script &&
+    body.missing === undefined &&
+    /^(terms|significant_terms|rare_terms|significant_text)$/.test(type)
+      ? mapField(ctx, body.field)
+      : null;
   const A = ownColumn !== null && ownColumn === chIdent(rawAlias(name)) ? ownColumn : aliasOf(name);
   const incl = (k, inc, neg) => {
     if (inc === undefined) return;
     let c;
     if (typeof inc === 'string') c = `match(${k}, ${chStr('^(?:' + inc + ')$')})`;
     else if (Array.isArray(inc)) c = `${k} IN (${inc.map(chVal).join(', ')})`;
-    else if (isObj(inc) && inc.num_partitions) c = `cityHash64(${k}) % ${chInt(inc.num_partitions, 'num_partitions')} = ${chInt(inc.partition || 0, 'partition')}`;
+    else if (isObj(inc) && inc.num_partitions)
+      c = `cityHash64(${k}) % ${chInt(inc.num_partitions, 'num_partitions')} = ${chInt(inc.partition || 0, 'partition')}`;
     // Les documents sans le champ sont déjà écartés du regroupement : la négation simple suffit
     if (c) L.where.push(neg ? negateWith(c, false) : c);
   };
   switch (type) {
-    case 'terms': case 'significant_terms': case 'rare_terms': case 'significant_text': {
-      let k = body.script ? painlessToSQL(ctx, body.script.source || body.script, { mode: 'expr', params: (body.script && body.script.params) || {} }).sql : mapField(ctx, body.field);
+    case 'terms':
+    case 'significant_terms':
+    case 'rare_terms':
+    case 'significant_text': {
+      let k = body.script
+        ? painlessToSQL(ctx, body.script.source || body.script, {
+            mode: 'expr',
+            params: (body.script && body.script.params) || {}
+          }).sql
+        : mapField(ctx, body.field);
       if (body.field && !ctx.runtime[String(body.field).replace(/\.keyword$/, '')]) groupColumn(ctx, body.field);
       const computed = !!body.script || !!ctx.runtime[String(body.field || '').replace(/\.keyword$/, '')];
       const colType = computed ? null : fieldType(ctx, body.field);
@@ -1445,8 +2347,12 @@ function buildLevel(ctx, name, def) {
       const absent = emptyIsMissing(ctx, colType) ? `${k} = ''` : attrAbsent;
       if (colType && colType.array) {
         // Champ multivalué : un document compte dans le groupe de chacune de ses valeurs ; un tableau vide ne compte nulle part
-        k = body.missing !== undefined ? `arrayJoin(if(empty(${k}), [${chVal(body.missing)}], ${k}))` : `arrayJoin(${k})`;
-      } else if (body.missing !== undefined) k = absent ? `if(${absent}, ${valueFor(ctx, body.field, body.missing)}, ${k})` : `ifNull(${k}, ${chVal(body.missing)})`;
+        k =
+          body.missing !== undefined ? `arrayJoin(if(empty(${k}), [${chVal(body.missing)}], ${k}))` : `arrayJoin(${k})`;
+      } else if (body.missing !== undefined)
+        k = absent
+          ? `if(${absent}, ${valueFor(ctx, body.field, body.missing)}, ${k})`
+          : `ifNull(${k}, ${chVal(body.missing)})`;
       else if (body.missing_bucket && attrAbsent) k = `if(${attrAbsent}, NULL, ${k})`;
       else if (body.missing_bucket && absent) k = `nullIf(${k}, '')`;
       L.keys.push({ sql: k, alias: A });
@@ -1455,68 +2361,128 @@ function buildLevel(ctx, name, def) {
       if (body.missing === undefined && !body.missing_bucket) {
         // Un champ runtime qui émet toujours une valeur n’a pas besoin de ce filtre
         const rtField = body.script ? null : ctx.runtime[String(body.field || '').replace(/\.keyword$/, '')];
-        if (body.script || (rtField && rtField.nullable !== false) || (colType && colType.nullable)) L.where.push(`isNotNull(${k})`);
+        if (body.script || (rtField && rtField.nullable !== false) || (colType && colType.nullable))
+          L.where.push(`isNotNull(${k})`);
         else if (attrAbsent) L.where.push(colType.presence);
         else if (absent) L.where.push(`${k} != ''`);
       }
-      incl(k, body.include, false); incl(k, body.exclude, true);
+      incl(k, body.include, false);
+      incl(k, body.exclude, true);
       if (type === 'rare_terms') {
-        L.having.push(`doc_count <= ${chInt(body.max_doc_count || 1, 'max_doc_count')}`); L.order = [{ by: '_count', dir: 'asc' }, { by: '_key', dir: 'asc' }];
-        ctx.stats.ok++; H(ctx, 'groups', `valeurs rares de ${body.field}`);
+        L.having.push(`doc_count <= ${chInt(body.max_doc_count || 1, 'max_doc_count')}`);
+        L.order = [
+          { by: '_count', dir: 'asc' },
+          { by: '_key', dir: 'asc' }
+        ];
+        ctx.stats.ok++;
+        H(ctx, 'groups', `valeurs rares de ${body.field}`);
       } else {
-        L.size = body.size !== undefined ? chInt(body.size, 'terms.size') : 10; L.limitable = true;
+        L.size = body.size !== undefined ? chInt(body.size, 'terms.size') : 10;
+        L.limitable = true;
         L.order = withKeyTiebreak(parseOrder(body.order, L.order));
         if ((body.min_doc_count || 1) > 1) L.having.push(`doc_count >= ${chInt(body.min_doc_count, 'min_doc_count')}`);
-        if (body.min_doc_count === 0) ctx.notes.add('warn', 'min_doc_count: 0', 'Les valeurs sans document ne peuvent pas apparaître via GROUP BY : il faudrait une jointure avec la liste des valeurs attendues.');
-        if (type !== 'terms') { ctx.stats.approx++; ctx.notes.add('warn', `${type} approximé`, 'Le score de significativité n’est pas calculé : regroupement simple par fréquence.'); } else ctx.stats.ok++;
+        if (body.min_doc_count === 0)
+          ctx.notes.add(
+            'warn',
+            'min_doc_count: 0',
+            'Les valeurs sans document ne peuvent pas apparaître via GROUP BY : il faudrait une jointure avec la liste des valeurs attendues.'
+          );
+        if (type !== 'terms') {
+          ctx.stats.approx++;
+          ctx.notes.add(
+            'warn',
+            `${type} approximé`,
+            'Le score de significativité n’est pas calculé : regroupement simple par fréquence.'
+          );
+        } else ctx.stats.ok++;
         H(ctx, 'groups', `par ${body.field || 'script'} (${L.size} premiers)`);
       }
       break;
     }
     case 'multi_terms': {
       (body.terms || []).forEach(t => {
-        const k = mapField(ctx, t.field); const ct = fieldType(ctx, t.field); groupColumn(ctx, t.field); L.keys.push({ sql: k, alias: aliasOf(`${name}_${t.field}`) });
+        const k = mapField(ctx, t.field);
+        const ct = fieldType(ctx, t.field);
+        groupColumn(ctx, t.field);
+        L.keys.push({ sql: k, alias: aliasOf(`${name}_${t.field}`) });
         // Comme terms : un document sans l’un des champs ne forme pas de groupe
         if (ct && ct.nullable) L.where.push(`isNotNull(${k})`);
         else if (ct && ct.presence) L.where.push(ct.presence);
         else if (emptyIsMissing(ctx, ct)) L.where.push(`${k} != ''`);
       });
-      L.size = body.size !== undefined ? chInt(body.size, 'multi_terms.size') : 10; L.limitable = true; L.order = withKeyTiebreak(parseOrder(body.order, L.order));
-      ctx.stats.ok++; H(ctx, 'groups', `par ${(body.terms || []).map(t => t.field).join(' + ')} (${L.size} premiers)`);
+      L.size = body.size !== undefined ? chInt(body.size, 'multi_terms.size') : 10;
+      L.limitable = true;
+      L.order = withKeyTiebreak(parseOrder(body.order, L.order));
+      ctx.stats.ok++;
+      H(ctx, 'groups', `par ${(body.terms || []).map(t => t.field).join(' + ')} (${L.size} premiers)`);
       break;
     }
-    case 'date_histogram': case 'auto_date_histogram': {
-      const f = fieldAs(ctx, body.field, 'date'); const tz = body.time_zone; const tzA = tzArg(ctx.cfg, tz);
+    case 'date_histogram':
+    case 'auto_date_histogram': {
+      const f = fieldAs(ctx, body.field, 'date');
+      const tz = body.time_zone;
+      const tzA = tzArg(ctx.cfg, tz);
       let ci = body.calendar_interval || (body.interval && CAL[body.interval] ? body.interval : null);
       let fi = body.fixed_interval || (!ci && body.interval) || null;
-      if (type === 'auto_date_histogram') { ci = 'hour'; ctx.stats.approx++; ctx.notes.add('warn', 'auto_date_histogram', `L’intervalle automatique (${body.buckets || 10} tranches) est fixé à l’heure : ajustez selon la période.`); } else ctx.stats.ok++;
+      if (type === 'auto_date_histogram') {
+        ci = 'hour';
+        ctx.stats.approx++;
+        ctx.notes.add(
+          'warn',
+          'auto_date_histogram',
+          `L’intervalle automatique (${body.buckets || 10} tranches) est fixé à l’heure : ajustez selon la période.`
+        );
+      } else ctx.stats.ok++;
       // bucket(x) : début de la tranche qui contient x, pour la colonne comme pour les bornes de extended_bounds
       let bucket, step, hum;
       // Un intervalle qu’Elasticsearch refuse ne devient pas une tranche d’une heure en silence
-      if (body.calendar_interval && !CAL[ci]) throw new Error(`intervalle calendaire inconnu : ${JSON.stringify(body.calendar_interval)} (minute, hour, day, week, month, quarter, year ou 1m, 1h, 1d, 1w, 1M, 1q, 1y)`);
+      if (body.calendar_interval && !CAL[ci])
+        throw new Error(
+          `intervalle calendaire inconnu : ${JSON.stringify(body.calendar_interval)} (minute, hour, day, week, month, quarter, year ou 1m, 1h, 1d, 1w, 1M, 1q, 1y)`
+        );
       // Tableau de bord Grafana : l’intervalle vient du tableau de bord ($__interval), rendu en secondes par le plugin ClickHouse
-      const dashboardIv = !!(ctx.opts && ctx.opts.grafana) && [body.fixed_interval, body.interval, body.calendar_interval].some(x => isParamMark(x) && /^\$__interval(_ms)?$/.test(paramSource(ctx, x)));
+      const dashboardIv =
+        !!(ctx.opts && ctx.opts.grafana) &&
+        [body.fixed_interval, body.interval, body.calendar_interval].some(
+          x => isParamMark(x) && /^\$__interval(_ms)?$/.test(paramSource(ctx, x))
+        );
       if (dashboardIv) {
-        [body.fixed_interval, body.interval, body.calendar_interval].filter(isParamMark).forEach(x => consumeParam(ctx, x));
-        bucket = x => `toStartOfInterval(${x}, INTERVAL $__interval_s SECOND${tzA})`; step = 'INTERVAL $__interval_s SECOND'; hum = 'par intervalle du tableau de bord';
+        [body.fixed_interval, body.interval, body.calendar_interval]
+          .filter(isParamMark)
+          .forEach(x => consumeParam(ctx, x));
+        bucket = x => `toStartOfInterval(${x}, INTERVAL $__interval_s SECOND${tzA})`;
+        step = 'INTERVAL $__interval_s SECOND';
+        hum = 'par intervalle du tableau de bord';
         L.rateInfo = { kind: 'dashboard' };
-      } else if (ci && CAL[ci]) { const [fn, unit, fr] = CAL[ci]; bucket = x => `${fn}(${x}${tzA})`; step = `INTERVAL 1 ${unit}`; hum = `par ${fr}`; L.rateInfo = { kind: 'calendar', unit }; }
-      else {
+      } else if (ci && CAL[ci]) {
+        const [fn, unit, fr] = CAL[ci];
+        bucket = x => `${fn}(${x}${tzA})`;
+        step = `INTERVAL 1 ${unit}`;
+        hum = `par ${fr}`;
+        L.rateInfo = { kind: 'calendar', unit };
+      } else {
         const m = /^(\d+)(ms|s|m|h|d)$/.exec(String(fi || '1h'));
         if (!m) throw new Error(`intervalle fixe inconnu : ${JSON.stringify(fi)} (unités ms, s, m, h, d)`);
-        let n = +m[1], u = m[2];
+        let n = +m[1],
+          u = m[2];
         hum = `par tranche de ${n} ${FIXED_FR[u]}`;
         // toStartOfInterval repart de minuit pour les heures ; Elasticsearch aligne les tranches sur l’epoch.
         // Un nombre d’heures qui ne divise pas 24 s’écrit donc en minutes, alignées sur l’epoch.
-        if (u === 'h' && 24 % n !== 0) { n *= 60; u = 'm'; }
-        bucket = x => `toStartOfInterval(${x}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`; step = `INTERVAL ${n} ${FIXED_UNIT[u]}`;
+        if (u === 'h' && 24 % n !== 0) {
+          n *= 60;
+          u = 'm';
+        }
+        bucket = x => `toStartOfInterval(${x}, INTERVAL ${n} ${FIXED_UNIT[u]}${tzA})`;
+        step = `INTERVAL ${n} ${FIXED_UNIT[u]}`;
         L.rateInfo = { kind: 'fixed', seconds: n * { ms: 0.001, s: 1, m: 60, h: 3600, d: 86400 }[u] };
       }
       // offset : les tranches commencent plus tard (ou plus tôt) ; la clé est le début décalé de la tranche
       const off = body.offset ? /^([+-]?)(\d+)(ms|s|m|h|d)$/.exec(String(body.offset)) : null;
       if (body.offset && !off) throw new Error(`offset inconnu : ${JSON.stringify(body.offset)}`);
       if (off) {
-        const base = bucket, by = `INTERVAL ${off[2]} ${FIXED_UNIT[off[3]]}`, [minus, plus] = off[1] === '-' ? ['+', '-'] : ['-', '+'];
+        const base = bucket,
+          by = `INTERVAL ${off[2]} ${FIXED_UNIT[off[3]]}`,
+          [minus, plus] = off[1] === '-' ? ['+', '-'] : ['-', '+'];
         bucket = x => `${base(`${x} ${minus} ${by}`)} ${plus} ${by}`;
       }
       const key = bucket(f);
@@ -1525,7 +2491,18 @@ function buildLevel(ctx, name, def) {
         if (body.hard_bounds.max !== undefined) L.where.push(`${f} <= ${dateBoundSQL(ctx, body.hard_bounds.max, tz)}`);
       }
       // Semaine, mois, trimestre et année donnent une clé de type Date ; les autres intervalles, un DateTime
-      L.keys.push({ sql: key, alias: A, date: { asDate: !dashboardIv && !off && !!(ci && CAL[ci]) && /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]), zone: zoneOf(ctx.cfg, tz) } });
+      L.keys.push({
+        sql: key,
+        alias: A,
+        date: {
+          asDate:
+            !dashboardIv &&
+            !off &&
+            !!(ci && CAL[ci]) &&
+            /^(toMonday|toStartOfMonth|toStartOfQuarter|toStartOfYear)$/.test(CAL[ci][0]),
+          zone: zoneOf(ctx.cfg, tz)
+        }
+      });
       Object.assign(L.rateInfo, { key: A, step });
       L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) {
@@ -1539,24 +2516,36 @@ function buildLevel(ctx, name, def) {
       break;
     }
     case 'histogram': {
-      const f = fieldAs(ctx, body.field, 'num'); const iv = chNum(body.interval || 1, 'histogram.interval'); const off = chNum(body.offset || 0, 'histogram.offset');
+      const f = fieldAs(ctx, body.field, 'num');
+      const iv = chNum(body.interval || 1, 'histogram.interval');
+      const off = chNum(body.offset || 0, 'histogram.offset');
       const bucket = x => (off ? `floor((${x} - ${off}) / ${iv}) * ${iv} + ${off}` : `floor(${x} / ${iv}) * ${iv}`);
       // Champ multivalué : le document compte une fois dans chaque tranche où tombe au moins une de ses valeurs
       const ft = typeof body.field === 'string' && !body.script ? fieldType(ctx, body.field) : null;
       const key = ft && ft.array ? `arrayJoin(arrayDistinct(arrayMap(v -> ${bucket('v')}, ${f})))` : bucket(f);
-      L.keys.push({ sql: key, alias: A }); L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
+      L.keys.push({ sql: key, alias: A });
+      L.order = parseOrder(body.order, [{ by: '_key', dir: 'asc' }]);
       if ((body.min_doc_count || 0) === 0) {
         L.fill = String(iv);
         const eb = body.extended_bounds || {};
         if (eb.min !== undefined && eb.min !== null) L.fillFrom = bucket(chNum(eb.min, 'extended_bounds.min'));
-        if (eb.max !== undefined && eb.max !== null) L.fillTo = `${bucket(chNum(eb.max, 'extended_bounds.max'))} + ${iv}`;
+        if (eb.max !== undefined && eb.max !== null)
+          L.fillTo = `${bucket(chNum(eb.max, 'extended_bounds.max'))} + ${iv}`;
       }
-      ctx.stats.ok++; H(ctx, 'groups', `par tranches de ${iv} sur ${body.field}`);
+      ctx.stats.ok++;
+      H(ctx, 'groups', `par tranches de ${iv} sur ${body.field}`);
       break;
     }
-    case 'range': case 'date_range': case 'ip_range': {
-      const f = type === 'ip_range' ? mapField(ctx, body.field) : fieldAs(ctx, body.field, type === 'range' ? 'num' : 'date'); const tz = body.time_zone;
-      const bound = v => { if (type !== 'date_range') return type === 'ip_range' ? `toIPv4(${chStr(v)})` : chVal(v); return dateBoundSQL(ctx, v, tz); };
+    case 'range':
+    case 'date_range':
+    case 'ip_range': {
+      const f =
+        type === 'ip_range' ? mapField(ctx, body.field) : fieldAs(ctx, body.field, type === 'range' ? 'num' : 'date');
+      const tz = body.time_zone;
+      const bound = v => {
+        if (type !== 'date_range') return type === 'ip_range' ? `toIPv4(${chStr(v)})` : chVal(v);
+        return dateBoundSQL(ctx, v, tz);
+      };
       const lhs = type === 'ip_range' ? `toIPv4(${f})` : f;
       // Clé par défaut d’une plage numérique : Elasticsearch écrit ses bornes comme des doubles (« *-100.0 »)
       const edge = v => (v === undefined || v === null ? '*' : type === 'range' ? javaDouble(v) : v);
@@ -1564,31 +2553,78 @@ function buildLevel(ctx, name, def) {
         const key = r.key || (r.mask ? r.mask : `${edge(r.from)}-${edge(r.to)}`);
         let cond;
         if (r.mask) cond = `isIPAddressInRange(toString(${f}), ${chStr(r.mask)})`;
-        else cond = andJoin([r.from !== undefined && r.from !== null ? `${lhs} >= ${bound(r.from)}` : null, r.to !== undefined && r.to !== null ? `${lhs} < ${bound(r.to)}` : null]) || '1';
+        else
+          cond =
+            andJoin([
+              r.from !== undefined && r.from !== null ? `${lhs} >= ${bound(r.from)}` : null,
+              r.to !== undefined && r.to !== null ? `${lhs} < ${bound(r.to)}` : null
+            ]) || '1';
         return { key, cond };
       });
-      if (type === 'date_range' && (body.ranges || []).some(r => !r.key)) ctx.notes.add('warn', 'Clé de plage de dates', 'Sans « key », Elasticsearch nomme une plage d’après ses bornes mises au format du champ. La traduction reprend les bornes telles qu’écrites : donnez une clé explicite à chaque plage pour garder le même nom.');
+      if (type === 'date_range' && (body.ranges || []).some(r => !r.key))
+        ctx.notes.add(
+          'warn',
+          'Clé de plage de dates',
+          'Sans « key », Elasticsearch nomme une plage d’après ses bornes mises au format du champ. La traduction reprend les bornes telles qu’écrites : donnez une clé explicite à chaque plage pour garder le même nom.'
+        );
       // Plages numériques qui ne se chevauchent pas : une ligne appartient à une seule plage
-      const numeric = type === 'range' && (body.ranges || []).every(r => [r.from, r.to].every(v => v === undefined || v === null || typeof v === 'number'));
-      const sorted = numeric ? (body.ranges || []).slice().sort((a, b) => (a.from === undefined || a.from === null ? -Infinity : a.from) - (b.from === undefined || b.from === null ? -Infinity : b.from)) : [];
-      const disjoint = numeric && sorted.every((r, i) => i === 0 || (sorted[i - 1].to !== undefined && sorted[i - 1].to !== null && r.from !== undefined && r.from !== null && r.from >= sorted[i - 1].to));
+      const numeric =
+        type === 'range' &&
+        (body.ranges || []).every(r =>
+          [r.from, r.to].every(v => v === undefined || v === null || typeof v === 'number')
+        );
+      const sorted = numeric
+        ? (body.ranges || [])
+            .slice()
+            .sort(
+              (a, b) =>
+                (a.from === undefined || a.from === null ? -Infinity : a.from) -
+                (b.from === undefined || b.from === null ? -Infinity : b.from)
+            )
+        : [];
+      const disjoint =
+        numeric &&
+        sorted.every(
+          (r, i) =>
+            i === 0 ||
+            (sorted[i - 1].to !== undefined &&
+              sorted[i - 1].to !== null &&
+              r.from !== undefined &&
+              r.from !== null &&
+              r.from >= sorted[i - 1].to)
+        );
       setBuckets(L, A, items, disjoint);
-      ctx.stats.ok++; H(ctx, 'groups', `par plages de ${body.field}`);
+      ctx.stats.ok++;
+      H(ctx, 'groups', `par plages de ${body.field}`);
       break;
     }
     case 'filters': {
       ctx.humanOff++;
-      const entries = Array.isArray(body.filters) ? body.filters.map((q, i) => [String(i), q]) : Object.entries(body.filters || {});
+      const entries = Array.isArray(body.filters)
+        ? body.filters.map((q, i) => [String(i), q])
+        : Object.entries(body.filters || {});
       const items = entries.map(([k, q]) => ({ key: k, cond: tq(ctx, q) || '1' }));
-      if (body.other_bucket || body.other_bucket_key) items.push({ key: body.other_bucket_key || '_other_', cond: (any => (any === null ? 'false' : negate(ctx, any)))(orJoin(items.map(i => i.cond))) });
+      if (body.other_bucket || body.other_bucket_key)
+        items.push({
+          key: body.other_bucket_key || '_other_',
+          cond: (any => (any === null ? 'false' : negate(ctx, any)))(orJoin(items.map(i => i.cond)))
+        });
       ctx.humanOff--;
       setBuckets(L, A, items, false);
       H(ctx, 'groups', `par filtres (${items.map(i => i.key).join(', ')})`);
       break;
     }
-    case 'filter': { ctx.humanOff++; const c = tq(ctx, body); ctx.humanOff--; if (c) L.where.push(c); H(ctx, 'groups', `sous-ensemble « ${name} »`); break; }
+    case 'filter': {
+      ctx.humanOff++;
+      const c = tq(ctx, body);
+      ctx.humanOff--;
+      if (c) L.where.push(c);
+      H(ctx, 'groups', `sous-ensemble « ${name} »`);
+      break;
+    }
     case 'missing': {
-      const f = mapField(ctx, body.field); const colType = fieldType(ctx, body.field);
+      const f = mapField(ctx, body.field);
+      const colType = fieldType(ctx, body.field);
       // « Sans le champ » : tableau vide, chaîne vide selon la convention, ou NULL
       if (colType && colType.array) L.where.push(`empty(${f})`);
       else if (colType && colType.absence) L.where.push(colType.absence);
@@ -1596,17 +2632,48 @@ function buildLevel(ctx, name, def) {
       else L.where.push(`isNull(${f})`);
       if (colType && !colType.array && !colType.nullable && !colType.absence && !emptyIsMissing(ctx, colType)) {
         ctx.stats.approx++;
-        ctx.notes.add('warn', `missing sur ${body.field}`, 'La colonne n’est pas Nullable : un champ absent y prend la valeur par défaut, isNull() n’est donc jamais vrai. Si la chaîne vide représente l’absence, activez clickhouse.empty_as_missing.');
+        ctx.notes.add(
+          'warn',
+          `missing sur ${body.field}`,
+          'La colonne n’est pas Nullable : un champ absent y prend la valeur par défaut, isNull() n’est donc jamais vrai. Si la chaîne vide représente l’absence, activez clickhouse.empty_as_missing.'
+        );
       } else ctx.stats.ok++;
       H(ctx, 'groups', `${body.field} absent`);
       break;
     }
-    case 'global': { L.global = true; ctx.stats.ok++; ctx.notes.add('info', 'Agrégation global', 'Cette branche ignore le filtre de la requête principale, comme dans Elasticsearch.'); break; }
-    case 'sampler': case 'diversified_sampler': ctx.stats.approx++; ctx.notes.add('info', `${type} ignoré`, 'Pour échantillonner, ajoutez SAMPLE 0.1 si la table déclare une clé d’échantillonnage (SAMPLE BY).'); break;
-    case 'nested': case 'reverse_nested': ctx.stats.approx++; ctx.notes.add('warn', `Agrégation ${type}`, 'Les objets nested deviennent des tableaux : utilisez ARRAY JOIN sur la colonne concernée pour agréger par élément.'); break;
+    case 'global': {
+      L.global = true;
+      ctx.stats.ok++;
+      ctx.notes.add(
+        'info',
+        'Agrégation global',
+        'Cette branche ignore le filtre de la requête principale, comme dans Elasticsearch.'
+      );
+      break;
+    }
+    case 'sampler':
+    case 'diversified_sampler':
+      ctx.stats.approx++;
+      ctx.notes.add(
+        'info',
+        `${type} ignoré`,
+        'Pour échantillonner, ajoutez SAMPLE 0.1 si la table déclare une clé d’échantillonnage (SAMPLE BY).'
+      );
+      break;
+    case 'nested':
+    case 'reverse_nested':
+      ctx.stats.approx++;
+      ctx.notes.add(
+        'warn',
+        `Agrégation ${type}`,
+        'Les objets nested deviennent des tableaux : utilisez ARRAY JOIN sur la colonne concernée pour agréger par élément.'
+      );
+      break;
     case 'composite': {
       (body.sources || []).forEach(src => {
-        const sn = Object.keys(src)[0]; const st = Object.keys(src[sn])[0]; const sb = src[sn][st];
+        const sn = Object.keys(src)[0];
+        const st = Object.keys(src[sn])[0];
+        const sb = src[sn][st];
         const sub = buildLevel(ctx, sn, { [st]: sb });
         const desc = String(sb.order || 'asc').toLowerCase() === 'desc';
         // Clé null (missing_bucket) : en tête en ordre croissant, en queue en ordre décroissant, sauf missing_order
@@ -1615,25 +2682,55 @@ function buildLevel(ctx, name, def) {
         sub.keys.forEach(k => L.keys.push(Object.assign({ source: sn, desc, nullable, nullsFirst }, k)));
         L.where.push(...sub.where);
       });
-      L.composite = true; ctx.stats.ok++;
+      L.composite = true;
+      ctx.stats.ok++;
       if (ctx.cfg.clickhouse.composite_mode === 'stream') {
         // Export complet : une seule requête, sans page ni tri, que le client lit en flux
-        L.size = null; L.order = [];
-        if (body.after) ctx.notes.add('warn', 'composite : after ignoré', 'En mode stream (clickhouse.composite_mode), la requête renvoie tous les groupes d’un coup : le client ne doit plus boucler sur after_key.');
-        ctx.notes.add('opt', 'composite → export en une requête', 'La pagination composite existe parce qu’Elasticsearch ne renvoie pas un nombre illimité de groupes. ClickHouse les diffuse en flux : une seule lecture de la table au lieu d’une par page. Pour un très grand nombre de groupes, fixez max_bytes_before_external_group_by afin que l’agrégation déborde sur disque.');
+        L.size = null;
+        L.order = [];
+        if (body.after)
+          ctx.notes.add(
+            'warn',
+            'composite : after ignoré',
+            'En mode stream (clickhouse.composite_mode), la requête renvoie tous les groupes d’un coup : le client ne doit plus boucler sur after_key.'
+          );
+        ctx.notes.add(
+          'opt',
+          'composite → export en une requête',
+          'La pagination composite existe parce qu’Elasticsearch ne renvoie pas un nombre illimité de groupes. ClickHouse les diffuse en flux : une seule lecture de la table au lieu d’une par page. Pour un très grand nombre de groupes, fixez max_bytes_before_external_group_by afin que l’agrégation déborde sur disque.'
+        );
         break;
       }
       L.size = chInt(body.size || 10, 'composite.size');
-      L.order = L.keys.map(k => ({ by: `${k.alias} ${k.desc ? 'DESC' : 'ASC'}${k.nullable && k.nullsFirst ? ' NULLS FIRST' : ''}`, raw: true }));
+      L.order = L.keys.map(k => ({
+        by: `${k.alias} ${k.desc ? 'DESC' : 'ASC'}${k.nullable && k.nullsFirst ? ' NULLS FIRST' : ''}`,
+        raw: true
+      }));
       if (body.after) L.where.push(compositeCursor(L.keys, body.after));
-      ctx.notes.add('info', 'composite → pagination par curseur', 'La page suivante se lit en passant les dernières clés dans after. Le curseur est une condition WHERE écrite clé par clé, que ClickHouse peut confronter à la clé de tri de la table (une comparaison de tuples ne le permet pas).');
-      ctx.notes.add('opt', 'composite : une lecture par page', 'Chaque page relit et regroupe les lignes situées après le curseur. Pour parcourir tous les groupes, clickhouse.composite_mode: stream produit une seule requête sans pagination. Si les sources suivent l’ordre de la clé de tri de la table, le curseur écarte d’emblée les blocs déjà parcourus, et optimize_aggregation_in_order = 1 laisse ClickHouse regrouper au fil de la lecture.');
+      ctx.notes.add(
+        'info',
+        'composite → pagination par curseur',
+        'La page suivante se lit en passant les dernières clés dans after. Le curseur est une condition WHERE écrite clé par clé, que ClickHouse peut confronter à la clé de tri de la table (une comparaison de tuples ne le permet pas).'
+      );
+      ctx.notes.add(
+        'opt',
+        'composite : une lecture par page',
+        'Chaque page relit et regroupe les lignes situées après le curseur. Pour parcourir tous les groupes, clickhouse.composite_mode: stream produit une seule requête sans pagination. Si les sources suivent l’ordre de la clé de tri de la table, le curseur écarte d’emblée les blocs déjà parcourus, et optimize_aggregation_in_order = 1 laisse ClickHouse regrouper au fil de la lecture.'
+      );
       break;
     }
-    case 'geohash_grid': case 'geotile_grid': {
-      const f = mapField(ctx, body.field); L.keys.push({ sql: `geohashEncode(${f}.1, ${f}.2, ${chInt(body.precision || 5, 'precision')})`, alias: A });
-      L.size = chInt(body.size || 10000, 'size'); L.limitable = true; ctx.stats.approx++;
-      ctx.notes.add('warn', type, 'Traduit en geohashEncode sur une colonne Point (lon, lat) ; les tuiles geotile diffèrent des geohash.');
+    case 'geohash_grid':
+    case 'geotile_grid': {
+      const f = mapField(ctx, body.field);
+      L.keys.push({ sql: `geohashEncode(${f}.1, ${f}.2, ${chInt(body.precision || 5, 'precision')})`, alias: A });
+      L.size = chInt(body.size || 10000, 'size');
+      L.limitable = true;
+      ctx.stats.approx++;
+      ctx.notes.add(
+        'warn',
+        type,
+        'Traduit en geohashEncode sur une colonne Point (lon, lat) ; les tuiles geotile diffèrent des geohash.'
+      );
       break;
     }
     default:
@@ -1643,18 +2740,31 @@ function buildLevel(ctx, name, def) {
   const kids = aggChildren(def);
   L.children = [];
   for (const [cn, cdef] of Object.entries(kids)) {
-    const ct = aggType(cdef); const cb = cdef[ct] || {};
-    if (METRIC_TYPES.has(ct)) L.metrics.push(...metricDef(ctx, cn, ct, cb, L).map(m => Object.assign(m, { cond: null })));
+    const ct = aggType(cdef);
+    const cb = cdef[ct] || {};
+    if (METRIC_TYPES.has(ct))
+      L.metrics.push(...metricDef(ctx, cn, ct, cb, L).map(m => Object.assign(m, { cond: null })));
     else if (PIPE_TYPES.has(ct)) L.pipes.push({ name: cn, type: ct, body: cb });
-    else if (ct === 'top_hits') L.topHits = L.topHits || [], L.topHits.push({ name: cn, body: cb });
+    else if (ct === 'top_hits') (L.topHits = L.topHits || []), L.topHits.push({ name: cn, body: cb });
     else if (ct === 'filter' && Object.values(aggChildren(cdef)).every(d => METRIC_TYPES.has(aggType(d)))) {
-      ctx.humanOff++; const c = tq(ctx, cb) || '1'; ctx.humanOff--;
+      ctx.humanOff++;
+      const c = tq(ctx, cb) || '1';
+      ctx.humanOff--;
       // « outer » : condition du groupe quand le niveau est calculé par agrégation conditionnelle (bucketsQuery)
       const within = outer => (outer ? andJoin([c, outer]) : c);
       L.metrics.push({ alias: aliasOf(`${cn}_doc_count`), render: outer => `countIf(${within(outer)})` });
-      for (const [mn, md] of Object.entries(aggChildren(cdef))) { const mt = aggType(md); metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}, L).forEach(m => L.metrics.push({ alias: m.alias, render: outer => m.render(within(outer), true) })); }
+      for (const [mn, md] of Object.entries(aggChildren(cdef))) {
+        const mt = aggType(md);
+        metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}, L).forEach(m =>
+          L.metrics.push({ alias: m.alias, render: outer => m.render(within(outer), true) })
+        );
+      }
       ctx.stats.ok++;
-      ctx.notes.add('opt', `Filtre « ${cn} » fusionné`, 'Plutôt qu’une requête de plus, le sous-filtre est calculé dans la même passe grâce aux combinateurs -If (countIf, avgIf…).');
+      ctx.notes.add(
+        'opt',
+        `Filtre « ${cn} » fusionné`,
+        'Plutôt qu’une requête de plus, le sous-filtre est calculé dans la même passe grâce aux combinateurs -If (countIf, avgIf…).'
+      );
     } else L.children.push({ name: cn, def: cdef });
   }
   return L;
@@ -1688,12 +2798,14 @@ function compositeCursor(keys, after) {
   return `(\n         ${branches.join('\n      OR ')}\n  )`;
 }
 function levelOrder(L, alias) {
-  return L.order.map(o => {
-    if (o.raw) return o.dir ? `${o.by} ${o.dir.toUpperCase()}` : o.by;
-    if (o.by === '_count') return `doc_count ${o.dir.toUpperCase()}`;
-    if (o.by === '_key') return L.keys.map(k => `${k.alias} ${o.dir.toUpperCase()}`).join(', ');
-    return `${alias ? resolveBucketsPath(L, o.by) : resolveBucketsPath(L, o.by)} ${o.dir.toUpperCase()}`;
-  }).filter(Boolean);
+  return L.order
+    .map(o => {
+      if (o.raw) return o.dir ? `${o.by} ${o.dir.toUpperCase()}` : o.by;
+      if (o.by === '_count') return `doc_count ${o.dir.toUpperCase()}`;
+      if (o.by === '_key') return L.keys.map(k => `${k.alias} ${o.dir.toUpperCase()}`).join(', ');
+      return `${alias ? resolveBucketsPath(L, o.by) : resolveBucketsPath(L, o.by)} ${o.dir.toUpperCase()}`;
+    })
+    .filter(Boolean);
 }
 function orderInSub(L) {
   // Ordre exprimé avec des agrégats, pour les sous-requêtes de restriction
@@ -1701,13 +2813,18 @@ function orderInSub(L) {
     if (o.raw) return o.dir ? `${o.by} ${o.dir.toUpperCase()}` : o.by;
     if (o.by === '_count') return `count() ${o.dir.toUpperCase()}`;
     if (o.by === '_key') return L.keys.map(k => `${k.alias} ${o.dir.toUpperCase()}`).join(', ');
-    const alias = resolveBucketsPath(L, o.by); const m = L.metrics.find(x => x.alias === alias);
+    const alias = resolveBucketsPath(L, o.by);
+    const m = L.metrics.find(x => x.alias === alias);
     return `${m ? m.render(null) : alias} ${o.dir.toUpperCase()}`;
   });
 }
-function keyLevels(path) { return path.filter(l => l.keys.length); }
+function keyLevels(path) {
+  return path.filter(l => l.keys.length);
+}
 // « x AS x » est inutile, et ClickHouse le refuse quand x est déjà un champ runtime défini par WITH (alias déclaré deux fois)
-function selectAs(k) { return k.sql === k.alias ? k.sql : `${k.sql} AS ${k.alias}`; }
+function selectAs(k) {
+  return k.sql === k.alias ? k.sql : `${k.sql} AS ${k.alias}`;
+}
 /*
  * Portée d’une requête d’agrégation imbriquée.
  *
@@ -1728,7 +2845,9 @@ function nestedScope(ctx, env, path, upto) {
   const runtime = Object.values(ctx.runtime).some(r => r.sql);
   if (!scope.filtered && !runtime) return scope;
   scope.from = 'base';
-  scope.ctes.push(`base AS (\n${sqlSelect({ select: [`*${RUNTIME_COLUMNS}`], from: env.table, where: scope.filtered ? env.baseWhere : [] }, '        ')}\n    )`);
+  scope.ctes.push(
+    `base AS (\n${sqlSelect({ select: [`*${RUNTIME_COLUMNS}`], from: env.table, where: scope.filtered ? env.baseWhere : [] }, '        ')}\n    )`
+  );
   return scope;
 }
 // Emplacement, dans la CTE « base », des champs runtime dont la requête se sert (rempli par withClause)
@@ -1747,23 +2866,32 @@ function pathWhere(env, path, upto, scope) {
 function restriction(ctx, env, path, upto, scope) {
   // Cherche le parent « limitable » le plus profond (index < upto+1)
   let j = -1;
-  for (let i = upto; i >= 0; i--) if (path[i].limitable && path[i].size !== null) { j = i; break; }
+  for (let i = upto; i >= 0; i--)
+    if (path[i].limitable && path[i].size !== null) {
+      j = i;
+      break;
+    }
   if (j < 0) return null;
-  const lv = path.slice(0, j + 1); const kl = keyLevels(lv);
+  const lv = path.slice(0, j + 1);
+  const kl = keyLevels(lv);
   const keys = kl.flatMap(l => l.keys);
   const parentKeys = keyLevels(path.slice(0, j)).flatMap(l => l.keys);
   const where = pathWhere(env, path, j, scope);
   const inner = restriction(ctx, env, path, j - 1, scope);
   if (inner) where.push(inner);
-  const sub = sqlSelect({
-    select: keys.map(selectAs),
-    from: scope.from, where,
-    groupBy: keys.map(k => k.alias),
-    having: path[j].having.map(h => h.replace(/\bdoc_count\b/g, 'count()')),
-    orderBy: orderInSub(path[j]),
-    limitBy: parentKeys.length ? { n: path[j].size, by: parentKeys.map(k => k.alias) } : null,
-    limit: parentKeys.length ? null : path[j].size
-  }, '        ');
+  const sub = sqlSelect(
+    {
+      select: keys.map(selectAs),
+      from: scope.from,
+      where,
+      groupBy: keys.map(k => k.alias),
+      having: path[j].having.map(h => h.replace(/\bdoc_count\b/g, 'count()')),
+      orderBy: orderInSub(path[j]),
+      limitBy: parentKeys.length ? { n: path[j].size, by: parentKeys.map(k => k.alias) } : null,
+      limit: parentKeys.length ? null : path[j].size
+    },
+    '        '
+  );
   // Une CTE par top N, nommée d’après le regroupement qu’elle limite
   let name = `top_${keys[keys.length - 1].alias.replace(/`/g, '')}`;
   for (let n = 2; scope.names.has(name); n++) name = `top_${keys[keys.length - 1].alias.replace(/`/g, '')}_${n}`;
@@ -1774,15 +2902,25 @@ function restriction(ctx, env, path, upto, scope) {
 }
 // Ordre des regroupements parents d’une requête imbriquée : par effectif (colonne de fenêtre à ajouter au SELECT) ou par clé
 function parentOrdering(parentKL) {
-  const columns = []; const order = [];
+  const columns = [];
+  const order = [];
   parentKL.forEach((pl, i) => {
-    const pkeys = parentKL.slice(0, i + 1).flatMap(l => l.keys).map(x => x.alias);
+    const pkeys = parentKL
+      .slice(0, i + 1)
+      .flatMap(l => l.keys)
+      .map(x => x.alias);
     if (pl.limitable && pl.order[0] && pl.order[0].by === '_count') {
       const a = aliasOf(`${pl.name}_doc_count`);
       columns.push(`sum(count()) OVER (PARTITION BY ${pkeys.join(', ')}) AS ${a}`);
       order.push(`${a} ${pl.order[0].dir.toUpperCase()}`, ...pl.keys.map(x => x.alias));
-    } else if (pl.order[0] && pl.order[0].raw) order.push(pl.order[0].by); // plages et filtres : dans l’ordre de leur déclaration
-    else order.push(...pl.keys.map(x => `${x.alias} ${pl.order[0] && pl.order[0].by === '_key' ? pl.order[0].dir.toUpperCase() : 'ASC'}`));
+    } else if (pl.order[0] && pl.order[0].raw)
+      order.push(pl.order[0].by); // plages et filtres : dans l’ordre de leur déclaration
+    else
+      order.push(
+        ...pl.keys.map(
+          x => `${x.alias} ${pl.order[0] && pl.order[0].by === '_key' ? pl.order[0].dir.toUpperCase() : 'ASC'}`
+        )
+      );
   });
   return { columns, order };
 }
@@ -1802,71 +2940,132 @@ function parentOrdering(parentKL) {
  * une ligne par groupe, groupes vides compris, comme le fait Elasticsearch.
  */
 function bucketsQuery(ctx, env, path) {
-  const L = path[path.length - 1]; const k = path.length - 1;
-  const parentKL = keyLevels(path.slice(0, k)); const parentKeys = parentKL.flatMap(l => l.keys);
+  const L = path[path.length - 1];
+  const k = path.length - 1;
+  const parentKL = keyLevels(path.slice(0, k));
+  const parentKeys = parentKL.flatMap(l => l.keys);
   const scope = nestedScope(ctx, env, path, k - 1);
   const where = pathWhere(env, path, k - 1, scope).concat(L.where);
   const r = restriction(ctx, env, path, k - 1, scope);
   if (r) where.push(r);
-  const key = L.keys[0].alias; const bare = a => a.replace(/`/g, '');
-  const columns = [{ alias: 'doc_count', values: L.buckets.map(b => `countIf(${b.cond})`) }]
-    .concat(L.metrics.map(m => ({ alias: m.alias, values: L.buckets.map(b => m.render(b.cond, true)) })));
+  const key = L.keys[0].alias;
+  const bare = a => a.replace(/`/g, '');
+  const columns = [{ alias: 'doc_count', values: L.buckets.map(b => `countIf(${b.cond})`) }].concat(
+    L.metrics.map(m => ({ alias: m.alias, values: L.buckets.map(b => m.render(b.cond, true)) }))
+  );
   const parents = parentOrdering(parentKL);
-  const inner = sqlSelect({
-    select: parentKeys.map(selectAs)
-      .concat(columns.map(c => `[\n            ${c.values.join(',\n            ')}\n        ] AS ${bare(c.alias)}_values`))
-      .concat(parents.columns),
-    from: scope.from, where, groupBy: parentKeys.map(x => x.alias)
-  }, '    ');
+  const inner = sqlSelect(
+    {
+      select: parentKeys
+        .map(selectAs)
+        .concat(
+          columns.map(c => `[\n            ${c.values.join(',\n            ')}\n        ] AS ${bare(c.alias)}_values`)
+        )
+        .concat(parents.columns),
+      from: scope.from,
+      where,
+      groupBy: parentKeys.map(x => x.alias)
+    },
+    '    '
+  );
   const lines = [];
   if (scope.ctes.length) lines.push('WITH', scope.ctes.map(c => `    ${c}`).join(',\n'));
-  lines.push('SELECT', parentKeys.map(x => x.alias).concat([key], columns.map(c => c.alias)).map(s => `    ${s}`).join(',\n'));
+  lines.push(
+    'SELECT',
+    parentKeys
+      .map(x => x.alias)
+      .concat(
+        [key],
+        columns.map(c => c.alias)
+      )
+      .map(s => `    ${s}`)
+      .join(',\n')
+  );
   lines.push('FROM (', inner, ')', 'ARRAY JOIN');
-  lines.push([`[${L.buckets.map(b => chStr(b.key)).join(', ')}] AS ${key}`].concat(columns.map(c => `${bare(c.alias)}_values AS ${c.alias}`)).map(s => `    ${s}`).join(',\n'));
+  lines.push(
+    [`[${L.buckets.map(b => chStr(b.key)).join(', ')}] AS ${key}`]
+      .concat(columns.map(c => `${bare(c.alias)}_values AS ${c.alias}`))
+      .map(s => `    ${s}`)
+      .join(',\n')
+  );
   // Sans regroupement parent, les groupes sortent dans l’ordre du tableau
   if (parentKeys.length) lines.push(`ORDER BY ${parents.order.concat(levelOrder(L)).join(', ')}`);
-  ctx.notes.add('opt', `Groupes « ${L.name} » par agrégation conditionnelle`, 'Chaque plage ou filtre est compté par un countIf dans une seule lecture de la table, sans rien construire pour chaque ligne. ARRAY JOIN déplie ensuite le résultat en une ligne par groupe, groupes vides compris, comme le fait Elasticsearch.');
+  ctx.notes.add(
+    'opt',
+    `Groupes « ${L.name} » par agrégation conditionnelle`,
+    'Chaque plage ou filtre est compté par un countIf dans une seule lecture de la table, sans rien construire pour chaque ligne. ARRAY JOIN déplie ensuite le résultat en une ligne par groupe, groupes vides compris, comme le fait Elasticsearch.'
+  );
   return lines.join('\n');
 }
 function aggQuery(ctx, env, path) {
-  const L = path[path.length - 1]; const k = path.length - 1;
+  const L = path[path.length - 1];
+  const k = path.length - 1;
   if (L.buckets && !L.pipes.length) return bucketsQuery(ctx, env, path);
-  const kl = keyLevels(path); const keys = kl.flatMap(l => l.keys);
+  const kl = keyLevels(path);
+  const keys = kl.flatMap(l => l.keys);
   const scope = nestedScope(ctx, env, path, k - 1);
   const where = pathWhere(env, path, k, scope);
   const r = restriction(ctx, env, path, k - 1, scope);
   if (r) where.push(r);
   // Les tranches vides d’un histogramme sont ajoutées par WITH FILL, sur sa clé triée en ordre croissant.
   // Pas avec un pipeline : une fonction de fenêtre est calculée avant l’ajout et ne verrait pas ces lignes.
-  const fills = !!L.fill && !L.pipes.length && L.keys.length > 0 && L.order.length > 0 && L.order[0].by === '_key' && L.order[0].dir === 'asc';
+  const fills =
+    !!L.fill &&
+    !L.pipes.length &&
+    L.keys.length > 0 &&
+    L.order.length > 0 &&
+    L.order[0].by === '_key' &&
+    L.order[0].dir === 'asc';
   const mayBeEmpty = keys.length === 0 || fills;
-  const select = keys.map(selectAs).concat(['count() AS doc_count']).concat(L.metrics.map(m => `${m.render(null, mayBeEmpty)} AS ${m.alias}`));
+  const select = keys
+    .map(selectAs)
+    .concat(['count() AS doc_count'])
+    .concat(L.metrics.map(m => `${m.render(null, mayBeEmpty)} AS ${m.alias}`));
   const parentKL = keyLevels(path.slice(0, k));
   const parents = parentOrdering(parentKL);
   select.push(...parents.columns);
   const order = parents.order.slice();
   // Pipelines
-  const having = L.having.slice(); let limitOverride = null;
+  const having = L.having.slice();
+  let limitOverride = null;
   const partKeys = parentKL.flatMap(l => l.keys).map(x => x.alias);
   const ownKey = L.keys.length ? L.keys[L.keys.length - 1].alias : null;
-  const win = rows => `OVER (${partKeys.length ? 'PARTITION BY ' + partKeys.join(', ') + ' ' : ''}ORDER BY ${ownKey} ${rows})`;
+  const win = rows =>
+    `OVER (${partKeys.length ? 'PARTITION BY ' + partKeys.join(', ') + ' ' : ''}ORDER BY ${ownKey} ${rows})`;
   for (const p of L.pipes) {
-    const b = p.body; const bp = b.buckets_path;
+    const b = p.body;
+    const bp = b.buckets_path;
     const res = x => resolveBucketsPath(L, x);
     try {
       if (p.type === 'bucket_selector' || p.type === 'bucket_script') {
-        const map = {}; if (isObj(bp)) for (const [v, path] of Object.entries(bp)) map[v] = res(path);
-        const sc = b.script; const src = typeof sc === 'string' ? sc : sc.source;
+        const map = {};
+        if (isObj(bp)) for (const [v, path] of Object.entries(bp)) map[v] = res(path);
+        const sc = b.script;
+        const src = typeof sc === 'string' ? sc : sc.source;
         const e = painlessToSQL(ctx, src, { mode: 'expr', paramSQL: map, params: (isObj(sc) && sc.params) || {} }).sql;
-        if (p.type === 'bucket_selector') { having.push(e); ctx.notes.add('opt', `bucket_selector « ${p.name} » → HAVING`, 'Le filtrage des groupes se fait côté serveur, sans transférer les groupes écartés.'); }
-        else select.push(`${e} AS ${aliasOf(p.name)}`);
+        if (p.type === 'bucket_selector') {
+          having.push(e);
+          ctx.notes.add(
+            'opt',
+            `bucket_selector « ${p.name} » → HAVING`,
+            'Le filtrage des groupes se fait côté serveur, sans transférer les groupes écartés.'
+          );
+        } else select.push(`${e} AS ${aliasOf(p.name)}`);
         ctx.stats.ok++;
       } else if (p.type === 'bucket_sort') {
-        if (b.sort) { L.order = parseOrder(b.sort, L.order); L.sorted = true; }
-        limitOverride = { n: b.size === undefined ? undefined : chInt(b.size, 'bucket_sort.size'), offset: chInt(b.from || 0, 'bucket_sort.from') }; ctx.stats.ok++;
+        if (b.sort) {
+          L.order = parseOrder(b.sort, L.order);
+          L.sorted = true;
+        }
+        limitOverride = {
+          n: b.size === undefined ? undefined : chInt(b.size, 'bucket_sort.size'),
+          offset: chInt(b.from || 0, 'bucket_sort.from')
+        };
+        ctx.stats.ok++;
       } else if (['cumulative_sum', 'derivative', 'serial_diff', 'moving_fn', 'moving_avg'].includes(p.type)) {
         if (!ownKey) throw new Error('pipeline sans clé d’ordre');
-        const m = res(bp); const src = m === 'doc_count' ? 'count()' : m;
+        const m = res(bp);
+        const src = m === 'doc_count' ? 'count()' : m;
         let e;
         if (p.type === 'cumulative_sum') e = `sum(${src}) ${win('ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW')}`;
         else if (p.type === 'derivative' || p.type === 'serial_diff') {
@@ -1875,16 +3074,33 @@ function aggQuery(ctx, env, path) {
           const lag = chInt(b.lag || 1, 'lag');
           e = `${src} - lagInFrame(toNullable(${src}), ${lag}) ${win(`ROWS BETWEEN ${lag} PRECEDING AND CURRENT ROW`)}`;
         } else {
-          const w = chInt(b.window || 5, 'window'); const sh = chInt(b.shift || 0, 'shift');
-          const fnm = /max\(/.test(b.script || '') ? 'max' : /min\(/.test(b.script || '') ? 'min' : /sum\(/.test(b.script || '') ? 'sum' : /stdDev/.test(b.script || '') ? 'stddevPop' : 'avg';
-          if (/linearWeightedAvg|ewma|holt/.test(b.script || '') || p.type === 'moving_avg') ctx.notes.add('warn', `${p.name} : moyenne simple`, 'Les moyennes pondérées (linéaire, ewma, holt) sont remplacées par une moyenne simple sur la fenêtre.');
+          const w = chInt(b.window || 5, 'window');
+          const sh = chInt(b.shift || 0, 'shift');
+          const fnm = /max\(/.test(b.script || '')
+            ? 'max'
+            : /min\(/.test(b.script || '')
+              ? 'min'
+              : /sum\(/.test(b.script || '')
+                ? 'sum'
+                : /stdDev/.test(b.script || '')
+                  ? 'stddevPop'
+                  : 'avg';
+          if (/linearWeightedAvg|ewma|holt/.test(b.script || '') || p.type === 'moving_avg')
+            ctx.notes.add(
+              'warn',
+              `${p.name} : moyenne simple`,
+              'Les moyennes pondérées (linéaire, ewma, holt) sont remplacées par une moyenne simple sur la fenêtre.'
+            );
           // Fenêtre vide (premières tranches) : null dans Elasticsearch, sauf pour une somme qui vaut 0
           const arg = fnm === 'sum' ? src : `toNullable(${src})`;
           e = `${fnm}(${arg}) ${win(`ROWS BETWEEN ${w - sh} PRECEDING AND ${sh > 0 ? sh - 1 + ' FOLLOWING' : '1 PRECEDING'}`)}`;
         }
-        select.push(`${e} AS ${aliasOf(p.name)}`); ctx.stats.ok++;
+        select.push(`${e} AS ${aliasOf(p.name)}`);
+        ctx.stats.ok++;
       } else todo(ctx, `pipeline ${p.type}`, `« ${p.name} » n’a pas d’équivalent automatique.`);
-    } catch (e) { todo(ctx, `pipeline ${p.name}`, e.message); }
+    } catch (e) {
+      todo(ctx, `pipeline ${p.name}`, e.message);
+    }
   }
   order.push(...levelOrder(L));
   const orderBy = order.filter(Boolean);
@@ -1893,77 +3109,184 @@ function aggQuery(ctx, env, path) {
     // délimitent des séries complétées séparément, chacune entre sa première et sa dernière tranche.
     const bounds = (L.fillFrom ? `\n    FROM ${L.fillFrom}` : '') + (L.fillTo ? `\n    TO ${L.fillTo}` : '');
     orderBy[orderBy.length - 1] = `${ownKey} ASC WITH FILL${bounds}${bounds ? '\n   ' : ''} STEP ${L.fill}`;
-    ctx.notes.add('opt', 'Tranches vides comblées (WITH FILL)', 'Comme un histogramme avec min_doc_count: 0, les intervalles sans document sont générés par ClickHouse au lieu d’être comblés côté client. Avec extended_bounds, la série est étendue jusqu’aux bornes demandées.');
+    ctx.notes.add(
+      'opt',
+      'Tranches vides comblées (WITH FILL)',
+      'Comme un histogramme avec min_doc_count: 0, les intervalles sans document sont générés par ClickHouse au lieu d’être comblés côté client. Avec extended_bounds, la série est étendue jusqu’aux bornes demandées.'
+    );
   } else if (L.fill && L.pipes.length) {
     ctx.stats.approx++;
-    ctx.notes.add('warn', `Tranches vides non comblées (${L.name})`, 'Avec un pipeline d’agrégation, les tranches sans document ne sont pas ajoutées : le calcul porte sur les tranches présentes, alors qu’Elasticsearch compte aussi les tranches vides.');
+    ctx.notes.add(
+      'warn',
+      `Tranches vides non comblées (${L.name})`,
+      'Avec un pipeline d’agrégation, les tranches sans document ne sont pas ajoutées : le calcul porte sur les tranches présentes, alors qu’Elasticsearch compte aussi les tranches vides.'
+    );
   }
-  let limit = null, limitBy = null;
+  let limit = null,
+    limitBy = null;
   const size = limitOverride && limitOverride.n !== undefined ? limitOverride.n : L.size;
   const offset = limitOverride ? limitOverride.offset : 0;
   if (L.limitable || L.composite || limitOverride) {
     if (partKeys.length && size !== null && size !== undefined) limitBy = { n: size, offset, by: partKeys };
     else if (size !== null && size !== undefined) limit = size;
   }
-  return sqlSelect({ with: scope.ctes, select, from: scope.from, where, groupBy: keys.map(x => x.alias), having, orderBy, limitBy, limit, offset: limitBy ? 0 : offset });
+  return sqlSelect({
+    with: scope.ctes,
+    select,
+    from: scope.from,
+    where,
+    groupBy: keys.map(x => x.alias),
+    having,
+    orderBy,
+    limitBy,
+    limit,
+    offset: limitBy ? 0 : offset
+  });
 }
 function walkAggs(ctx, env, aggs, parentPath, out) {
   for (const [name, def] of Object.entries(aggs || {})) {
     const t = aggType(def);
     if (!t) continue;
     // Elasticsearch refuse une agrégation global ailleurs qu’au premier niveau
-    if (t === 'global' && parentPath.length) { todo(ctx, `agrégation ${name}`, 'Une agrégation global ne peut être définie qu’au premier niveau des agrégations.'); continue; }
+    if (t === 'global' && parentPath.length) {
+      todo(
+        ctx,
+        `agrégation ${name}`,
+        'Une agrégation global ne peut être définie qu’au premier niveau des agrégations.'
+      );
+      continue;
+    }
     let L;
     // Niveaux englobants : rate cherche son date_histogram parmi eux, comme Elasticsearch
     ctx.levelAncestors = parentPath;
-    try { L = buildLevel(ctx, name, def); }
-    catch (e) { todo(ctx, `agrégation ${name}`, e.message); continue; }
+    try {
+      L = buildLevel(ctx, name, def);
+    } catch (e) {
+      todo(ctx, `agrégation ${name}`, e.message);
+      continue;
+    }
     const path = parentPath.concat([L]);
     const needSelf = L.metrics.length || L.pipes.length || !L.children.length;
     if (needSelf && !(t === 'sampler' && !L.metrics.length && L.children.length)) {
-      try { out.push({ title: `Agrégation ${path.map(p => p.name).join(' › ')}`, sql: aggQuery(ctx, env, path), path: path.map(p => p.name), keyAlias: L.keys.length ? L.keys[L.keys.length - 1].alias : null }); }
-      catch (e) { todo(ctx, `agrégation ${name}`, e.message); }
+      try {
+        out.push({
+          title: `Agrégation ${path.map(p => p.name).join(' › ')}`,
+          sql: aggQuery(ctx, env, path),
+          path: path.map(p => p.name),
+          keyAlias: L.keys.length ? L.keys[L.keys.length - 1].alias : null
+        });
+      } catch (e) {
+        todo(ctx, `agrégation ${name}`, e.message);
+      }
     }
-    if (L.topHits) L.topHits.forEach(th => out.push({ title: `Top hits ${path.map(p => p.name).join(' › ')} › ${th.name}`, sql: topHitsQuery(ctx, env, path, th) }));
-    const kidAggs = {}; L.children.forEach(c => (kidAggs[c.name] = c.def));
+    if (L.topHits)
+      L.topHits.forEach(th =>
+        out.push({
+          title: `Top hits ${path.map(p => p.name).join(' › ')} › ${th.name}`,
+          sql: topHitsQuery(ctx, env, path, th)
+        })
+      );
+    const kidAggs = {};
+    L.children.forEach(c => (kidAggs[c.name] = c.def));
     walkAggs(ctx, env, kidAggs, path, out);
   }
 }
 function topHitsQuery(ctx, env, path, th) {
-  const b = th.body; const keys = keyLevels(path).flatMap(l => l.keys);
+  const b = th.body;
+  const keys = keyLevels(path).flatMap(l => l.keys);
   const scope = nestedScope(ctx, env, path, path.length - 1);
   const where = pathWhere(env, path, path.length - 1, scope);
-  const r = restriction(ctx, env, path, path.length - 1, scope); if (r) where.push(r);
-  const cols = selectList(ctx, b); const order = sortList(ctx, b.sort);
+  const r = restriction(ctx, env, path, path.length - 1, scope);
+  if (r) where.push(r);
+  const cols = selectList(ctx, b);
+  const order = sortList(ctx, b.sort);
   ctx.stats.ok++;
-  ctx.notes.add('opt', `top_hits « ${th.name} » → LIMIT n BY`, 'LIMIT n BY renvoie les n meilleurs documents de chaque groupe en une seule passe triée.');
+  ctx.notes.add(
+    'opt',
+    `top_hits « ${th.name} » → LIMIT n BY`,
+    'LIMIT n BY renvoie les n meilleurs documents de chaque groupe en une seule passe triée.'
+  );
   const n = chInt(b.size || 3, 'top_hits.size');
-  return sqlSelect({ with: scope.ctes, select: keys.map(selectAs).concat(cols), from: scope.from, where, orderBy: keys.map(k => k.alias).concat(order), limitBy: keys.length ? { n, by: keys.map(k => k.alias) } : null, limit: keys.length ? null : n });
+  return sqlSelect({
+    with: scope.ctes,
+    select: keys.map(selectAs).concat(cols),
+    from: scope.from,
+    where,
+    orderBy: keys.map(k => k.alias).concat(order),
+    limitBy: keys.length ? { n, by: keys.map(k => k.alias) } : null,
+    limit: keys.length ? null : n
+  });
 }
 function rootAggs(ctx, env, aggs) {
   const out = [];
-  const metrics = []; const rest = {}; const siblings = [];
+  const metrics = [];
+  const rest = {};
+  const siblings = [];
   for (const [name, def] of Object.entries(aggs || {})) {
-    const t = aggType(def); const b = def[t] || {};
+    const t = aggType(def);
+    const b = def[t] || {};
     if (METRIC_TYPES.has(t)) metrics.push(...metricDef(ctx, name, t, b));
     else if (SIBLING_PIPES.has(t)) siblings.push({ name, type: t, body: b });
     else if (t === 'filter' && Object.values(aggChildren(def)).every(d => METRIC_TYPES.has(aggType(d)))) {
-      ctx.humanOff++; const c = tq(ctx, b) || '1'; ctx.humanOff--;
+      ctx.humanOff++;
+      const c = tq(ctx, b) || '1';
+      ctx.humanOff--;
       metrics.push({ alias: aliasOf(`${name}_doc_count`), render: () => `countIf(${c})` });
-      for (const [mn, md] of Object.entries(aggChildren(def))) { const mt = aggType(md); metricDef(ctx, `${name}_${mn}`, mt, md[mt] || {}).forEach(m => metrics.push({ alias: m.alias, render: () => m.render(c, true) })); }
+      for (const [mn, md] of Object.entries(aggChildren(def))) {
+        const mt = aggType(md);
+        metricDef(ctx, `${name}_${mn}`, mt, md[mt] || {}).forEach(m =>
+          metrics.push({ alias: m.alias, render: () => m.render(c, true) })
+        );
+      }
       ctx.stats.ok++;
     } else rest[name] = def;
   }
-  if (metrics.length) out.push({ title: 'Mesures globales', sql: sqlSelect({ select: metrics.map(m => `${m.render(null, true)} AS ${m.alias}`), from: env.table, where: env.baseWhere }) });
+  if (metrics.length)
+    out.push({
+      title: 'Mesures globales',
+      sql: sqlSelect({
+        select: metrics.map(m => `${m.render(null, true)} AS ${m.alias}`),
+        from: env.table,
+        where: env.baseWhere
+      })
+    });
   walkAggs(ctx, env, rest, [], out);
   for (const s of siblings) {
-    const bp = String(s.body.buckets_path || ''); const [aggName, metric] = bp.split('>');
+    const bp = String(s.body.buckets_path || '');
+    const [aggName, metric] = bp.split('>');
     const target = out.find(q => q.path && q.path.length === 1 && q.path[0] === aggName);
-    if (!target || bp.split('>').length > 2) { todo(ctx, `pipeline ${s.type}`, `buckets_path « ${bp} » trop profond pour une traduction automatique.`); continue; }
+    if (!target || bp.split('>').length > 2) {
+      todo(ctx, `pipeline ${s.type}`, `buckets_path « ${bp} » trop profond pour une traduction automatique.`);
+      continue;
+    }
     const m = metric ? aliasOf(metric.replace(/\..*$/, '')) : 'doc_count';
-    const col = metric === '_count' ? 'doc_count' : m; const key = target.keyAlias || aliasOf(aggName); const A = aliasOf(s.name);
-    const sel = { avg_bucket: [`avg(${col}) AS ${A}`], sum_bucket: [`sum(${col}) AS ${A}`], min_bucket: [`min(${col}) AS ${A}`, `argMin(${key}, ${col}) AS ${aliasOf(s.name + '_key')}`], max_bucket: [`max(${col}) AS ${A}`, `argMax(${key}, ${col}) AS ${aliasOf(s.name + '_key')}`], stats_bucket: [`count() AS ${aliasOf(s.name + '_count')}`, `min(${col}) AS ${aliasOf(s.name + '_min')}`, `max(${col}) AS ${aliasOf(s.name + '_max')}`, `avg(${col}) AS ${aliasOf(s.name + '_avg')}`, `sum(${col}) AS ${aliasOf(s.name + '_sum')}`], extended_stats_bucket: [`avg(${col}) AS ${aliasOf(s.name + '_avg')}`, `stddevPop(${col}) AS ${aliasOf(s.name + '_std_deviation')}`], percentiles_bucket: [`quantilesTDigest(${(s.body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => chNum(p, 'percents') / 100).join(', ')})(${col}) AS ${A}`] }[s.type];
-    out.push({ title: `Pipeline ${s.name}`, sql: `SELECT\n${sel.map(x => '    ' + x).join(',\n')}\nFROM (\n${indent(target.sql, '    ')}\n)` });
+    const col = metric === '_count' ? 'doc_count' : m;
+    const key = target.keyAlias || aliasOf(aggName);
+    const A = aliasOf(s.name);
+    const sel = {
+      avg_bucket: [`avg(${col}) AS ${A}`],
+      sum_bucket: [`sum(${col}) AS ${A}`],
+      min_bucket: [`min(${col}) AS ${A}`, `argMin(${key}, ${col}) AS ${aliasOf(s.name + '_key')}`],
+      max_bucket: [`max(${col}) AS ${A}`, `argMax(${key}, ${col}) AS ${aliasOf(s.name + '_key')}`],
+      stats_bucket: [
+        `count() AS ${aliasOf(s.name + '_count')}`,
+        `min(${col}) AS ${aliasOf(s.name + '_min')}`,
+        `max(${col}) AS ${aliasOf(s.name + '_max')}`,
+        `avg(${col}) AS ${aliasOf(s.name + '_avg')}`,
+        `sum(${col}) AS ${aliasOf(s.name + '_sum')}`
+      ],
+      extended_stats_bucket: [
+        `avg(${col}) AS ${aliasOf(s.name + '_avg')}`,
+        `stddevPop(${col}) AS ${aliasOf(s.name + '_std_deviation')}`
+      ],
+      percentiles_bucket: [
+        `quantilesTDigest(${(s.body.percents || [1, 5, 25, 50, 75, 95, 99]).map(p => chNum(p, 'percents') / 100).join(', ')})(${col}) AS ${A}`
+      ]
+    }[s.type];
+    out.push({
+      title: `Pipeline ${s.name}`,
+      sql: `SELECT\n${sel.map(x => '    ' + x).join(',\n')}\nFROM (\n${indent(target.sql, '    ')}\n)`
+    });
     ctx.stats.ok++;
   }
   return out;
@@ -1978,12 +3301,19 @@ function selectList(ctx, dsl) {
     const name = String(f).replace(/\.keyword$/, '');
     let col;
     if (name === '*') col = '*';
-    else if (name.includes('*')) { col = `COLUMNS(${chStr(globToRe(name))})`; ctx.notes.add('opt', 'Motif de champs → COLUMNS()', 'COLUMNS(\'regex\') sélectionne dynamiquement les colonnes dont le nom correspond.'); }
-    else col = mapField(ctx, f);
+    else if (name.includes('*')) {
+      col = `COLUMNS(${chStr(globToRe(name))})`;
+      ctx.notes.add(
+        'opt',
+        'Motif de champs → COLUMNS()',
+        "COLUMNS('regex') sélectionne dynamiquement les colonnes dont le nom correspond."
+      );
+    } else col = mapField(ctx, f);
     if (!cols.includes(col)) cols.push(col);
   };
-  if (src === false) { /* rien */ }
-  else if (typeof src === 'string') addField(src);
+  if (src === false) {
+    /* rien */
+  } else if (typeof src === 'string') addField(src);
   else if (Array.isArray(src)) src.forEach(addField);
   else if (isObj(src)) {
     [].concat(src.includes || src.include || []).forEach(addField);
@@ -1992,57 +3322,112 @@ function selectList(ctx, dsl) {
       // Elasticsearch exclut un champ avec ses sous-champs, et accepte des motifs : une seule expression régulière,
       // que EXCEPT('regex') applique. Une liste de noms ignorerait en silence un motif ou un nom absent.
       const raw = c => (c.startsWith('`') ? c.slice(1, -1).replace(/\\(.)/g, '$1') : c);
-      const re = '^(?:' + ex.map(f => (String(f).includes('*') ? String(f).split('*').map(escRe).join('.*') : escRe(raw(mapField(ctx, f))))).join('|') + ')(?:\\..*)?$';
-      const kept = cols.filter(c => c.startsWith('COLUMNS(') || c === '*' || !new RegExp(re).test(raw(c))).map(c => (c.startsWith('COLUMNS(') || c === '*' ? `${c} EXCEPT (${chStr(re)})` : c));
+      const re =
+        '^(?:' +
+        ex
+          .map(f =>
+            String(f).includes('*') ? String(f).split('*').map(escRe).join('.*') : escRe(raw(mapField(ctx, f)))
+          )
+          .join('|') +
+        ')(?:\\..*)?$';
+      const kept = cols
+        .filter(c => c.startsWith('COLUMNS(') || c === '*' || !new RegExp(re).test(raw(c)))
+        .map(c => (c.startsWith('COLUMNS(') || c === '*' ? `${c} EXCEPT (${chStr(re)})` : c));
       cols.splice(0, cols.length, ...(cols.length ? kept : [`* EXCEPT (${chStr(re)})`]));
       ctx.stats.ok++;
     }
   }
-  for (const f of [].concat(dsl.fields || [], dsl.docvalue_fields || [], (dsl.stored_fields || []).filter(x => x !== '_none_'))) addField(isObj(f) ? f.field : f);
+  for (const f of [].concat(
+    dsl.fields || [],
+    dsl.docvalue_fields || [],
+    (dsl.stored_fields || []).filter(x => x !== '_none_')
+  ))
+    addField(isObj(f) ? f.field : f);
   // Discover demande « * » et @timestamp : * couvre déjà toutes les colonnes
   if (cols.includes('*')) cols.splice(0, cols.length, '*');
   for (const [n, sf] of Object.entries(dsl.script_fields || {})) {
-    try { const sc = sf.script || sf; const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, { mode: 'expr', params: sc.params || {} }); cols.push(`${r.sql} AS ${aliasOf(n)}`); ctx.stats.ok++; }
-    catch (e) { todo(ctx, `script_field ${n}`, e.message); }
+    try {
+      const sc = sf.script || sf;
+      const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, { mode: 'expr', params: sc.params || {} });
+      cols.push(`${r.sql} AS ${aliasOf(n)}`);
+      ctx.stats.ok++;
+    } catch (e) {
+      todo(ctx, `script_field ${n}`, e.message);
+    }
   }
   if (!cols.length || cols[0] === '*') {
     if (!cols.length) cols.push('*');
-    ctx.notes.add('opt', 'SELECT * sur une base colonnaire', 'ClickHouse lit chaque colonne séparément : listez uniquement les champs utiles dans _source pour réduire fortement les lectures disque.');
+    ctx.notes.add(
+      'opt',
+      'SELECT * sur une base colonnaire',
+      'ClickHouse lit chaque colonne séparément : listez uniquement les champs utiles dans _source pour réduire fortement les lectures disque.'
+    );
   }
   return cols;
 }
 function sortList(ctx, sort) {
   if (!sort) return [];
   const arr = Array.isArray(sort) ? sort : [sort];
-  const out = []; out.keys = [];
+  const out = [];
+  out.keys = [];
   for (const s of arr) {
-    let f, o = {};
-    if (typeof s === 'string') { f = s; o = { order: s === '_score' ? 'desc' : 'asc' }; }
-    else { f = Object.keys(s)[0]; o = isObj(s[f]) ? s[f] : { order: s[f] }; }
-    if (f === '_score') { ctx.notes.add('info', 'Tri par _score ignoré', 'Pas de score de pertinence en SQL.'); continue; }
+    let f,
+      o = {};
+    if (typeof s === 'string') {
+      f = s;
+      o = { order: s === '_score' ? 'desc' : 'asc' };
+    } else {
+      f = Object.keys(s)[0];
+      o = isObj(s[f]) ? s[f] : { order: s[f] };
+    }
+    if (f === '_score') {
+      ctx.notes.add('info', 'Tri par _score ignoré', 'Pas de score de pertinence en SQL.');
+      continue;
+    }
     if (f === '_doc' || f === '_shard_doc') continue;
     // Le sens est recopié dans le SQL : comme pour les agrégations (parseOrder), seuls asc et desc passent
     const dir = String(o.order || 'asc').toLowerCase();
     if (dir !== 'asc' && dir !== 'desc') throw new Error(`sens de tri inconnu pour ${f} : ${JSON.stringify(o.order)}`);
     if (f === '_script') {
-      try { const sc = o.script; const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, { mode: 'expr', params: sc.params || {} }); out.push(`${r.sql} ${dir.toUpperCase()}`); out.keys.push({ expr: r.sql, desc: dir === 'desc', index: arr.indexOf(s), field: null }); ctx.stats.ok++; }
-      catch (e) { todo(ctx, 'tri scripté', e.message); }
+      try {
+        const sc = o.script;
+        const r = painlessToSQL(ctx, typeof sc === 'string' ? sc : sc.source, {
+          mode: 'expr',
+          params: sc.params || {}
+        });
+        out.push(`${r.sql} ${dir.toUpperCase()}`);
+        out.keys.push({ expr: r.sql, desc: dir === 'desc', index: arr.indexOf(s), field: null });
+        ctx.stats.ok++;
+      } catch (e) {
+        todo(ctx, 'tri scripté', e.message);
+      }
       continue;
     }
-    if (f === '_geo_distance') { todo(ctx, 'tri _geo_distance', 'Utilisez ORDER BY geoDistance(lon, lat, x, y).'); continue; }
+    if (f === '_geo_distance') {
+      todo(ctx, 'tri _geo_distance', 'Utilisez ORDER BY geoDistance(lon, lat, x, y).');
+      continue;
+    }
     let e = mapField(ctx, f);
     // Champ multivalué : Elasticsearch trie sur le minimum en croissant, le maximum en décroissant (ou selon mode) ;
     // un document sans valeur va à la fin
     const ft = fieldType(ctx, f);
     if (ft && ft.array) {
-      const mode = { min: 'arrayMin', max: 'arrayMax', avg: 'arrayAvg', sum: 'arraySum' }[o.mode || (dir === 'desc' ? 'max' : 'min')];
+      const mode = { min: 'arrayMin', max: 'arrayMax', avg: 'arrayAvg', sum: 'arraySum' }[
+        o.mode || (dir === 'desc' ? 'max' : 'min')
+      ];
       if (!mode) throw new Error(`mode de tri inconnu pour ${f} : ${JSON.stringify(o.mode)}`);
       e = `if(empty(${e}), NULL, ${mode}(${e}))`;
     }
     // Attribut d’une Map : une clé absente vaut la chaîne vide, qui passerait en tête ; NULL la renvoie à la fin, comme Elasticsearch
     if (ft && ft.presence && !ft.nullable) e = `if(${ft.presence}, ${e}, NULL)`;
-    if (ft && ft.attr && ft.kind === 'string' && !ft.declared) ctx.notes.add('warn', `Tri sur l’attribut ${f}`, 'Son type n’est pas déclaré : les valeurs sont triées comme des chaînes (« 100 » avant « 99 »). Déclarez-le dans clickhouse.attribute_types si c’est un nombre ou une date.');
-    if (o.missing !== undefined && o.missing !== '_last' && o.missing !== '_first') e = `ifNull(${e}, ${valueFor(ctx, f, o.missing)})`;
+    if (ft && ft.attr && ft.kind === 'string' && !ft.declared)
+      ctx.notes.add(
+        'warn',
+        `Tri sur l’attribut ${f}`,
+        'Son type n’est pas déclaré : les valeurs sont triées comme des chaînes (« 100 » avant « 99 »). Déclarez-le dans clickhouse.attribute_types si c’est un nombre ou une date.'
+      );
+    if (o.missing !== undefined && o.missing !== '_last' && o.missing !== '_first')
+      e = `ifNull(${e}, ${valueFor(ctx, f, o.missing)})`;
     out.push(`${e} ${dir.toUpperCase()}${o.missing === '_first' ? ' NULLS FIRST' : ''}`);
     // Clé de tri et position de sa valeur dans search_after (_score, _doc et _shard_doc n’ont pas de colonne)
     out.keys.push({ expr: e, desc: dir === 'desc', index: arr.indexOf(s), field: f });
@@ -2056,49 +3441,108 @@ function hitsQuery(ctx, env, dsl, where) {
   const cols = selectList(ctx, dsl);
   let order = sortList(ctx, dsl.sort);
   const tf = [...ctx.dateFields][0] || (ctx.cfg.clickhouse.time_field ? chIdent(ctx.cfg.clickhouse.time_field) : null);
-  if (!order.length && tf) { order = [`${tf} DESC`]; ctx.notes.add('info', 'Tri par défaut', `Sans tri explicite, Elasticsearch classe par pertinence. Ici : ${tf} décroissant, le plus proche d’un usage « logs récents ».`); }
-  const w = where.slice(); let limitBy = null;
+  if (!order.length && tf) {
+    order = [`${tf} DESC`];
+    ctx.notes.add(
+      'info',
+      'Tri par défaut',
+      `Sans tri explicite, Elasticsearch classe par pertinence. Ici : ${tf} décroissant, le plus proche d’un usage « logs récents ».`
+    );
+  }
+  const w = where.slice();
+  let limitBy = null;
   if (dsl.search_after && dsl.sort) {
     // Chaque valeur du curseur est rapportée à sa clé de tri : celles de _score, _doc et _shard_doc sont écartées avec leur clé
     const keys = order.keys || [];
     // Elasticsearch renvoie la valeur de tri d’une date en epoch millis
-    const val = k => { const v = dsl.search_after[k.index]; return typeof v === 'number' && k.field && isDateField(ctx, k.field) ? epochMillisSQL(v) : chVal(v); };
+    const val = k => {
+      const v = dsl.search_after[k.index];
+      return typeof v === 'number' && k.field && isDateField(ctx, k.field) ? epochMillisSQL(v) : chVal(v);
+    };
     if (keys.length && keys.every(k => k.desc === keys[0].desc)) {
       w.push(`(${keys.map(k => k.expr).join(', ')}) ${keys[0].desc ? '<' : '>'} (${keys.map(val).join(', ')})`);
     } else if (keys.length) {
       // Sens mélangés : la comparaison de tuples ne s’applique plus, on développe clé par clé
-      w.push(orJoin(keys.map((k, i) => andJoin(keys.slice(0, i).map(p => `${p.expr} = ${val(p)}`).concat([`${k.expr} ${k.desc ? '<' : '>'} ${val(k)}`])))));
+      w.push(
+        orJoin(
+          keys.map((k, i) =>
+            andJoin(
+              keys
+                .slice(0, i)
+                .map(p => `${p.expr} = ${val(p)}`)
+                .concat([`${k.expr} ${k.desc ? '<' : '>'} ${val(k)}`])
+            )
+          )
+        )
+      );
     }
     ctx.stats.ok++;
   }
   if (dsl.collapse && dsl.collapse.field) {
-    limitBy = { n: 1, by: [mapField(ctx, dsl.collapse.field)] }; ctx.stats.ok++;
-    ctx.notes.add('opt', 'collapse → LIMIT 1 BY', `Un seul document par valeur de ${dsl.collapse.field}, en une passe (inner_hits non repris).`);
+    limitBy = { n: 1, by: [mapField(ctx, dsl.collapse.field)] };
+    ctx.stats.ok++;
+    ctx.notes.add(
+      'opt',
+      'collapse → LIMIT 1 BY',
+      `Un seul document par valeur de ${dsl.collapse.field}, en une passe (inner_hits non repris).`
+    );
   }
   const settings = [];
-  if (dsl.timeout) { const m = /^(\d+)(ms|s|m)?$/.exec(String(dsl.timeout)); if (m) settings.push(`max_execution_time = ${Math.max(1, Math.ceil(+m[1] * ({ ms: 0.001, s: 1, m: 60 }[m[2] || 's'])))}`); }
-  if (dsl.terminate_after) ctx.notes.add('info', 'terminate_after', 'Pas d’équivalent exact ; max_rows_to_read peut borner le volume lu (la requête échoue alors au lieu de tronquer).');
+  if (dsl.timeout) {
+    const m = /^(\d+)(ms|s|m)?$/.exec(String(dsl.timeout));
+    if (m)
+      settings.push(`max_execution_time = ${Math.max(1, Math.ceil(+m[1] * { ms: 0.001, s: 1, m: 60 }[m[2] || 's']))}`);
+  }
+  if (dsl.terminate_after)
+    ctx.notes.add(
+      'info',
+      'terminate_after',
+      'Pas d’équivalent exact ; max_rows_to_read peut borner le volume lu (la requête échoue alors au lieu de tronquer).'
+    );
   if (dsl.highlight) ctx.notes.add('info', 'highlight ignoré', 'La mise en évidence se fait côté application en SQL.');
-  const human = `renvoie ${size} document${size > 1 ? 's' : ''}` + (order.length ? ` triés par ${order[0].replace(/ DESC.*/, ' (décroissant)').replace(/ ASC.*/, '')}` : '') + (dsl.collapse ? `, un par ${dsl.collapse.field}` : '');
+  const human =
+    `renvoie ${size} document${size > 1 ? 's' : ''}` +
+    (order.length ? ` triés par ${order[0].replace(/ DESC.*/, ' (décroissant)').replace(/ ASC.*/, '')}` : '') +
+    (dsl.collapse ? `, un par ${dsl.collapse.field}` : '');
   ctx.human.hits = human;
-  return sqlSelect({ select: cols, from: env.table, where: w, orderBy: order, limitBy, limit: size, offset: from, settings });
+  return sqlSelect({
+    select: cols,
+    from: env.table,
+    where: w,
+    orderBy: order,
+    limitBy,
+    limit: size,
+    offset: from,
+    settings
+  });
 }
 
 /* ---------- Entrée principale ---------- */
-function resolveTable(ctx, index) {
+export function resolveTable(ctx, index) {
   const ch = ctx.cfg.clickhouse;
-  const idx = String(index || '').split(',')[0].trim();
+  const idx = String(index || '')
+    .split(',')[0]
+    .trim();
   if (idx) {
     for (const [pat, table] of Object.entries(ch.index_mapping || {})) {
       if (pat === idx || new RegExp(globToRe(pat)).test(idx)) return { table, index: idx, matched: pat };
     }
-    const guess = `${ch.database || 'default'}.${idx.replace(/\*$/, '').replace(/[^A-Za-z0-9_]+/g, '_').replace(/_+$/, '') || 'events'}`;
-    ctx.notes.add('warn', 'Index sans correspondance', `« ${idx} » n’a pas de table associée dans la configuration : ${guess} est utilisée par défaut.`);
+    const guess = `${ch.database || 'default'}.${
+      idx
+        .replace(/\*$/, '')
+        .replace(/[^A-Za-z0-9_]+/g, '_')
+        .replace(/_+$/, '') || 'events'
+    }`;
+    ctx.notes.add(
+      'warn',
+      'Index sans correspondance',
+      `« ${idx} » n’a pas de table associée dans la configuration : ${guess} est utilisée par défaut.`
+    );
     return { table: guess, index: idx, matched: null };
   }
   return { table: ch.default_table || `${ch.database}.events`, index: '', matched: null };
 }
-function preprocessDSL(text) {
+export function preprocessDSL(text) {
   return text.replace(/"""([\s\S]*?)"""/g, (m, inner) => JSON.stringify(inner.replace(/^\n+|\s+$/g, '')));
 }
 /*
@@ -2111,14 +3555,16 @@ function withClause(ctx, sql) {
   const used = new Set();
   const visit = s => {
     for (const r of rts) {
-      if (used.has(bare(r)) || !new RegExp('(^|[^A-Za-z0-9_.])' + escRe(bare(r)) + '($|[^A-Za-z0-9_])').test(s)) continue;
+      if (used.has(bare(r)) || !new RegExp('(^|[^A-Za-z0-9_.])' + escRe(bare(r)) + '($|[^A-Za-z0-9_])').test(s))
+        continue;
       used.add(bare(r));
       visit(r.sql);
     }
   };
   visit(sql);
   const defs = rts.filter(r => used.has(bare(r))).map(r => `${r.sql} AS ${r.alias}`);
-  if (sql.includes(RUNTIME_COLUMNS)) return sql.replace(RUNTIME_COLUMNS, () => defs.map(d => `,\n            ${d}`).join(''));
+  if (sql.includes(RUNTIME_COLUMNS))
+    return sql.replace(RUNTIME_COLUMNS, () => defs.map(d => `,\n            ${d}`).join(''));
   if (!defs.length) return sql;
   // Une seule clause WITH : les champs runtime d’abord, puis les CTE de la requête
   const list = defs.map(d => `    ${d}`).join(',\n');
@@ -2131,22 +3577,30 @@ function sentence(h) {
   if (where.length) s += `garde les documents où ${where.join(', ')}`;
   if (h.excludes.length) s += where.length ? `, sauf ${h.excludes.join(', ')}` : `écarte ${h.excludes.join(', ')}`;
   if (s) parts.push(s);
-  if (h.groups.length) parts.push(`${parts.length ? 'puis regroupe' : 'regroupe'} ${h.groups.join(', puis ')}${h.metrics.length ? `, avec ${h.metrics.join(', ')}` : ''}`);
+  if (h.groups.length)
+    parts.push(
+      `${parts.length ? 'puis regroupe' : 'regroupe'} ${h.groups.join(', puis ')}${h.metrics.length ? `, avec ${h.metrics.join(', ')}` : ''}`
+    );
   else if (h.metrics.length) parts.push(`${parts.length ? 'puis calcule' : 'calcule'} ${h.metrics.join(', ')}`);
   if (h.hits) parts.push(`${parts.length ? 'et ' : ''}${h.hits}`);
-  let out = parts.join(', ').replace(/^puis /, '').replace(/^et /, '');
+  let out = parts
+    .join(', ')
+    .replace(/^puis /, '')
+    .replace(/^et /, '');
   if (!out) return h.period ? `Sur ${h.period}, renvoie tous les documents.` : 'Renvoie tous les documents.';
   if (h.period) out = `Sur ${h.period}, ${out}`;
   out = out.charAt(0).toUpperCase() + out.slice(1);
   return out.replace(/\s+,/g, ',') + '.';
 }
-function translateDSL(input, cfg, opts) {
+export function translateDSL(input, cfg, opts) {
   // Première passe à blanc : elle relève les colonnes citées, que les alias de la seconde passe éviteront
   const columns = new Set();
-  aliasGuard.columns = new Set(); aliasGuard.renamed = new Map();
+  aliasGuard.columns = new Set();
+  aliasGuard.renamed = new Map();
   try {
     const first = translateRequest(input, cfg, opts, columns);
-    aliasGuard.columns = columns; aliasGuard.renamed = new Map();
+    aliasGuard.columns = columns;
+    aliasGuard.renamed = new Map();
     const lostParams = first && first.lostParams && first.lostParams.length ? first.lostParams : null;
     return translateRequest(input, cfg, lostParams ? Object.assign({}, opts, { lostParams }) : opts, new Set());
   } catch (e) {
@@ -2154,72 +3608,123 @@ function translateDSL(input, cfg, opts) {
     if (e instanceof RangeError) return { error: 'Requête trop imbriquée pour être traduite.' };
     throw e;
   } finally {
-    aliasGuard.columns = new Set(); aliasGuard.renamed = new Map();
+    aliasGuard.columns = new Set();
+    aliasGuard.renamed = new Map();
   }
 }
 function translateRequest(input, cfg, opts, columns) {
   opts = opts || {};
   const ctx = makeDslCtx(cfg);
-  ctx.columns = columns; ctx.opts = opts;
-  let text = String(input || '').trim(); let index = opts.index || ''; let endpoint = '_search';
+  ctx.columns = columns;
+  ctx.opts = opts;
+  let text = String(input || '').trim();
+  let index = opts.index || '';
+  let endpoint = '_search';
   if (!text) return { empty: true };
   const m = /^(GET|POST)\s+(\S+)[^\n]*\n?/i.exec(text);
   if (m) {
     const segs = m[2].replace(/^\//, '').split('/');
-    if (segs[0] && !segs[0].startsWith('_')) { index = segs[0]; endpoint = segs[1] || '_search'; } else endpoint = segs[0] || '_search';
+    if (segs[0] && !segs[0].startsWith('_')) {
+      index = segs[0];
+      endpoint = segs[1] || '_search';
+    } else endpoint = segs[0] || '_search';
     text = text.slice(m[0].length).trim();
   }
   let dsl;
-  try { dsl = text ? JSON.parse(preprocessDSL(text)) : {}; }
-  catch (e) { return { error: `JSON invalide : ${e.message}` }; }
+  try {
+    dsl = text ? JSON.parse(preprocessDSL(text)) : {};
+  } catch (e) {
+    return { error: `JSON invalide : ${e.message}` };
+  }
   if (!isObj(dsl)) return { error: 'La requête doit être un objet JSON.' };
-  if (dsl.params && isObj(dsl.params.body)) { index = index || dsl.params.index || ''; dsl = dsl.params.body; }
-  else if (isObj(dsl.body) && (dsl.index || Object.keys(dsl).length <= 3)) { index = index || dsl.index || ''; dsl = dsl.body; }
+  if (dsl.params && isObj(dsl.params.body)) {
+    index = index || dsl.params.index || '';
+    dsl = dsl.params.body;
+  } else if (isObj(dsl.body) && (dsl.index || Object.keys(dsl).length <= 3)) {
+    index = index || dsl.index || '';
+    dsl = dsl.body;
+  }
   // Au-delà, la traduction récursive épuiserait la pile ; Elasticsearch limite lui aussi l’imbrication
-  if (jsonDepth(dsl) > MAX_DSL_DEPTH) return { error: `Requête refusée : imbriquée sur plus de ${MAX_DSL_DEPTH} niveaux.` };
+  if (jsonDepth(dsl) > MAX_DSL_DEPTH)
+    return { error: `Requête refusée : imbriquée sur plus de ${MAX_DSL_DEPTH} niveaux.` };
   const check = checkDSL(dsl);
   if (check.errors.length) {
     const more = check.errors.length - 1;
-    return { error: `Requête refusée, comme Elasticsearch la refuserait : ${check.errors[0]}${more ? ` (et ${more} autre${more > 1 ? 's' : ''} erreur${more > 1 ? 's' : ''})` : ''}.` };
+    return {
+      error: `Requête refusée, comme Elasticsearch la refuserait : ${check.errors[0]}${more ? ` (et ${more} autre${more > 1 ? 's' : ''} erreur${more > 1 ? 's' : ''})` : ''}.`
+    };
   }
   const tpl = extractTemplates(dsl);
-  dsl = tpl.dsl; ctx.params = tpl.params;
+  dsl = tpl.dsl;
+  ctx.params = tpl.params;
   const fail = msg => ({ error: restoreTemplates(msg, ctx.params) });
-  const lost = (opts.lostParams || []).map(p => ({ kind: 'todo', label: `modèle « ${p.source} »`, detail: 'La valeur n’est connue qu’à l’exécution, mais cet emplacement (recherche plein texte, intervalle, taille…) demande une valeur fixée à la traduction.' }));
+  const lost = (opts.lostParams || []).map(p => ({
+    kind: 'todo',
+    label: `modèle « ${p.source} »`,
+    detail:
+      'La valeur n’est connue qu’à l’exécution, mais cet emplacement (recherche plein texte, intervalle, taille…) demande une valeur fixée à la traduction.'
+  }));
   const guards = applyStrictIssues(ctx, check.issues.concat(tpl.issues, lost));
   const { table, matched } = resolveTable(ctx, index);
   ctx.table = table;
   // Profil de la table visée (clickhouse.tables) : schéma, renommages, attributs
-  try { ctx.cfg = tableConfig(cfg, table); } catch (e) { return fail(e.message); }
-  ctx.schema = hasSchema(ctx.cfg); ctx.targets = new Map();
+  try {
+    ctx.cfg = tableConfig(cfg, table);
+  } catch (e) {
+    return fail(e.message);
+  }
+  ctx.schema = hasSchema(ctx.cfg);
+  ctx.targets = new Map();
   const env = { table, baseWhere: [] };
   // Champs runtime
   const rtm = dsl.runtime_mappings || {};
-  for (const name of Object.keys(rtm)) ctx.runtime[name] = { alias: chIdent(rawAlias(name)), type: rtm[name].type, sql: null };
+  for (const name of Object.keys(rtm))
+    ctx.runtime[name] = { alias: chIdent(rawAlias(name)), type: rtm[name].type, sql: null };
   for (const [name, def] of Object.entries(rtm)) {
     const r = ctx.runtime[name];
-    if (!def.script) { ctx.notes.add('info', `Champ runtime « ${name} » sans script`, 'Il masque simplement un champ existant : la colonne est lue directement.'); delete ctx.runtime[name]; continue; }
-    const sc = def.script; const src = typeof sc === 'string' ? sc : sc.source;
+    if (!def.script) {
+      ctx.notes.add(
+        'info',
+        `Champ runtime « ${name} » sans script`,
+        'Il masque simplement un champ existant : la colonne est lue directement.'
+      );
+      delete ctx.runtime[name];
+      continue;
+    }
+    const sc = def.script;
+    const src = typeof sc === 'string' ? sc : sc.source;
     r.busy = true;
     try {
       const out = painlessToSQL(ctx, src, { mode: 'emit', params: (isObj(sc) && sc.params) || {}, rtType: def.type });
-      r.sql = out.sql; r.tree = out.tree; r.name = name;
+      r.sql = out.sql;
+      r.tree = out.tree;
+      r.name = name;
       // Le script lit une colonne du même nom que le champ : l’alias est distingué (hors chaînes, qui ne sont pas des colonnes)
-      if (new RegExp('(^|[^A-Za-z0-9_])' + escRe(r.alias) + '($|[^A-Za-z0-9_])').test(out.sql.replace(/'(?:[^'\\]|\\.)*'/g, "''"))) r.alias = chIdent(rawAlias(name + '_rt'));
+      if (
+        new RegExp('(^|[^A-Za-z0-9_])' + escRe(r.alias) + '($|[^A-Za-z0-9_])').test(
+          out.sql.replace(/'(?:[^'\\]|\\.)*'/g, "''")
+        )
+      )
+        r.alias = chIdent(rawAlias(name + '_rt'));
       // Le champ runtime vaut NULL s’il lit une colonne Nullable, ou quand le script n’émet rien
       r.nullable = mayBeNull(ctx, r.sql) || /\bNULL\b/.test(r.sql.replace(/'(?:[^'\\]|\\.)*'/g, "''"));
       if (r.nullable) ctx.nullableCols.add(r.alias);
-      ctx.stats.ok++; H(ctx, 'runtime', name);
+      ctx.stats.ok++;
+      H(ctx, 'runtime', name);
     } catch (e) {
       r.sql = `NULL /* à traduire : ${e.message.replace(/\*\//g, '')} */`;
-      ctx.stats.ko++; ctx.notes.add('err', `Champ runtime « ${name} » non traduit`, `Painless : ${e.message}.`, src);
+      ctx.stats.ko++;
+      ctx.notes.add('err', `Champ runtime « ${name} » non traduit`, `Painless : ${e.message}.`, src);
     }
     r.busy = false;
   }
   // Requête
   let where = [];
-  try { where = dsl.query ? conjunctsOf(ctx, dsl.query) : []; }
-  catch (e) { return fail(`Requête non analysable : ${e.message}`); }
+  try {
+    where = dsl.query ? conjunctsOf(ctx, dsl.query) : [];
+  } catch (e) {
+    return fail(`Requête non analysable : ${e.message}`);
+  }
   // Élément à reprendre hors des clauses (option, paramètre, modèle) : la requête s’arrête sur throwIf
   where = where.concat(guards);
   env.baseWhere = where;
@@ -2234,90 +3739,220 @@ function translateRequest(input, cfg, opts, columns) {
         statements.push(...rootAggs(ctx, env, dsl.aggs || dsl.aggregations));
       }
       let hw = where;
-      if (dsl.post_filter) { ctx.humanOff++; hw = where.concat(conjunctsOf(ctx, dsl.post_filter)); ctx.humanOff--; ctx.notes.add('info', 'post_filter', 'Appliqué uniquement à la liste des documents, pas aux agrégations, comme dans Elasticsearch.'); }
+      if (dsl.post_filter) {
+        ctx.humanOff++;
+        hw = where.concat(conjunctsOf(ctx, dsl.post_filter));
+        ctx.humanOff--;
+        ctx.notes.add(
+          'info',
+          'post_filter',
+          'Appliqué uniquement à la liste des documents, pas aux agrégations, comme dans Elasticsearch.'
+        );
+      }
       const hq = hitsQuery(ctx, env, dsl, hw);
       if (hq) {
         statements.push({ title: 'Documents', sql: hq });
-        if (dsl.size === undefined && (dsl.aggs || dsl.aggregations)) ctx.notes.add('info', 'size absent', 'Elasticsearch renvoie aussi 10 documents par défaut. Ajoutez "size": 0 pour ne garder que les agrégations.');
+        if (dsl.size === undefined && (dsl.aggs || dsl.aggregations))
+          ctx.notes.add(
+            'info',
+            'size absent',
+            'Elasticsearch renvoie aussi 10 documents par défaut. Ajoutez "size": 0 pour ne garder que les agrégations.'
+          );
       }
-      if (dsl.track_total_hits === true || (dsl.track_total_hits === undefined && hq && false)) statements.push({ title: 'Total (track_total_hits)', sql: sqlSelect({ select: ['count() AS total'], from: table, where: hw }) });
+      if (dsl.track_total_hits === true)
+        statements.push({
+          title: 'Total (track_total_hits)',
+          sql: sqlSelect({ select: ['count() AS total'], from: table, where: hw })
+        });
     }
   } catch (e) {
     // Paramètre invalide (taille, sens de tri…) ou construction hors de portée : mieux vaut refuser
     // la requête, comme Elasticsearch le fait d’un paramètre invalide, que renvoyer un SQL douteux
     return fail(`Traduction impossible : ${e.message}`);
   }
-  if (!statements.length) statements.push({ title: 'Comptage', sql: sqlSelect({ select: ['count() AS count'], from: table, where }) });
+  if (!statements.length)
+    statements.push({ title: 'Comptage', sql: sqlSelect({ select: ['count() AS count'], from: table, where }) });
   // Conseils
   if (ctx.dateFields.size) {
     const tf = [...ctx.dateFields][0];
-    ctx.notes.add('opt', 'Filtre temporel et clé de tri', `Le filtre sur ${tf} n’élague les données que si la table est partitionnée par date et si ${tf} figure dans la clé de tri, après les colonnes de faible cardinalité les plus filtrées.`, `-- Exemple de schéma adapté\nPARTITION BY toYYYYMMDD(${tf})\nORDER BY (${[...ctx.groupCols][0] || 'service'}, ${tf})`);
+    ctx.notes.add(
+      'opt',
+      'Filtre temporel et clé de tri',
+      `Le filtre sur ${tf} n’élague les données que si la table est partitionnée par date et si ${tf} figure dans la clé de tri, après les colonnes de faible cardinalité les plus filtrées.`,
+      `-- Exemple de schéma adapté\nPARTITION BY toYYYYMMDD(${tf})\nORDER BY (${[...ctx.groupCols][0] || 'service'}, ${tf})`
+    );
   }
   for (const col of ctx.textCols) {
     const base = col.replace(/[`.]/g, '_');
-    ctx.notes.add('opt', `Index plein texte sur ${col}`, `hasToken(lowerUTF8(${col}), …) exploite un index text construit sur la même expression : les blocs sans le mot sont sautés sans être lus. Le découpage splitByNonAlpha est celui de hasToken(). La taille de l’index dépend du nombre de mots distincts (identifiants, adresses IP) : mesurez-la dans system.data_skipping_indices. Un index tokenbf_v1 sur la même expression, de taille fixe par bloc, reste possible.`, `ALTER TABLE ${table}\n    ADD INDEX idx_${base}_text lowerUTF8(${col}) TYPE text(tokenizer = splitByNonAlpha);\nALTER TABLE ${table} MATERIALIZE INDEX idx_${base}_text;`);
+    ctx.notes.add(
+      'opt',
+      `Index plein texte sur ${col}`,
+      `hasToken(lowerUTF8(${col}), …) exploite un index text construit sur la même expression : les blocs sans le mot sont sautés sans être lus. Le découpage splitByNonAlpha est celui de hasToken(). La taille de l’index dépend du nombre de mots distincts (identifiants, adresses IP) : mesurez-la dans system.data_skipping_indices. Un index tokenbf_v1 sur la même expression, de taille fixe par bloc, reste possible.`,
+      `ALTER TABLE ${table}\n    ADD INDEX idx_${base}_text lowerUTF8(${col}) TYPE text(tokenizer = splitByNonAlpha);\nALTER TABLE ${table} MATERIALIZE INDEX idx_${base}_text;`
+    );
   }
-  if (ctx.leadingWildcard) ctx.notes.add('opt', 'Joker en tête de motif', `Un motif qui commence par * impose de lire toute la colonne ${ctx.leadingWildcard}. Un index text à trigrammes sert LIKE '%motif%' dès 4 caractères (vérifié sur ClickHouse 26.9) : les blocs sans les trigrammes du motif sont sautés.`, `ALTER TABLE ${table}\n    ADD INDEX idx_${String(ctx.leadingWildcard).replace(/[^A-Za-z0-9_]/g, '_')}_ngram ${ctx.leadingWildcard} TYPE text(tokenizer = ngrams(3));\nALTER TABLE ${table} MATERIALIZE INDEX idx_${String(ctx.leadingWildcard).replace(/[^A-Za-z0-9_]/g, '_')}_ngram;`);
+  if (ctx.leadingWildcard)
+    ctx.notes.add(
+      'opt',
+      'Joker en tête de motif',
+      `Un motif qui commence par * impose de lire toute la colonne ${ctx.leadingWildcard}. Un index text à trigrammes sert LIKE '%motif%' dès 4 caractères (vérifié sur ClickHouse 26.9) : les blocs sans les trigrammes du motif sont sautés.`,
+      `ALTER TABLE ${table}\n    ADD INDEX idx_${String(ctx.leadingWildcard).replace(/[^A-Za-z0-9_]/g, '_')}_ngram ${ctx.leadingWildcard} TYPE text(tokenizer = ngrams(3));\nALTER TABLE ${table} MATERIALIZE INDEX idx_${String(ctx.leadingWildcard).replace(/[^A-Za-z0-9_]/g, '_')}_ngram;`
+    );
   if (ctx.attrUsed && ctx.attrUsed.size) {
     // Un attribut lu par la requête se lit dans toute la Map ou la colonne JSON : une colonne matérialisée se lit seule,
     // se compresse mieux et peut entrer dans la clé de tri. L’absence y reste un NULL, comme dans Elasticsearch.
     const attrs = [...ctx.attrUsed.values()].slice(0, 8);
     const colName = a => rawAlias(a.key).replace(/^_+/, '') || 'attribut';
-    const typeOf = a => (a.type.kind === 'string' ? 'LowCardinality(Nullable(String))' : `Nullable(${a.type.kind === 'int' ? 'Int64' : a.type.kind === 'float' ? 'Float64' : a.type.kind === 'date' ? 'DateTime64(3)' : a.type.kind === 'bool' ? 'Bool' : 'String'})`);
+    const typeOf = a =>
+      a.type.kind === 'string'
+        ? 'LowCardinality(Nullable(String))'
+        : `Nullable(${a.type.kind === 'int' ? 'Int64' : a.type.kind === 'float' ? 'Float64' : a.type.kind === 'date' ? 'DateTime64(3)' : a.type.kind === 'bool' ? 'Bool' : 'String'})`;
     const expr = a => (a.presence && !a.type.nullable ? `if(${a.presence}, ${a.sql}, NULL)` : a.sql);
-    const ddl = attrs.map(a => `ALTER TABLE ${table}\n    ADD COLUMN ${chIdent(colName(a))} ${typeOf(a)} MATERIALIZED ${expr(a)};\nALTER TABLE ${table} MATERIALIZE COLUMN ${chIdent(colName(a))};`).join('\n');
+    const ddl = attrs
+      .map(
+        a =>
+          `ALTER TABLE ${table}\n    ADD COLUMN ${chIdent(colName(a))} ${typeOf(a)} MATERIALIZED ${expr(a)};\nALTER TABLE ${table} MATERIALIZE COLUMN ${chIdent(colName(a))};`
+      )
+      .join('\n');
     const yaml = attrs.map(a => `--   ${a.field}: ${colName(a)}`).join('\n');
-    ctx.notes.add('opt', 'Matérialiser les attributs les plus lus', `${attrs.map(a => a.key).join(', ')} : chaque lecture d’un attribut parcourt toute la colonne ${[...new Set(attrs.map(a => a.column))].join(' et ')}. Une colonne MATERIALIZED se lit seule, se compresse mieux et peut entrer dans la clé de tri. La clé absente y devient NULL : exists et les exclusions gardent le sens d’Elasticsearch. Déclarez ensuite la colonne dans field_mapping, pour que la traduction la lise.`, `${ddl}\n-- puis, dans le profil de la table (clickhouse.tables, field_mapping) :\n${yaml}`);
+    ctx.notes.add(
+      'opt',
+      'Matérialiser les attributs les plus lus',
+      `${attrs.map(a => a.key).join(', ')} : chaque lecture d’un attribut parcourt toute la colonne ${[...new Set(attrs.map(a => a.column))].join(' et ')}. Une colonne MATERIALIZED se lit seule, se compresse mieux et peut entrer dans la clé de tri. La clé absente y devient NULL : exists et les exclusions gardent le sens d’Elasticsearch. Déclarez ensuite la colonne dans field_mapping, pour que la traduction la lise.`,
+      `${ddl}\n-- puis, dans le profil de la table (clickhouse.tables, field_mapping) :\n${yaml}`
+    );
   }
-  if (ctx.groupCols.size) ctx.notes.add('opt', 'LowCardinality pour les regroupements', `${[...ctx.groupCols].join(', ')} : si le nombre de valeurs distinctes reste sous ~10 000, le type LowCardinality(String) accélère nettement GROUP BY et réduit le stockage.`);
-  if (statements.some(s => /\btop_\w+ AS \(\n/.test(s.sql))) ctx.notes.add('info', 'Top N imbriqués', 'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits en deux temps : une CTE top_<nom> retient les N premiers groupes du parent, puis la requête principale s’y limite, avec des comptes exacts là où Elasticsearch les estime par shard. Le filtre commun est nommé une fois (CTE base). ClickHouse recopie une CTE à chaque emploi : la table est lue une fois par CTE top_ et une fois par la requête principale.');
+  if (ctx.groupCols.size)
+    ctx.notes.add(
+      'opt',
+      'LowCardinality pour les regroupements',
+      `${[...ctx.groupCols].join(', ')} : si le nombre de valeurs distinctes reste sous ~10 000, le type LowCardinality(String) accélère nettement GROUP BY et réduit le stockage.`
+    );
+  if (statements.some(s => /\btop_\w+ AS \(\n/.test(s.sql)))
+    ctx.notes.add(
+      'info',
+      'Top N imbriqués',
+      'Les terms imbriqués d’Elasticsearch (top N par parent) sont reproduits en deux temps : une CTE top_<nom> retient les N premiers groupes du parent, puis la requête principale s’y limite, avec des comptes exacts là où Elasticsearch les estime par shard. Le filtre commun est nommé une fois (CTE base). ClickHouse recopie une CTE à chaque emploi : la table est lue une fois par CTE top_ et une fois par la requête principale.'
+    );
   // Modèles : marqueurs des littéraux → {nom:String} ; un marqueur hors littéral redevient lisible
   const grafana = !!opts.grafana;
-  const finish = s => restoreTemplates(grafana ? bindGrafana(s, ctx.params, opts.variables) : bindParams(s, ctx.params), ctx.params);
+  const finish = s =>
+    restoreTemplates(grafana ? bindGrafana(s, ctx.params, opts.variables) : bindParams(s, ctx.params), ctx.params);
   const statementsOut = statements.map(s => ({ title: s.title, sql: finish(withClause(ctx, s.sql)) }));
   const sql = statementsOut.map(s => `-- ${s.title}\n${s.sql};`).join('\n\n');
-  const params = (grafana ? grafanaParamsInSQL : paramsInSQL)(statementsOut.map(s => s.sql), ctx.params);
-  if (params.found.length && grafana) ctx.notes.add('info', 'Variables Grafana', `${params.found.map(p => p.source).join(', ')} : interpolées par Grafana (\${variable:singlequote}), une liste quand plusieurs valeurs sont choisies.`);
+  const params = (grafana ? grafanaParamsInSQL : paramsInSQL)(
+    statementsOut.map(s => s.sql),
+    ctx.params
+  );
+  if (params.found.length && grafana)
+    ctx.notes.add(
+      'info',
+      'Variables Grafana',
+      `${params.found.map(p => p.source).join(', ')} : interpolées par Grafana (\${variable:singlequote}), une liste quand plusieurs valeurs sont choisies.`
+    );
   else if (params.found.length) {
     const first = params.found[0].name;
-    ctx.notes.add('info', 'Paramètres de requête', `${params.found.map(p => `${p.source} → {${p.name}:${p.types.join(' | ')}}`).join(', ')}. La valeur est fournie à l’exécution : param_${first}=… dans l’URL de l’interface HTTP, --param_${first}=… avec clickhouse-client.`);
+    ctx.notes.add(
+      'info',
+      'Paramètres de requête',
+      `${params.found.map(p => `${p.source} → {${p.name}:${p.types.join(' | ')}}`).join(', ')}. La valeur est fournie à l’exécution : param_${first}=… dans l’URL de l’interface HTTP, --param_${first}=… avec clickhouse-client.`
+    );
   }
   // Champs runtime : conseil de matérialisation, avec un index quand le champ sert de filtre
   for (const r of Object.values(ctx.runtime)) {
     if (!r.tree) continue;
-    const chType = { keyword: 'String', long: 'Int64', double: 'Float64', date: 'DateTime64(3)', boolean: 'Bool', ip: 'String' }[r.type] || 'String';
+    const chType =
+      { keyword: 'String', long: 'Int64', double: 'Float64', date: 'DateTime64(3)', boolean: 'Bool', ip: 'String' }[
+        r.type
+      ] || 'String';
     const column = `ALTER TABLE ${table}\n    ADD COLUMN ${r.alias} ${r.nullable ? `Nullable(${chType})` : chType} MATERIALIZED ${r.sql};`;
     const bare = r.alias.replace(/`/g, '');
     const index = `ALTER TABLE ${table}\n    ADD INDEX idx_${bare} ${r.alias} TYPE bloom_filter GRANULARITY 4;\nALTER TABLE ${table} MATERIALIZE INDEX idx_${bare};`;
-    if (r.filtered) ctx.notes.add('opt', `Matérialiser et indexer « ${r.name} »`, 'Ce champ runtime sert de filtre. Calculé à la volée, il oblige ClickHouse à lire chaque ligne : ni la clé de tri ni les index ne peuvent l’aider, ce qui pèse d’autant plus qu’il est comparé à une longue liste. Stocké comme colonne MATERIALIZED, il est calculé une fois à l’insertion ; un index de saut permet alors d’écarter des blocs entiers.', `${column}\n${index}`);
-    else ctx.notes.add('opt', `Matérialiser « ${r.name} »`, 'Un champ runtime est recalculé à chaque requête. Stocké comme colonne MATERIALIZED, il est calculé une fois à l’insertion et peut être indexé.', column);
+    if (r.filtered)
+      ctx.notes.add(
+        'opt',
+        `Matérialiser et indexer « ${r.name} »`,
+        'Ce champ runtime sert de filtre. Calculé à la volée, il oblige ClickHouse à lire chaque ligne : ni la clé de tri ni les index ne peuvent l’aider, ce qui pèse d’autant plus qu’il est comparé à une longue liste. Stocké comme colonne MATERIALIZED, il est calculé une fois à l’insertion ; un index de saut permet alors d’écarter des blocs entiers.',
+        `${column}\n${index}`
+      );
+    else
+      ctx.notes.add(
+        'opt',
+        `Matérialiser « ${r.name} »`,
+        'Un champ runtime est recalculé à chaque requête. Stocké comme colonne MATERIALIZED, il est calculé une fois à l’insertion et peut être indexé.',
+        column
+      );
   }
   // Listes nommées : la table à créer et les lignes à y insérer accompagnent le SQL
   const lists = [...ctx.lists.values()].map(l => {
     const rows = l.values.map(v => `(${chStr(l.name)}, ${l.integers ? `'${v}'` : v})`);
     const create = `CREATE TABLE IF NOT EXISTS ${l.table}\n(\n    name LowCardinality(String),\n    value String\n)\nENGINE = ReplacingMergeTree\nORDER BY (name, value);`;
     const insert = shown => `INSERT INTO ${l.table} (name, value) VALUES\n    ${shown.join(',\n    ')};`;
-    const preview = rows.length > 20 ? `${insert(rows.slice(0, 20)).slice(0, -1)},\n    -- … ${rows.length - 20} autres valeurs : liste complète dans le champ « lists » de l’API, ou dans le fichier .lists.sql écrit par la CLI` : insert(rows);
-    ctx.notes.add('opt', `Liste nommée ${l.name} (${l.values.length} valeurs)`, `La liste est sortie du SQL et rangée dans ${l.table} sous le nom ${l.name}. Ce nom est l’empreinte de son contenu : la même liste dans une autre requête désigne la même ligne de table. Pour lui donner un nom lisible, déclarez clickhouse.lists.names: { ${l.fingerprint}: mon_nom }. Un IN sur sous-requête garde l’usage de la clé primaire d’un IN en clair.`, `${create}\n\n${preview}`);
-    return { name: l.name, fingerprint: l.fingerprint, table: l.table, count: l.values.length, sql: `${create}\n\n${insert(rows)}` };
+    const preview =
+      rows.length > 20
+        ? `${insert(rows.slice(0, 20)).slice(0, -1)},\n    -- … ${rows.length - 20} autres valeurs : liste complète dans le champ « lists » de l’API, ou dans le fichier .lists.sql écrit par la CLI`
+        : insert(rows);
+    ctx.notes.add(
+      'opt',
+      `Liste nommée ${l.name} (${l.values.length} valeurs)`,
+      `La liste est sortie du SQL et rangée dans ${l.table} sous le nom ${l.name}. Ce nom est l’empreinte de son contenu : la même liste dans une autre requête désigne la même ligne de table. Pour lui donner un nom lisible, déclarez clickhouse.lists.names: { ${l.fingerprint}: mon_nom }. Un IN sur sous-requête garde l’usage de la clé primaire d’un IN en clair.`,
+      `${create}\n\n${preview}`
+    );
+    return {
+      name: l.name,
+      fingerprint: l.fingerprint,
+      table: l.table,
+      count: l.values.length,
+      sql: `${create}\n\n${insert(rows)}`
+    };
   });
   // Au-delà de max_query_size (256 Kio par défaut), ClickHouse refuse la requête
   const longest = statementsOut.reduce((n, s) => Math.max(n, s.sql.length), 0);
-  if (longest > 262144) ctx.notes.add('warn', 'Requête trop longue pour ClickHouse', `Une requête fait ${Math.round(longest / 1024)} Kio. Au-delà de 256 Kio, ClickHouse la refuse par défaut (max_query_size). Si une longue liste de valeurs en est la cause, clickhouse.lists.threshold la sort du SQL pour une table nommée.`);
+  if (longest > 262144)
+    ctx.notes.add(
+      'warn',
+      'Requête trop longue pour ClickHouse',
+      `Une requête fait ${Math.round(longest / 1024)} Kio. Au-delà de 256 Kio, ClickHouse la refuse par défaut (max_query_size). Si une longue liste de valeurs en est la cause, clickhouse.lists.threshold la sort du SQL pour une table nommée.`
+    );
   if (ctx.unknownCols && ctx.unknownCols.size) {
     ctx.stats.approx++;
     const list = [...ctx.unknownCols];
-    ctx.notes.add('warn', `Colonne${list.length > 1 ? 's' : ''} absente${list.length > 1 ? 's' : ''} du schéma`, `${list.join(', ')} : le schéma déclaré de ${table} (clickhouse.columns, profil de la table) ne ${list.length > 1 ? 'les' : 'la'} connaît pas. ClickHouse refusera la requête si la table ne ${list.length > 1 ? 'les a' : 'l’a'} pas : ajoutez ${list.length > 1 ? 'ces colonnes' : 'la colonne'} au schéma, ou une correspondance dans field_mapping.`);
+    ctx.notes.add(
+      'warn',
+      `Colonne${list.length > 1 ? 's' : ''} absente${list.length > 1 ? 's' : ''} du schéma`,
+      `${list.join(', ')} : le schéma déclaré de ${table} (clickhouse.columns, profil de la table) ne ${list.length > 1 ? 'les' : 'la'} connaît pas. ClickHouse refusera la requête si la table ne ${list.length > 1 ? 'les a' : 'l’a'} pas : ajoutez ${list.length > 1 ? 'ces colonnes' : 'la colonne'} au schéma, ou une correspondance dans field_mapping.`
+    );
   }
   if (!ctx.schema && ctx.schemaGaps.size) {
     const labels = { must_not: 'une exclusion (must_not, NOT)', exists: 'exists' };
-    ctx.notes.add('warn', 'Schéma des colonnes non fourni', `La requête contient ${[...ctx.schemaGaps].map(g => labels[g]).join(' et ')}, dont le résultat dépend du type des colonnes. Sur une colonne Nullable, une exclusion écarte les lignes NULL qu’Elasticsearch garde ; sur une colonne non Nullable, exists est toujours vrai. Renseignez clickhouse.columns pour que la traduction en tienne compte.`);
+    ctx.notes.add(
+      'warn',
+      'Schéma des colonnes non fourni',
+      `La requête contient ${[...ctx.schemaGaps].map(g => labels[g]).join(' et ')}, dont le résultat dépend du type des colonnes. Sur une colonne Nullable, une exclusion écarte les lignes NULL qu’Elasticsearch garde ; sur une colonne non Nullable, exists est toujours vrai. Renseignez clickhouse.columns pour que la traduction en tienne compte.`
+    );
   }
-  for (const [name, alias] of aliasGuard.renamed) ctx.notes.add('warn', `Agrégation « ${name} » renommée ${alias}`, `${rawAlias(name)} est aussi une colonne citée par la requête : un alias du même nom la masquerait partout, y compris dans WHERE. La colonne de résultat s’appelle donc ${alias}.`);
+  for (const [name, alias] of aliasGuard.renamed)
+    ctx.notes.add(
+      'warn',
+      `Agrégation « ${name} » renommée ${alias}`,
+      `${rawAlias(name)} est aussi une colonne citée par la requête : un alias du même nom la masquerait partout, y compris dans WHERE. La colonne de résultat s’appelle donc ${alias}.`
+    );
   const order = { err: 0, warn: 1, opt: 2, info: 3 };
   ctx.notes.list.sort((a, b) => order[a.level] - order[b.level]);
   // Textes affichés : le marqueur d’un modèle redevient le modèle d’origine
   const human = restoreDeep(ctx.human, ctx.params);
-  return { sql, statements: statementsOut, lists, notes: restoreDeep(ctx.notes.list, ctx.params), stats: ctx.stats, table, index, matched, human, sentence: sentence(human), parameters: params.found, lostParams: params.lost.filter(p => !p.consumed) };
+  return {
+    sql,
+    statements: statementsOut,
+    lists,
+    notes: restoreDeep(ctx.notes.list, ctx.params),
+    stats: ctx.stats,
+    table,
+    index,
+    matched,
+    human,
+    sentence: sentence(human),
+    parameters: params.found,
+    lostParams: params.lost.filter(p => !p.consumed)
+  };
 }
-

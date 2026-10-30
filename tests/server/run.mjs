@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
-import { engineSource, serverSource } from '../../scripts/engine.mjs';
+import { bundleServer } from '../../scripts/bundle.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const rd = p => readFileSync(join(ROOT, p), 'utf8');
@@ -25,12 +25,13 @@ const check = (ok, label, detail) => {
 
 /* ---------- Montage ---------- */
 const BIN = join(TMP, 'passerelle.cjs');
-writeFileSync(BIN, "'use strict';\n" + engineSource() + serverSource());
+await bundleServer({ outfile: BIN });
 const UI = join(TMP, 'passerelle.html');
 writeFileSync(UI, '<!doctype html><html><body><script>void 0;</script></body></html>');
 // Faux Vector : recopie son environnement dans sa sortie, que l'API renvoie au client
 const VECTOR = join(TMP, 'vector');
-writeFileSync(VECTOR, '#!/bin/sh\nenv\n'); chmodSync(VECTOR, 0o755);
+writeFileSync(VECTOR, '#!/bin/sh\nenv\n');
+chmodSync(VECTOR, 0o755);
 
 const SECRET = 'secret-clickhouse-4f9a';
 const TOKEN = 'jeton-de-test-81c2';
@@ -43,47 +44,97 @@ let chDelay = 0;
 function fakeAST(sql) {
   const lines = ['SelectWithUnionQuery (children 1)'];
   for (const m of sql.matchAll(/\bFROM\s+([A-Za-z_][\w.]*)(\()?/g)) {
-    lines.push('   TableExpression (children 1)', m[2] ? `    Function ${m[1]} (children 1)` : `    TableIdentifier ${m[1]}`);
+    lines.push(
+      '   TableExpression (children 1)',
+      m[2] ? `    Function ${m[1]} (children 1)` : `    TableIdentifier ${m[1]}`
+    );
   }
   for (const m of sql.matchAll(/\b(dictGet\w*)\(/g)) lines.push(`   Function ${m[1]} (children 1)`);
   return lines.join('\n') + '\n';
 }
 const ch = http.createServer((req, res) => {
   chSeen.push(new URL(req.url, 'http://x'));
-  let body = ''; req.setEncoding('utf8'); req.on('data', d => { body += d; });
-  req.on('end', () => setTimeout(() => {
-    chBodies.push(body);
-    res.writeHead(200); res.end(/^EXPLAIN AST /.test(body) ? fakeAST(body) : 'Expression\n');
-  }, chDelay));
+  let body = '';
+  req.setEncoding('utf8');
+  req.on('data', d => {
+    body += d;
+  });
+  req.on('end', () =>
+    setTimeout(() => {
+      chBodies.push(body);
+      res.writeHead(200);
+      res.end(/^EXPLAIN AST /.test(body) ? fakeAST(body) : 'Expression\n');
+    }, chDelay)
+  );
 });
 await new Promise(r => ch.listen(0, '127.0.0.1', r));
 const CONFIG = join(TMP, 'passerelle.json');
 writeFileSync(CONFIG, JSON.stringify({ clickhouse: { endpoint: `http://127.0.0.1:${ch.address().port}` } }));
 
-const freePort = () => new Promise(r => { const s = net.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+const freePort = () =>
+  new Promise(r => {
+    const s = net.createServer().listen(0, '127.0.0.1', () => {
+      const p = s.address().port;
+      s.close(() => r(p));
+    });
+  });
 const servers = [];
 async function start(env) {
   const port = await freePort();
   const p = spawn(process.execPath, [BIN, 'serve', '--listen', `127.0.0.1:${port}`], {
-    env: Object.assign({ PATH: process.env.PATH, PASSERELLE_UI: UI, PASSERELLE_CONFIG: CONFIG, PASSERELLE_VECTOR_BIN: VECTOR, CLICKHOUSE_PASSWORD: SECRET }, env),
+    env: Object.assign(
+      {
+        PATH: process.env.PATH,
+        PASSERELLE_UI: UI,
+        PASSERELLE_CONFIG: CONFIG,
+        PASSERELLE_VECTOR_BIN: VECTOR,
+        CLICKHOUSE_PASSWORD: SECRET
+      },
+      env
+    ),
     stdio: ['ignore', 'ignore', 'pipe']
   });
-  let stderr = ''; p.stderr.on('data', d => { stderr += d; });
+  let stderr = '';
+  p.stderr.on('data', d => {
+    stderr += d;
+  });
   const srv = { port, proc: p, exited: null, stderr: () => stderr };
-  p.on('exit', code => { srv.exited = code; });
+  p.on('exit', code => {
+    srv.exited = code;
+  });
   servers.push(srv);
   for (let i = 0; i < 100; i++) {
     if (srv.exited !== null) throw new Error(`le serveur s'est arrêté au démarrage : ${stderr}`);
-    try { await request(srv, 'GET', '/healthz'); return srv; } catch (e) { await new Promise(r => setTimeout(r, 50)); }
+    try {
+      await request(srv, 'GET', '/healthz');
+      return srv;
+    } catch {
+      await new Promise(r => setTimeout(r, 50));
+    }
   }
   throw new Error('le serveur ne répond pas');
 }
 function request(srv, method, path, { body, headers } = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port: srv.port, method, path, headers: Object.assign({}, headers) }, res => {
-      let data = ''; res.setEncoding('utf8'); res.on('data', d => { data += d; });
-      res.on('end', () => { let j = null; try { j = JSON.parse(data); } catch (e) { /* page HTML */ } resolve({ status: res.statusCode, body: data, json: j }); });
-    });
+    const req = http.request(
+      { host: '127.0.0.1', port: srv.port, method, path, headers: Object.assign({}, headers) },
+      res => {
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', d => {
+          data += d;
+        });
+        res.on('end', () => {
+          let j = null;
+          try {
+            j = JSON.parse(data);
+          } catch {
+            /* page HTML */
+          }
+          resolve({ status: res.statusCode, body: data, json: j });
+        });
+      }
+    );
     req.on('error', reject);
     req.end(body);
   });
@@ -92,14 +143,19 @@ function request(srv, method, path, { body, headers } = {}) {
 function raw(srv, text) {
   return new Promise((resolve, reject) => {
     const s = net.connect(srv.port, '127.0.0.1', () => s.write(text));
-    let data = ''; s.on('data', d => { data += d; }); s.on('end', () => resolve(data.split('\r\n')[0])); s.on('error', reject);
+    let data = '';
+    s.on('data', d => {
+      data += d;
+    });
+    s.on('end', () => resolve(data.split('\r\n')[0]));
+    s.on('error', reject);
   });
 }
 const auth = { authorization: `Bearer ${TOKEN}` };
 const DSL = JSON.stringify({ query: { match_all: {} } });
 
 try {
-  const open = await start({});                          // sans jeton, usage local
+  const open = await start({}); // sans jeton, usage local
   const prod = await start({ PASSERELLE_TOKEN: TOKEN }); // comme le service systemd
 
   /* ---------- Adresse de requête invalide ---------- */
@@ -109,7 +165,10 @@ try {
   check(/ 400 /.test(line), 'GET // : réponse 400', line || 'pas de réponse');
 
   /* ---------- Requêtes intersites ---------- */
-  let r = await request(open, 'POST', '/v1/translate/dsl', { body: DSL, headers: { 'sec-fetch-site': 'cross-site', 'content-type': 'text/plain' } });
+  let r = await request(open, 'POST', '/v1/translate/dsl', {
+    body: DSL,
+    headers: { 'sec-fetch-site': 'cross-site', 'content-type': 'text/plain' }
+  });
   check(r.status === 403, 'requête intersite refusée sur /v1', `statut ${r.status}`);
   r = await request(open, 'POST', '/v1/translate/dsl', { body: DSL, headers: { 'sec-fetch-site': 'same-site' } });
   check(r.status === 403, 'requête d’un sous-domaine voisin refusée sur /v1', `statut ${r.status}`);
@@ -121,124 +180,370 @@ try {
   check(r.status === 403, 'sans jeton : Host étranger refusé (DNS rebinding)', `statut ${r.status}`);
   r = await request(open, 'POST', '/v1/translate/dsl', { body: DSL, headers: { host: '[::1]:8080' } });
   check(r.status === 200, 'sans jeton : Host de boucle locale accepté', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/dsl', { body: DSL, headers: Object.assign({ host: 'passerelle.example.com' }, auth) });
+  r = await request(prod, 'POST', '/v1/translate/dsl', {
+    body: DSL,
+    headers: Object.assign({ host: 'passerelle.example.com' }, auth)
+  });
   check(r.status === 200, 'avec jeton : Host public accepté (proxy nginx)', `statut ${r.status}`);
   r = await request(open, 'GET', '/healthz', { headers: { host: 'attaquant.example' } });
   check(r.status === 200, '/healthz reste accessible quel que soit le Host', `statut ${r.status}`);
 
   /* ---------- Validation Vector : aucun secret du service ---------- */
-  r = await request(prod, 'POST', '/v1/validate/vector', { body: 'sinks:\n  ch:\n    auth: { password: "${CLICKHOUSE_PASSWORD}" }\n', headers: auth });
+  r = await request(prod, 'POST', '/v1/validate/vector', {
+    body: 'sinks:\n  ch:\n    auth: { password: "${CLICKHOUSE_PASSWORD}" }\n',
+    headers: auth
+  });
   const out = r.json ? r.json.output : '';
-  check(r.status === 200 && /CLICKHOUSE_PASSWORD=validation/.test(out), 'validation Vector : variable référencée remplacée par une valeur factice', `statut ${r.status}`);
+  check(
+    r.status === 200 && /CLICKHOUSE_PASSWORD=validation/.test(out),
+    'validation Vector : variable référencée remplacée par une valeur factice',
+    `statut ${r.status}`
+  );
   check(!out.includes(SECRET), 'validation Vector : le mot de passe ClickHouse n’est pas transmis');
   check(!out.includes(TOKEN), 'validation Vector : le jeton d’API n’est pas transmis');
 
   /* ---------- Validation SQL ---------- */
   r = await request(prod, 'POST', '/v1/validate/sql', { body: 'SELECT 1', headers: auth });
   const seen = chSeen.at(-1);
-  check(r.status === 200 && seen && seen.searchParams.get('readonly') === '1', 'validation SQL en readonly=1', seen ? `readonly=${seen.searchParams.get('readonly')}` : `statut ${r.status}`);
+  check(
+    r.status === 200 && seen && seen.searchParams.get('readonly') === '1',
+    'validation SQL en readonly=1',
+    seen ? `readonly=${seen.searchParams.get('readonly')}` : `statut ${r.status}`
+  );
   chDelay = 500;
-  const all = await Promise.all([1, 2, 3].map(() => request(prod, 'POST', '/v1/validate/sql', { body: 'SELECT 1', headers: auth })));
+  const all = await Promise.all(
+    [1, 2, 3].map(() => request(prod, 'POST', '/v1/validate/sql', { body: 'SELECT 1', headers: auth }))
+  );
   chDelay = 0;
-  check(all.some(x => x.status === 429), 'validation SQL : au plus deux en parallèle', all.map(x => x.status).join(', '));
+  check(
+    all.some(x => x.status === 429),
+    'validation SQL : au plus deux en parallèle',
+    all.map(x => x.status).join(', ')
+  );
   // EXPLAIN indexes = 1 évalue les sous-requêtes scalaires : une table hors configuration est refusée avant
-  r = await request(prod, 'POST', '/v1/validate/sql', { body: "SELECT count() FROM logs.events WHERE service = (SELECT any(k) FROM logs.secrets)", headers: auth });
-  check(r.status === 400 && /logs\.secrets/.test(r.json.error) && !chBodies.at(-1).startsWith('EXPLAIN indexes'), 'validation SQL : table hors configuration refusée avant EXPLAIN', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/validate/sql', { body: "SELECT * FROM url('http://exemple.invalid/x', CSV, 'a String')", headers: auth });
-  check(r.status === 400 && /url\(\)/.test(r.json.error), 'validation SQL : fonction de table refusée', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/validate/sql', { body: "SELECT dictGet('secrets', 'v', 1) FROM logs.events", headers: auth });
-  check(r.status === 400 && /dictGet/.test(r.json.error), 'validation SQL : lecture de dictionnaire refusée', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/validate/sql?param_when=2026-10-22&param_x%3By=1', { body: 'WITH base AS (SELECT * FROM logs.events) SELECT count() FROM base WHERE timestamp >= {when:String}', headers: auth });
+  r = await request(prod, 'POST', '/v1/validate/sql', {
+    body: 'SELECT count() FROM logs.events WHERE service = (SELECT any(k) FROM logs.secrets)',
+    headers: auth
+  });
+  check(
+    r.status === 400 && /logs\.secrets/.test(r.json.error) && !chBodies.at(-1).startsWith('EXPLAIN indexes'),
+    'validation SQL : table hors configuration refusée avant EXPLAIN',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/validate/sql', {
+    body: "SELECT * FROM url('http://exemple.invalid/x', CSV, 'a String')",
+    headers: auth
+  });
+  check(
+    r.status === 400 && /url\(\)/.test(r.json.error),
+    'validation SQL : fonction de table refusée',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/validate/sql', {
+    body: "SELECT dictGet('secrets', 'v', 1) FROM logs.events",
+    headers: auth
+  });
+  check(
+    r.status === 400 && /dictGet/.test(r.json.error),
+    'validation SQL : lecture de dictionnaire refusée',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/validate/sql?param_when=2026-10-22&param_x%3By=1', {
+    body: 'WITH base AS (SELECT * FROM logs.events) SELECT count() FROM base WHERE timestamp >= {when:String}',
+    headers: auth
+  });
   const sent = chSeen.at(-1);
-  check(r.status === 200 && r.json.valid && sent.searchParams.get('param_when') === '2026-10-22' && !sent.searchParams.has('param_x;y'), 'validation SQL : CTE acceptée, paramètres param_* transmis', `statut ${r.status}`);
+  check(
+    r.status === 200 &&
+      r.json.valid &&
+      sent.searchParams.get('param_when') === '2026-10-22' &&
+      !sent.searchParams.has('param_x;y'),
+    'validation SQL : CTE acceptée, paramètres param_* transmis',
+    `statut ${r.status}`
+  );
 
   /* ---------- Verdict ---------- */
-  r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ size: 0, query: { range: { '@timestamp': { gte: '{{ctx.trigger.scheduled_time}}||-5m' } } } }), headers: auth });
-  check(r.status === 200 && r.json.verdict && r.json.parameters.length === 1 && r.json.parameters[0].name === 'scheduled_time', 'traduction DSL : verdict et paramètres renvoyés', r.body.slice(0, 200));
-  r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ query: { bool: { filtre: [] } } }), headers: auth });
-  check(r.status === 422 && r.json.verdict === 'unrecognized', 'traduction DSL : clé inconnue refusée, verdict non reconnue', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/logstash', { body: 'input { stdin {} } filter { ruby { code => "x" } } output { stdout {} }', headers: auth });
-  check(r.status === 200 && r.json.verdict === 'todo', 'traduction Logstash : verdict renvoyé', r.json && r.json.verdict);
+  r = await request(prod, 'POST', '/v1/translate/dsl', {
+    body: JSON.stringify({
+      size: 0,
+      query: { range: { '@timestamp': { gte: '{{ctx.trigger.scheduled_time}}||-5m' } } }
+    }),
+    headers: auth
+  });
+  check(
+    r.status === 200 &&
+      r.json.verdict &&
+      r.json.parameters.length === 1 &&
+      r.json.parameters[0].name === 'scheduled_time',
+    'traduction DSL : verdict et paramètres renvoyés',
+    r.body.slice(0, 200)
+  );
+  r = await request(prod, 'POST', '/v1/translate/dsl', {
+    body: JSON.stringify({ query: { bool: { filtre: [] } } }),
+    headers: auth
+  });
+  check(
+    r.status === 422 && r.json.verdict === 'unrecognized',
+    'traduction DSL : clé inconnue refusée, verdict non reconnue',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/translate/logstash', {
+    body: 'input { stdin {} } filter { ruby { code => "x" } } output { stdout {} }',
+    headers: auth
+  });
+  check(
+    r.status === 200 && r.json.verdict === 'todo',
+    'traduction Logstash : verdict renvoyé',
+    r.json && r.json.verdict
+  );
 
   /* ---------- Ensemble de pipelines (pipelines.yml) ---------- */
   const yml = rd('examples/logstash/pipelines/pipelines.yml');
-  const confs = Object.fromEntries(['conf.d/entree.conf', 'conf.d/systeme.conf', 'conf.d/web/10-entree.conf', 'conf.d/web/20-filtres.conf', 'conf.d/web/30-sorties.conf'].map(f => [f, rd(`examples/logstash/pipelines/${f}`)]));
-  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: JSON.stringify({ pipelines: yml, files: confs }), headers: auth });
-  check(r.status === 200 && r.json.pipelines.length === 4 && r.json.pipelines.every(p => p.verdict !== 'todo') && /entree_routage/.test(r.json.config), 'pipelines.yml : quatre pipelines reliés en une configuration', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines?format=toml', { body: '- pipeline.id: seul\n  config.string: "input { stdin {} } output { stdout {} }"\n', headers: auth });
-  check(r.status === 200 && r.json.format === 'toml' && /\[sources\.seul_stdin_in\]/.test(r.json.config), 'pipelines.yml seul (config.string) : TOML', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: JSON.stringify({ pipelines: yml }), headers: auth });
-  check(r.status === 200 && r.json.verdict === 'todo' && r.json.pipelines.filter(p => p.error).length === 3, 'pipelines.yml sans ses fichiers : pipelines à reprendre, nommés', `statut ${r.status}`);
+  const confs = Object.fromEntries(
+    [
+      'conf.d/entree.conf',
+      'conf.d/systeme.conf',
+      'conf.d/web/10-entree.conf',
+      'conf.d/web/20-filtres.conf',
+      'conf.d/web/30-sorties.conf'
+    ].map(f => [f, rd(`examples/logstash/pipelines/${f}`)])
+  );
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', {
+    body: JSON.stringify({ pipelines: yml, files: confs }),
+    headers: auth
+  });
+  check(
+    r.status === 200 &&
+      r.json.pipelines.length === 4 &&
+      r.json.pipelines.every(p => p.verdict !== 'todo') &&
+      /entree_routage/.test(r.json.config),
+    'pipelines.yml : quatre pipelines reliés en une configuration',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines?format=toml', {
+    body: '- pipeline.id: seul\n  config.string: "input { stdin {} } output { stdout {} }"\n',
+    headers: auth
+  });
+  check(
+    r.status === 200 && r.json.format === 'toml' && /\[sources\.seul_stdin_in\]/.test(r.json.config),
+    'pipelines.yml seul (config.string) : TOML',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', {
+    body: JSON.stringify({ pipelines: yml }),
+    headers: auth
+  });
+  check(
+    r.status === 200 && r.json.verdict === 'todo' && r.json.pipelines.filter(p => p.error).length === 3,
+    'pipelines.yml sans ses fichiers : pipelines à reprendre, nommés',
+    `statut ${r.status}`
+  );
   r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: 'pipeline.id: x', headers: auth });
-  check(r.status === 422 && /liste/.test(r.json.error), 'pipelines.yml qui n’est pas une liste : refusé', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', { body: JSON.stringify({ pipelines: yml, files: ['x'] }), headers: auth });
+  check(
+    r.status === 422 && /liste/.test(r.json.error),
+    'pipelines.yml qui n’est pas une liste : refusé',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/translate/logstash/pipelines', {
+    body: JSON.stringify({ pipelines: yml, files: ['x'] }),
+    headers: auth
+  });
   check(r.status === 400, 'pipelines.yml : « files » mal formé refusé', `statut ${r.status}`);
 
   /* ---------- Pipelines d’ingestion Elasticsearch ---------- */
-  const ingFiles = Object.fromEntries(['acces-web', 'navigateur'].map(n => [`${n}.yml`, rd(`examples/ingest/${n}.yml`)]));
+  const ingFiles = Object.fromEntries(
+    ['acces-web', 'navigateur'].map(n => [`${n}.yml`, rd(`examples/ingest/${n}.yml`)])
+  );
   r = await request(prod, 'POST', '/v1/translate/ingest', { body: JSON.stringify({ files: ingFiles }), headers: auth });
-  check(r.status === 200 && r.json.pipelines.length === 1 && r.json.pipelines[0].name === 'acces-web' && r.json.verdict !== 'todo' && /ingest_acces_web/.test(r.json.config), 'ingest : deux pipelines, l’un appelant l’autre, une configuration', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/ingest?format=toml&name=seul', { body: 'processors:\n  - set: { field: a, value: 1 }\n', headers: auth });
-  check(r.status === 200 && r.json.format === 'toml' && r.json.pipelines[0].name === 'seul' && /\[transforms\.ingest_seul\]/.test(r.json.config), 'ingest : pipeline seul en TOML, nom pris dans ?name=', `statut ${r.status}`);
+  check(
+    r.status === 200 &&
+      r.json.pipelines.length === 1 &&
+      r.json.pipelines[0].name === 'acces-web' &&
+      r.json.verdict !== 'todo' &&
+      /ingest_acces_web/.test(r.json.config),
+    'ingest : deux pipelines, l’un appelant l’autre, une configuration',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/translate/ingest?format=toml&name=seul', {
+    body: 'processors:\n  - set: { field: a, value: 1 }\n',
+    headers: auth
+  });
+  check(
+    r.status === 200 &&
+      r.json.format === 'toml' &&
+      r.json.pipelines[0].name === 'seul' &&
+      /\[transforms\.ingest_seul\]/.test(r.json.config),
+    'ingest : pipeline seul en TOML, nom pris dans ?name=',
+    `statut ${r.status}`
+  );
   r = await request(prod, 'POST', '/v1/translate/ingest', { body: 'rien de lisible', headers: auth });
   check(r.status === 422 && r.json.verdict === 'unrecognized', 'ingest : texte illisible refusé', `statut ${r.status}`);
 
   /* ---------- Schéma et analyseurs ---------- */
-  const mapping = rd('examples/schema/logs_app.txt'); const catalogue = rd('examples/analyseurs/catalogue.txt');
+  const mapping = rd('examples/schema/logs_app.txt');
+  const catalogue = rd('examples/analyseurs/catalogue.txt');
   r = await request(prod, 'POST', '/v1/schema/ddl', { body: mapping, headers: auth });
-  check(r.status === 200 && /CREATE TABLE IF NOT EXISTS logs\.events/.test(r.json.sql) && r.json.tables.length >= 1 && ['ready', 'review'].includes(r.json.verdict), 'schéma : CREATE TABLE depuis un modèle d’index', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/schema/ddl?format=sql', { body: JSON.stringify({ files: { modele: mapping } }), headers: auth });
-  check(r.status === 200 && /^-- Généré par Passerelle/.test(r.body) && /CREATE TABLE/.test(r.body), 'schéma : plusieurs documents ({ files }) et sortie SQL', `statut ${r.status}`);
+  check(
+    r.status === 200 &&
+      /CREATE TABLE IF NOT EXISTS logs\.events/.test(r.json.sql) &&
+      r.json.tables.length >= 1 &&
+      ['ready', 'review'].includes(r.json.verdict),
+    'schéma : CREATE TABLE depuis un modèle d’index',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/schema/ddl?format=sql', {
+    body: JSON.stringify({ files: { modele: mapping } }),
+    headers: auth
+  });
+  check(
+    r.status === 200 && /^-- Généré par Passerelle/.test(r.body) && /CREATE TABLE/.test(r.body),
+    'schéma : plusieurs documents ({ files }) et sortie SQL',
+    `statut ${r.status}`
+  );
   r = await request(prod, 'POST', '/v1/schema/ddl?preset=zzz', { body: mapping, headers: auth });
-  check(r.status === 422 && r.json.verdict === 'unrecognized', 'schéma : préréglage inconnu refusé', `statut ${r.status}`);
+  check(
+    r.status === 422 && r.json.verdict === 'unrecognized',
+    'schéma : préréglage inconnu refusé',
+    `statut ${r.status}`
+  );
   r = await request(prod, 'POST', '/v1/schema/ddl', { body: '{"files":3}', headers: auth });
   check(r.status === 400, 'schéma : « files » mal formé refusé', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/schema/analyzers?text=' + encodeURIComponent('L’éléphant d’Été'), { body: catalogue, headers: auth });
-  check(r.status === 200 && r.json.plans.length >= 3 && r.json.plans.every(x => x.plan.verdict) && ['ready', 'review', 'todo'].includes(r.json.verdict), 'analyseurs : un plan par champ, avec verdict', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/schema/analyzers?text=' + encodeURIComponent('L’éléphant d’Été'), {
+    body: catalogue,
+    headers: auth
+  });
+  check(
+    r.status === 200 &&
+      r.json.plans.length >= 3 &&
+      r.json.plans.every(x => x.plan.verdict) &&
+      ['ready', 'review', 'todo'].includes(r.json.verdict),
+    'analyseurs : un plan par champ, avec verdict',
+    `statut ${r.status}`
+  );
   r = await request(prod, 'POST', '/v1/schema/analyzers?format=md&field=titre', { body: catalogue, headers: auth });
-  check(r.status === 200 && /^# Analyseurs personnalisés/.test(r.body), 'analyseurs : rapport Markdown, champ choisi', `statut ${r.status}`);
+  check(
+    r.status === 200 && /^# Analyseurs personnalisés/.test(r.body),
+    'analyseurs : rapport Markdown, champ choisi',
+    `statut ${r.status}`
+  );
 
   /* ---------- Inventaire Kibana ---------- */
   const ndjson = rd('examples/kibana/supervision_web.ndjson');
   r = await request(prod, 'POST', '/v1/inventory/kibana', { body: ndjson, headers: auth });
-  check(r.status === 200 && r.json.summary.objects > 10 && r.json.entries.some(x => x.type === 'dashboard') && r.json.summary.effort.hours > 0, 'inventaire Kibana : objets, verdicts et effort', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/inventory/kibana?format=md&timezone=Europe/Paris', { body: ndjson, headers: auth });
-  check(r.status === 200 && /^# Inventaire de migration Kibana/.test(r.body), 'inventaire Kibana : rapport Markdown', `statut ${r.status}`);
+  check(
+    r.status === 200 &&
+      r.json.summary.objects > 10 &&
+      r.json.entries.some(x => x.type === 'dashboard') &&
+      r.json.summary.effort.hours > 0,
+    'inventaire Kibana : objets, verdicts et effort',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/inventory/kibana?format=md&timezone=Europe/Paris', {
+    body: ndjson,
+    headers: auth
+  });
+  check(
+    r.status === 200 && /^# Inventaire de migration Kibana/.test(r.body),
+    'inventaire Kibana : rapport Markdown',
+    `statut ${r.status}`
+  );
   r = await request(prod, 'POST', '/v1/inventory/kibana?timezone=Mars/Olympe', { body: ndjson, headers: auth });
-  check(r.status === 400 && /fuseau/.test(r.json.error), 'inventaire Kibana : fuseau inconnu refusé', `statut ${r.status}`);
+  check(
+    r.status === 400 && /fuseau/.test(r.json.error),
+    'inventaire Kibana : fuseau inconnu refusé',
+    `statut ${r.status}`
+  );
   r = await request(prod, 'POST', '/v1/inventory/kibana', { body: 'pas un export', headers: auth });
   check(r.status === 422, 'inventaire Kibana : fichier sans objet refusé', `statut ${r.status}`);
   // Un export de plusieurs Mio passe sur cette route, pas sur les autres
   const big = Array.from({ length: 220 }, () => ndjson).join('');
   r = await request(prod, 'POST', '/v1/inventory/kibana?format=csv', { body: big, headers: auth });
-  check(r.status === 200 && big.length > 2 * 1024 * 1024 && /^\ufeffType;/.test(r.body), 'inventaire Kibana : export de plus de 2 Mio accepté, CSV', `statut ${r.status}, ${Math.round(big.length / 1048576)} Mio`);
+  check(
+    r.status === 200 && big.length > 2 * 1024 * 1024 && /^\ufeffType;/.test(r.body),
+    'inventaire Kibana : export de plus de 2 Mio accepté, CSV',
+    `statut ${r.status}, ${Math.round(big.length / 1048576)} Mio`
+  );
 
   /* ---------- Tableau de bord Grafana ---------- */
-  r = await request(prod, 'POST', '/v1/translate/grafana?index=logs-*', { body: rd('examples/grafana/supervision_es.json'), headers: auth });
-  check(r.status === 200 && r.json.dashboard.__inputs.some(i => i.pluginId === 'grafana-clickhouse-datasource') && r.json.report.panels.length > 5, 'tableau de bord Grafana : converti, avec son rapport', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/grafana', { body: JSON.stringify({ panels: [{ type: 'text', title: 't' }] }), headers: auth });
-  check(r.status === 422 && /aucune requête Elasticsearch/.test(r.json.error), 'tableau de bord sans Elasticsearch : refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/grafana?index=logs-*', {
+    body: rd('examples/grafana/supervision_es.json'),
+    headers: auth
+  });
+  check(
+    r.status === 200 &&
+      r.json.dashboard.__inputs.some(i => i.pluginId === 'grafana-clickhouse-datasource') &&
+      r.json.report.panels.length > 5,
+    'tableau de bord Grafana : converti, avec son rapport',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/translate/grafana', {
+    body: JSON.stringify({ panels: [{ type: 'text', title: 't' }] }),
+    headers: auth
+  });
+  check(
+    r.status === 422 && /aucune requête Elasticsearch/.test(r.json.error),
+    'tableau de bord sans Elasticsearch : refusé',
+    `statut ${r.status}`
+  );
 
   /* ---------- Watches Elasticsearch ---------- */
   const watches = rd('examples/watcher/watches.json');
   r = await request(prod, 'POST', '/v1/translate/watcher', { body: watches, headers: auth });
-  check(r.status === 200 && r.json.summary.watches === 8 && r.json.summary.skipped === 1 && r.json.entries.some(x => x.queries.some(q => /AS declenchee/.test(q.sql))), 'watches : rapport JSON, décisions SQL, Stack Monitoring à part', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/watcher?format=md', { body: rd('examples/watcher/console.txt'), headers: auth });
-  check(r.status === 200 && /^# Migration des watches/.test(r.body) && /erreurs-paiement/.test(r.body), 'watches : console Kibana, rapport Markdown', `statut ${r.status}`);
+  check(
+    r.status === 200 &&
+      r.json.summary.watches === 8 &&
+      r.json.summary.skipped === 1 &&
+      r.json.entries.some(x => x.queries.some(q => /AS declenchee/.test(q.sql))),
+    'watches : rapport JSON, décisions SQL, Stack Monitoring à part',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/translate/watcher?format=md', {
+    body: rd('examples/watcher/console.txt'),
+    headers: auth
+  });
+  check(
+    r.status === 200 && /^# Migration des watches/.test(r.body) && /erreurs-paiement/.test(r.body),
+    'watches : console Kibana, rapport Markdown',
+    `statut ${r.status}`
+  );
   r = await request(prod, 'POST', '/v1/translate/watcher?format=csv', { body: watches, headers: auth });
   check(r.status === 200 && /^\ufeffIdentifiant;/.test(r.body), 'watches : CSV', `statut ${r.status}`);
   r = await request(prod, 'POST', '/v1/translate/watcher?format=toml', { body: watches, headers: auth });
   check(r.status === 400, 'watches : format inconnu refusé', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/watcher', { body: JSON.stringify({ query: { match_all: {} } }), headers: auth });
-  check(r.status === 422 && /aucune watch/.test(r.json.error), 'watches : une requête DSL n’est pas une watch', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/watcher', {
+    body: JSON.stringify({ query: { match_all: {} } }),
+    headers: auth
+  });
+  check(
+    r.status === 422 && /aucune watch/.test(r.json.error),
+    'watches : une requête DSL n’est pas une watch',
+    `statut ${r.status}`
+  );
 
   /* ---------- Sens de tri des documents ---------- */
-  r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ sort: [{ service: { order: 'desc; DROP TABLE logs.events --' } }] }), headers: auth });
-  check(r.status === 422 && !/DROP/i.test(r.json && r.json.sql || ''), 'sens de tri inconnu refusé', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ sort: [{ service: 'asc, (SELECT 1)' }] }), headers: auth });
+  r = await request(prod, 'POST', '/v1/translate/dsl', {
+    body: JSON.stringify({ sort: [{ service: { order: 'desc; DROP TABLE logs.events --' } }] }),
+    headers: auth
+  });
+  check(
+    r.status === 422 && !/DROP/i.test((r.json && r.json.sql) || ''),
+    'sens de tri inconnu refusé',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/translate/dsl', {
+    body: JSON.stringify({ sort: [{ service: 'asc, (SELECT 1)' }] }),
+    headers: auth
+  });
   check(r.status === 422, 'sens de tri écrit en chaîne vérifié aussi', `statut ${r.status}`);
-  r = await request(prod, 'POST', '/v1/translate/dsl', { body: JSON.stringify({ sort: [{ service: { order: 'DESC' } }, 'host'] }), headers: auth });
-  check(r.status === 200 && /ORDER BY service DESC, host ASC/.test(r.json.sql), 'sens de tri valides inchangés', r.json && r.json.sql);
+  r = await request(prod, 'POST', '/v1/translate/dsl', {
+    body: JSON.stringify({ sort: [{ service: { order: 'DESC' } }, 'host'] }),
+    headers: auth
+  });
+  check(
+    r.status === 200 && /ORDER BY service DESC, host ASC/.test(r.json.sql),
+    'sens de tri valides inchangés',
+    r.json && r.json.sql
+  );
 } catch (e) {
   check(false, 'serveur', e.message);
 } finally {
@@ -247,15 +552,28 @@ try {
 }
 
 /* ---------- Ligne de commande ---------- */
-const cli = (...args) => spawnSync(process.execPath, [BIN, ...args], { cwd: ROOT, encoding: 'utf8', env: { PATH: process.env.PATH } });
+const cli = (...args) =>
+  spawnSync(process.execPath, [BIN, ...args], { cwd: ROOT, encoding: 'utf8', env: { PATH: process.env.PATH } });
 let c = cli('dsl2sql', '--verbose', 'examples/dsl/erreurs_5xx.json', 'examples/dsl/recherche_texte.json');
-check(c.status === 0 && /erreurs_5xx/.test(c.stdout) && /recherche_texte/.test(c.stdout), 'dsl2sql --verbose A B : les deux fichiers traduits', `code ${c.status}`);
+check(
+  c.status === 0 && /erreurs_5xx/.test(c.stdout) && /recherche_texte/.test(c.stdout),
+  'dsl2sql --verbose A B : les deux fichiers traduits',
+  `code ${c.status}`
+);
 c = cli('ls2vector', 'examples/logstash/batch.conf', '--fail-on', 'todo');
 check(c.status === 2, '--fail-on todo : code 2 sur un élément à reprendre', `code ${c.status}`);
 c = cli('dsl2sql', 'examples/dsl/erreurs_5xx.json', '--fail-on', 'todo');
-check(c.status === 0 && /Verdict : /.test(c.stdout), '--fail-on todo : code 0 sans élément à reprendre, verdict dans le SQL', `code ${c.status}`);
+check(
+  c.status === 0 && /Verdict : /.test(c.stdout),
+  '--fail-on todo : code 0 sans élément à reprendre, verdict dans le SQL',
+  `code ${c.status}`
+);
 c = cli('dsl2sql', 'examples/dsl/erreurs_5xx.json', '--fail-on', 'review');
-check(c.status === 2 && /à vérifier/.test(c.stderr), '--fail-on review : code 2 sur un fichier à vérifier', `code ${c.status} ${c.stderr}`);
+check(
+  c.status === 2 && /à vérifier/.test(c.stderr),
+  '--fail-on review : code 2 sur un fichier à vérifier',
+  `code ${c.status} ${c.stderr}`
+);
 c = cli('ls2vector', 'examples/logstash/batch.conf', '--fail-on', 'todos');
 check(c.status === 1, '--fail-on avec une valeur inconnue : erreur', `code ${c.status}`);
 c = cli('ls2vector', 'examples/logstash/batch.conf', '--fial-on', 'todo');
@@ -264,19 +582,45 @@ c = cli('ls2vector', 'examples/logstash/batch.conf', '--format', 'tom');
 check(c.status === 1, '--format avec une valeur inconnue : erreur', `code ${c.status}`);
 const lsOut = join(TMP, 'sortie-vector');
 c = cli('ls2vector', 'examples/logstash/pipelines/pipelines.yml', '--out', lsOut);
-check(c.status === 0 && existsSync(join(lsOut, 'pipelines.yaml')) && /entree \(conf\.d\/entree\.conf, 1 fichier\)/.test(c.stderr) && /web \(conf\.d\/web\/\*\.conf, 3 fichiers\)/.test(c.stderr), 'ls2vector pipelines.yml --out : une configuration, chaque pipeline et ses fichiers listés', `code ${c.status} ${c.stderr}`);
+check(
+  c.status === 0 &&
+    existsSync(join(lsOut, 'pipelines.yaml')) &&
+    /entree \(conf\.d\/entree\.conf, 1 fichier\)/.test(c.stderr) &&
+    /web \(conf\.d\/web\/\*\.conf, 3 fichiers\)/.test(c.stderr),
+  'ls2vector pipelines.yml --out : une configuration, chaque pipeline et ses fichiers listés',
+  `code ${c.status} ${c.stderr}`
+);
 c = cli('ls2vector', 'examples/logstash/pipelines/', '--out', join(TMP, 'sortie-vector-2'));
-check(/pipelines\.yml : « passerelle ls2vector/.test(c.stderr), 'ls2vector sur un dossier qui porte pipelines.yml : la commande d’ensemble est indiquée', c.stderr.split('\n')[0]);
+check(
+  /pipelines\.yml : « passerelle ls2vector/.test(c.stderr),
+  'ls2vector sur un dossier qui porte pipelines.yml : la commande d’ensemble est indiquée',
+  c.stderr.split('\n')[0]
+);
 c = cli('ls2vector', 'examples/logstash/batch.conf', '--out', 'examples/logstash/batch.conf');
-check(c.status === 1 && /--out : impossible de créer le dossier/.test(c.stderr) && !/at /.test(c.stderr), '--out sur un fichier : erreur lisible, sans pile', c.stderr.trim());
+check(
+  c.status === 1 && /--out : impossible de créer le dossier/.test(c.stderr) && !/at /.test(c.stderr),
+  '--out sur un fichier : erreur lisible, sans pile',
+  c.stderr.trim()
+);
 c = cli('ls2vector', join(TMP, 'absent.yml'));
-check(c.status === 1 && /absent\.yml/.test(c.stderr), 'ls2vector pipelines.yml introuvable : erreur', `code ${c.status}`);
+check(
+  c.status === 1 && /absent\.yml/.test(c.stderr),
+  'ls2vector pipelines.yml introuvable : erreur',
+  `code ${c.status}`
+);
 c = cli('--help');
 check(/--verbose/.test(c.stdout), 'l’aide mentionne --verbose');
 
 const ingOut = join(TMP, 'ingest');
 c = cli('ingest', 'examples/ingest/', '--out', ingOut);
-check(c.status === 0 && existsSync(join(ingOut, 'ingest.yaml')) && readdirSync(join(ingOut, 'vrl')).includes('ingest_acces_web.vrl') && /acces-web — \d+ processeur/.test(c.stderr), 'ingest --out : configuration et un .vrl par transform', `code ${c.status} ${c.stderr}`);
+check(
+  c.status === 0 &&
+    existsSync(join(ingOut, 'ingest.yaml')) &&
+    readdirSync(join(ingOut, 'vrl')).includes('ingest_acces_web.vrl') &&
+    /acces-web — \d+ processeur/.test(c.stderr),
+  'ingest --out : configuration et un .vrl par transform',
+  `code ${c.status} ${c.stderr}`
+);
 c = cli('ingest', 'examples/ingest/acces-web.yml', '--format', 'toml');
 check(c.status === 0 && /\[transforms\./.test(c.stdout), 'ingest --format toml : sur la sortie standard');
 c = cli('ingest', 'examples/ingest/', '--format', 'sql');
@@ -285,10 +629,22 @@ c = cli('ingest', 'absent.yml');
 check(c.status === 1 && /introuvable/.test(c.stderr), 'ingest sur un fichier introuvable : erreur', `code ${c.status}`);
 
 c = cli('schema', 'analyzers', 'examples/analyseurs/catalogue.txt', '--text', 'Les téléviseurs', '--field', 'titre');
-check(c.status === 0 && /Aperçu de « Les téléviseurs »/.test(c.stdout) && /titre_mots/.test(c.stdout) && !/tags_mots/.test(c.stdout) && /titre · \(?.*à vérifier/.test(c.stderr + ' titre · à vérifier'), 'schema analyzers : plan et aperçu d’un seul champ', `code ${c.status} ${c.stderr}`);
+check(
+  c.status === 0 &&
+    /Aperçu de « Les téléviseurs »/.test(c.stdout) &&
+    /titre_mots/.test(c.stdout) &&
+    !/tags_mots/.test(c.stdout) &&
+    /titre · \(?.*à vérifier/.test(c.stderr + ' titre · à vérifier'),
+  'schema analyzers : plan et aperçu d’un seul champ',
+  `code ${c.status} ${c.stderr}`
+);
 const anOut = join(TMP, 'analyseurs');
 c = cli('schema', 'analyzers', 'examples/analyseurs/', '--format', 'sql', '--out', anOut);
-check(c.status === 0 && /MATERIALIZED/.test(readFileSync(join(anOut, 'analyseurs.sql'), 'utf8')), 'schema analyzers --format sql --out : un fichier SQL', `code ${c.status} ${c.stderr}`);
+check(
+  c.status === 0 && /MATERIALIZED/.test(readFileSync(join(anOut, 'analyseurs.sql'), 'utf8')),
+  'schema analyzers --format sql --out : un fichier SQL',
+  `code ${c.status} ${c.stderr}`
+);
 c = cli('schema', 'analyzers', 'examples/analyseurs/catalogue.txt', '--fail-on', 'review');
 check(c.status === 2, 'schema analyzers --fail-on review : code 2 pour des plans à vérifier', `code ${c.status}`);
 c = cli('schema', 'analyzers', 'examples/analyseurs/catalogue.txt', '--format', 'html');
@@ -296,36 +652,90 @@ check(c.status === 1 && /--format attend md, json ou sql/.test(c.stderr), 'schem
 
 const kibanaOut = join(TMP, 'inventaire');
 c = cli('kibana', 'examples/kibana/', '--config', 'examples/kibana/passerelle.yaml', '--out', kibanaOut);
-check(c.status === 0 && ['md', 'html', 'csv', 'json'].every(f => existsSync(join(kibanaOut, `inventaire.${f}`))) && readdirSync(join(kibanaOut, 'sql')).length > 10 && /Effort estimé/.test(c.stderr), 'kibana --out : rapports et fichiers SQL', `code ${c.status} ${c.stderr}`);
+check(
+  c.status === 0 &&
+    ['md', 'html', 'csv', 'json'].every(f => existsSync(join(kibanaOut, `inventaire.${f}`))) &&
+    readdirSync(join(kibanaOut, 'sql')).length > 10 &&
+    /Effort estimé/.test(c.stderr),
+  'kibana --out : rapports et fichiers SQL',
+  `code ${c.status} ${c.stderr}`
+);
 c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--fail-on', 'todo');
 check(c.status === 2, 'kibana --fail-on todo : code 2 quand un objet est à reprendre', `code ${c.status}`);
 c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--format', 'toml');
-check(c.status === 1 && /--format/.test(c.stderr), 'kibana --format : formats de l’inventaire seulement', `code ${c.status}`);
+check(
+  c.status === 1 && /--format/.test(c.stderr),
+  'kibana --format : formats de l’inventaire seulement',
+  `code ${c.status}`
+);
 c = cli('kibana', 'examples/kibana/supervision_web.ndjson', '--timezone', 'Mars/Olympe');
 check(c.status === 1 && /--timezone/.test(c.stderr), 'kibana --timezone : fuseau inconnu refusé', `code ${c.status}`);
 
 const grafanaOut = join(TMP, 'grafana');
-c = cli('grafana', 'examples/grafana/supervision_es.json', '--config', 'examples/grafana/passerelle.yaml', '--index', 'logs-web-*', '--out', grafanaOut);
-check(c.status === 0 && existsSync(join(grafanaOut, 'supervision_es.clickhouse.json')) && existsSync(join(grafanaOut, 'supervision_es.rapport.md')), 'grafana --out : tableau de bord converti et rapport', `code ${c.status} ${c.stderr}`);
+c = cli(
+  'grafana',
+  'examples/grafana/supervision_es.json',
+  '--config',
+  'examples/grafana/passerelle.yaml',
+  '--index',
+  'logs-web-*',
+  '--out',
+  grafanaOut
+);
+check(
+  c.status === 0 &&
+    existsSync(join(grafanaOut, 'supervision_es.clickhouse.json')) &&
+    existsSync(join(grafanaOut, 'supervision_es.rapport.md')),
+  'grafana --out : tableau de bord converti et rapport',
+  `code ${c.status} ${c.stderr}`
+);
 c = cli('grafana', 'examples/grafana/supervision_es.json', '--fail-on', 'todo');
-check(c.status === 2 && /"grafana-clickhouse-datasource"/.test(c.stdout), 'grafana --fail-on todo : JSON sur la sortie standard, code 2', `code ${c.status}`);
+check(
+  c.status === 2 && /"grafana-clickhouse-datasource"/.test(c.stdout),
+  'grafana --fail-on todo : JSON sur la sortie standard, code 2',
+  `code ${c.status}`
+);
 
 const watcherOut = join(TMP, 'watcher');
 c = cli('watcher', 'examples/watcher/', '--config', 'examples/watcher/passerelle.yaml', '--out', watcherOut);
-check(c.status === 0 && ['md', 'html', 'csv', 'json'].every(f => existsSync(join(watcherOut, `rapport.${f}`))) && readdirSync(join(watcherOut, 'sql')).length === 8 && !existsSync(join(watcherOut, 'export-watches.json')) && /10 watch\(es\)/.test(c.stderr), 'watcher --out : rapports et un fichier SQL par watch traduite', `code ${c.status} ${c.stderr}`);
+check(
+  c.status === 0 &&
+    ['md', 'html', 'csv', 'json'].every(f => existsSync(join(watcherOut, `rapport.${f}`))) &&
+    readdirSync(join(watcherOut, 'sql')).length === 8 &&
+    !existsSync(join(watcherOut, 'export-watches.json')) &&
+    /10 watch\(es\)/.test(c.stderr),
+  'watcher --out : rapports et un fichier SQL par watch traduite',
+  `code ${c.status} ${c.stderr}`
+);
 c = cli('watcher', 'examples/watcher/watches.json', '--fail-on', 'todo');
-check(c.status === 2 && /^# Migration des watches/.test(c.stdout), 'watcher --fail-on todo : rapport sur la sortie standard, code 2', `code ${c.status}`);
+check(
+  c.status === 2 && /^# Migration des watches/.test(c.stdout),
+  'watcher --fail-on todo : rapport sur la sortie standard, code 2',
+  `code ${c.status}`
+);
 c = cli('watcher', 'examples/watcher/watches.json', '--format', 'yaml');
-check(c.status === 1 && /--format/.test(c.stderr), 'watcher --format : formats du rapport seulement', `code ${c.status}`);
+check(
+  c.status === 1 && /--format/.test(c.stderr),
+  'watcher --format : formats du rapport seulement',
+  `code ${c.status}`
+);
 c = cli('watcher', 'examples/watcher/watches.json', '--es', 'http://127.0.0.1:1');
 check(c.status === 1 && /watcher pull/.test(c.stderr), 'watcher --es sans pull : refusé', `code ${c.status}`);
 c = cli('watcher');
-check(c.status === 1 && /aucune watch à lire/.test(c.stderr), 'watcher sans fichier : refusé, avec un exemple', `code ${c.status}`);
+check(
+  c.status === 1 && /aucune watch à lire/.test(c.stderr),
+  'watcher sans fichier : refusé, avec un exemple',
+  `code ${c.status}`
+);
 
 const typo = join(TMP, 'faute.yaml');
 writeFileSync(typo, 'version: 1\nclickhous:\n  endpoint: http://localhost:8123\nkafka:\n  bootstrap_server: k:9092\n');
 c = cli('check-config', '--config', typo);
-check(c.status === 1 && /clickhous/.test(c.stderr) && /kafka\.bootstrap_server/.test(c.stderr), 'check-config : clés inconnues refusées et nommées', `code ${c.status}`);
+check(
+  c.status === 1 && /clickhous/.test(c.stderr) && /kafka\.bootstrap_server/.test(c.stderr),
+  'check-config : clés inconnues refusées et nommées',
+  `code ${c.status}`
+);
 c = cli('check-config', '--quiet', '--config', 'packaging/passerelle.yaml');
 check(c.status === 0, 'check-config : la configuration livrée reste valide', c.stderr.trim());
 

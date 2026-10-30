@@ -488,7 +488,16 @@ Une faille à signaler ? Suivez la [politique de sécurité](SECURITY.md).
 
 ## Ce que Passerelle sait traduire
 
-**28** types de requêtes, **51** agrégations, **25** filtres Logstash, **35** processeurs d’ingestion, avec les langages qui vont avec : Painless, syntaxe Lucene et grok. Les cas approchés sont signalés « à vérifier », les cas non traduits « à reprendre », sans jamais passer inaperçus.
+<!-- couverture:début (généré par scripts/couverture.mjs --ecrire : ne pas modifier à la main) -->
+**28** types de requêtes, **52** agrégations, **25** filtres Logstash, **35** processeurs d’ingestion, avec les langages qui vont avec : Painless, syntaxe Lucene et grok. Les cas approchés sont signalés « à vérifier », les cas non traduits « à reprendre », sans jamais passer inaperçus.
+
+« Traduit » ne veut pas dire « vérifié ». Le banc différentiel (302 cas, décrit juste après) rejoue sur Elasticsearch et sur ClickHouse **18** de ces types de requêtes et **33** de ces agrégations, avec le même résultat. Le banc d’équivalence Logstash / Vector (260 cas) rejoue **23** de ces filtres. Les autres sont traduits, couverts par les instantanés de `tests/snapshots`, mais pas comparés au moteur d’origine :
+
+- requêtes : `boosting`, `combined_fields`, `constant_score`, `dis_max`, `function_score`, `match_all`, `match_none`, `nested`, `script`, `script_score` ;
+- agrégations : `auto_date_histogram`, `avg_bucket`, `boxplot`, `diversified_sampler`, `extended_stats_bucket`, `geohash_grid`, `geotile_grid`, `ip_range`, `min_bucket`, `moving_avg`, `nested`, `percentiles_bucket`, `rare_terms`, `reverse_nested`, `sampler`, `significant_terms`, `significant_text`, `stats_bucket`, `sum_bucket` ;
+- filtres Logstash : `environment`, `geoip` ;
+- processeurs d’ingestion : Vector compile le VRL de chacun (`vector validate`) et la CI rejoue les tests de pipeline des intégrations Elastic, sans que ce banc les compte.
+<!-- couverture:fin -->
 
 Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc différentiel](tests/README.md) exécute les mêmes requêtes sur Elasticsearch 7.17, 8.19 et 9.5 et sur ClickHouse, puis compare les résultats : la CI le joue sur les trois versions à chaque changement et avant chaque release.
 
@@ -500,13 +509,13 @@ Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc diffé
 | Domaine | Pris en charge |
 |---|---|
 | Requêtes | `bool`, `term`, `terms`, `range` (date math, fuseaux), `exists`, `prefix`, `wildcard`, `regexp`, `fuzzy`, `ids`, `match`, `match_phrase`, `match_phrase_prefix`, `match_bool_prefix`, `multi_match`, `combined_fields`, `query_string`, `simple_query_string`, `constant_score`, `dis_max`, `boosting`, `function_score`, `script_score`, `script`, `nested`, `geo_distance`, `match_all`, `match_none` |
-| Métriques | `avg`, `sum`, `min`, `max`, `value_count`, `cardinality`, `stats`, `extended_stats`, `percentiles`, `percentile_ranks`, `weighted_avg`, `top_metrics`, `boxplot` |
+| Métriques | `avg`, `sum`, `min`, `max`, `value_count`, `cardinality`, `stats`, `extended_stats`, `percentiles`, `percentile_ranks`, `weighted_avg`, `top_metrics`, `boxplot`, `rate` |
 | Regroupements | `terms` (imbriqués, top N par parent), `multi_terms`, `rare_terms`, `significant_terms`, `significant_text`, `date_histogram`, `auto_date_histogram`, `histogram`, `range`, `date_range`, `ip_range`, `filter`, `filters`, `missing`, `global`, `composite` (pagination), `top_hits`, `geohash_grid`, `geotile_grid`, `nested`, `reverse_nested`, `sampler`, `diversified_sampler` |
 | Pipelines d’agrégation | `bucket_selector`, `bucket_script`, `bucket_sort`, `cumulative_sum`, `derivative`, `serial_diff`, `moving_fn`, `moving_avg`, `avg_bucket`, `sum_bucket`, `min_bucket`, `max_bucket`, `stats_bucket`, `extended_stats_bucket`, `percentiles_bucket` |
 | Requête complète | `runtime_mappings`, `script_fields`, `_source`, `sort` (y compris scripté), `search_after`, `collapse`, `post_filter`, `track_total_hits`, `timeout`, format console Kibana |
 | Painless | Conditions, variables, `params`, dates et fuseaux (`ZonedDateTime`, `ChronoUnit`), chaînes, `Math`, conversions, `grok()` et `dissect()` |
 | Filtres Logstash | `grok` (60 motifs intégrés et motifs personnalisés), `dissect`, `date`, `mutate` (15 opérations), `json`, `kv`, `csv`, `xml`, `useragent`, `geoip`, `translate`, `fingerprint`, `uuid`, `urldecode`, `split`, `truncate`, `cidr`, `drop`, `prune`, `de_dot`, `syslog_pri`, `clone`, `throttle`, `environment`, `bytes` |
-| Pipelines d’ingestion Elasticsearch | `append`, `bytes`, `community_id`, `convert`, `csv`, `date`, `dissect`, `dot_expander`, `drop`, `fail`, `fingerprint`, `foreach`, `geoip`, `grok`, `gsub`, `html_strip`, `join`, `json`, `kv`, `lowercase`, `pipeline`, `registered_domain`, `remove`, `rename`, `reroute`, `script`, `set`, `split`, `terminate`, `trim`, `uppercase`, `uri_parts`, `urldecode`, `user_agent` |
+| Pipelines d’ingestion Elasticsearch | `append`, `bytes`, `community_id`, `convert`, `csv`, `date`, `dissect`, `dot_expander`, `drop`, `fail`, `fingerprint`, `foreach`, `geoip`, `grok`, `gsub`, `html_strip`, `join`, `json`, `kv`, `lowercase`, `pipeline`, `registered_domain`, `remove`, `rename`, `reroute`, `script`, `set`, `sort`, `split`, `terminate`, `trim`, `uppercase`, `uri_parts`, `urldecode`, `user_agent` |
 | Analyseurs | char_filters, tokenizers et filtres listés dans [docs/ANALYSEURS.md](docs/ANALYSEURS.md) |
 | Entrées et sorties | Kafka en entrée et en sortie (SASL, TLS, clés de message, compression) ; aussi `beats`, `tcp`, `udp`, `http`, `file`, `elasticsearch`, `stdout` |
 | Conditions Logstash | `if` / `else if` / `else`, `and`, `or`, `xor`, `nand`, `not`, `in`, `not in`, `=~`, `!~`, comparaisons |
@@ -520,6 +529,7 @@ Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc diffé
 ```bash
 npm ci
 npm test                 # traduit chaque exemple et vérifie le résultat
+npm run check            # mise en forme et lint (Biome), comme la CI ; « npm run format » corrige la mise en forme
 npm run test:diff        # compare les résultats de ClickHouse à ceux d’Elasticsearch (voir tests/README.md)
 npm run test:pipelines   # compare les événements de Vector à ceux de Logstash (voir tests/README.md)
 npm run build:ui         # dist/passerelle.html : l’interface autonome
@@ -527,7 +537,7 @@ npm run build:server     # interface et dist/passerelle.cjs, sans binaire (image
 npm run build            # interface, binaire Linux x86_64 et archive de release
 ```
 
-Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction (assemblé dans l’ordre donné par `scripts/engine.mjs`), `src/node/` pour les entrées-sorties de la ligne de commande (assemblé après le moteur), `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur.
+Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction (des modules ES, réunis par la façade `src/engine/index.js` ; il n’importe rien de Node.js ni du navigateur), `src/node/` pour les entrées-sorties de la ligne de commande, `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur. `scripts/bundle.mjs` (esbuild) réunit ces modules en un seul fichier pour la page, le binaire et l’image conteneur. `node scripts/couverture.mjs --ecrire` réécrit le bloc de chiffres de la section « Ce que Passerelle sait traduire » (`npm run couverture` en donne le bilan). `npm run check` lance Biome (formatage sur 120 colonnes et règles de lint : variable non déclarée, import ou variable inutilisés, code mort) ; la CI le lance avant les tests.
 
 ## Licence
 
