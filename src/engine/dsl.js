@@ -3713,7 +3713,7 @@ function translateRequest(input, cfg, opts, columns) {
             'Elasticsearch renvoie aussi 10 documents par défaut. Ajoutez "size": 0 pour ne garder que les agrégations.'
           );
       }
-      if (dsl.track_total_hits === true || (dsl.track_total_hits === undefined && hq && false))
+      if (dsl.track_total_hits === true)
         statements.push({
           title: 'Total (track_total_hits)',
           sql: sqlSelect({ select: ['count() AS total'], from: table, where: hw })

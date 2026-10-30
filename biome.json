@@ -36,6 +36,7 @@
         "noConstantBinaryExpressions": "error",
         "noDuplicateCase": "error",
         "noDuplicateObjectKeys": "error",
+        "noFallthroughSwitchClause": "error",
         "noSelfCompare": "error"
       }
     }

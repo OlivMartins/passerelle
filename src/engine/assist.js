@@ -150,7 +150,7 @@ function assistRubyTokens(src) {
       const p = prev();
       let j = i + 1;
       while (j < n && /[ \t\r\n]/.test(src[j])) j++;
-      const continues = p && p.t === 'op' && !['(', ')', ']', '}'].includes(p.v) && !(p.v === '|' && false);
+      const continues = p && p.t === 'op' && !['(', ')', ']', '}'].includes(p.v);
       const leadingDot = c === '\n' && src[j] === '.' && /[A-Za-z_]/.test(src[j + 1] || '');
       if (!(continues || leadingDot) && p && p.t !== 'nl') toks.push({ t: 'nl' });
       i++;
@@ -481,7 +481,7 @@ function assistRubyParse(src) {
         p++;
         let a = [];
         if (isOp('(')) a = args();
-        else if (peek().t === 'str' || peek().t === 're' || (peek().t === 'num' && false)) a = [expr()]; // « x.include? 'a' »
+        else if (peek().t === 'str' || peek().t === 're') a = [expr()]; // « x.include? 'a' »
         const call = { k: 'call', recv: e, name, args: a, safe };
         // Bloc : « do |x| … end » ou « { |x| … } »
         if (isKw('do') || (isOp('{') && toks[p + 1] && toks[p + 1].t === 'op' && toks[p + 1].v === '|')) {
@@ -785,9 +785,9 @@ class AssistRuby {
       case 'call':
         return this.call(n);
       case 're':
-        assistFail('expression régulière hors d’une comparaison (=~, match?, sub, gsub, split)');
+        return assistFail('expression régulière hors d’une comparaison (=~, match?, sub, gsub, split)');
       case 'range':
-        assistFail('intervalle hors d’un index');
+        return assistFail('intervalle hors d’un index');
       default:
         assistFail('expression non reprise');
     }
@@ -1097,7 +1097,7 @@ class AssistRuby {
       case 'remove':
       case 'tag':
       case 'cancel':
-        assistFail(`event.${m} employé comme une valeur`);
+        return assistFail(`event.${m} employé comme une valeur`);
       default:
         assistFail(`event.${m} non repris`);
     }

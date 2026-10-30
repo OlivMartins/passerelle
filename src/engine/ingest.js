@@ -2689,7 +2689,8 @@ Object.assign(IngestGen.prototype, {
         );
       }
       case 'remove':
-        if (a.length === 1 && !(e.args[0].k === 'str' && (path || isRoot))) {
+      case 'removeKey': {
+        if (name === 'remove' && a.length === 1 && !(e.args[0].k === 'str' && (path || isRoot))) {
           // def v = m.remove(k) : la valeur enlevée est rendue ; liste.remove(i) rend l’élément d’indice i
           const k = this.plTmp(a[0].c);
           const old = this.tmp('p');
@@ -2699,8 +2700,6 @@ Object.assign(IngestGen.prototype, {
           this.plMutate({ k: 'mcall', obj: e.obj, name: 'remove', args: [{ k: 'vrl', c: k.c, t: a[0].t }] }, env);
           return { c: old, t: 'any' };
         }
-      // fall through
-      case 'removeKey': {
         // def v = ctx.a.remove('b') : la valeur est lue puis le champ supprimé
         if (a.length !== 1 || e.args[0].k !== 'str' || !(path || isRoot))
           throw new Error('méthode « remove » non prise en charge');
