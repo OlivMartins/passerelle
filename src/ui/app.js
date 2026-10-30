@@ -1,4 +1,39 @@
 /* Passerelle — interface */
+import {
+  anReport,
+  configToYAML,
+  coverage,
+  DEFAULT_CONFIG,
+  frHours,
+  frNum,
+  grafanaDashboard,
+  grafanaReportMarkdown,
+  inventoryCSV,
+  inventoryHTML,
+  inventoryMarkdown,
+  inventorySQLFiles,
+  KB_TYPES,
+  kbFlat,
+  kibanaInventory,
+  kibanaObjects,
+  makeZip,
+  mergeConfig,
+  parseYAMLConfig,
+  schemaFromElastic,
+  translateDSL,
+  translateIngest,
+  translateLogstash,
+  verdictOf,
+  VERDICTS,
+  watcherReportCSV,
+  watcherReportHTML,
+  watcherReportMarkdown,
+  watcherSQLFiles,
+  watcherTranslate
+} from '../engine/index.js';
+// Les exemples (examples/) sont lus à la construction, par scripts/bundle.mjs
+import EXAMPLES from 'passerelle:examples';
+
 const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -10,14 +45,14 @@ const store = {
     try {
       const v = localStorage.getItem('passerelle:' + k);
       return v ? JSON.parse(v) : d;
-    } catch (e) {
+    } catch {
       return d;
     }
   },
   set(k, v) {
     try {
       localStorage.setItem('passerelle:' + k, JSON.stringify(v));
-    } catch (e) {
+    } catch {
       /* stockage indisponible */
     }
   }
@@ -206,7 +241,7 @@ const SERVER_CFG = (() => {
   try {
     const el = document.getElementById('server-config');
     return el ? JSON.parse(el.textContent) : null;
-  } catch (e) {
+  } catch {
     return null;
   }
 })();
@@ -290,7 +325,7 @@ async function copyText(text, what) {
   try {
     await navigator.clipboard.writeText(text);
     ok = true;
-  } catch (e) {
+  } catch {
     const ta = document.createElement('textarea');
     ta.value = text;
     ta.style.position = 'fixed';
@@ -299,7 +334,7 @@ async function copyText(text, what) {
     ta.select();
     try {
       ok = document.execCommand('copy');
-    } catch (e2) {
+    } catch {
       ok = false;
     }
     ta.remove();
@@ -318,7 +353,7 @@ async function saveFile(filename, data) {
   try {
     await downloads.save({ filename, data });
     toast(`${filename} prêt`);
-  } catch (e) {
+  } catch {
     toast('Le téléchargement n’a pas abouti. Utilisez la copie.');
   }
 }
@@ -501,7 +536,7 @@ function anatomyHTML(r) {
 function chHost() {
   try {
     return new URL(cfg.clickhouse.endpoint).host;
-  } catch (e) {
+  } catch {
     return cfg.clickhouse.endpoint || 'clickhouse';
   }
 }
@@ -1606,7 +1641,7 @@ const kbOwners = x => (x.parent ? [x.parent] : x.usedBy || []).map(k => (kbEntry
 const kbFileStatus = f => {
   try {
     return kibanaObjects(f.text).objects.length ? 'ok' : 'err';
-  } catch (e) {
+  } catch {
     return 'err';
   }
 };

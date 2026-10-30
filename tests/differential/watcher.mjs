@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dataset, ES_INDEX, INDEX, clickhouseDDL, clickhouseRow, esDocument, configOverride } from './dataset.mjs';
 import { WATCHES, TIMES } from './watches.mjs';
-import { loadEngine } from '../../scripts/engine.mjs';
+import * as E from '../../src/engine/index.js';
 
 const args = Object.fromEntries(
   process.argv.slice(2).map(a => {
@@ -33,7 +33,6 @@ const args = Object.fromEntries(
 const ES = (args.es || process.env.ES_URL || 'http://127.0.0.1:9200').replace(/\/+$/, '');
 const [CH_BIN, ...CH_PRE] = (process.env.CLICKHOUSE_LOCAL || 'clickhouse-local').split(' ');
 const WORK = join(process.env.PASSERELLE_DIFF_WORK || join(tmpdir(), 'passerelle-diff'), 'watcher');
-const E = loadEngine();
 const CH_ONLY = !!args['clickhouse-seul'];
 
 async function es(path, body, method) {

@@ -18,10 +18,9 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadEngine } from '../../scripts/engine.mjs';
+import * as E from '../../src/engine/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const E = loadEngine();
 const args = process.argv.slice(2);
 const require_ = args.includes('--require');
 const verbose = args.includes('--verbose');
@@ -91,7 +90,7 @@ function vrlRun(program, event) {
   if (/^\s*aborted\s*$/m.test(text) && !/^\s*\{/m.test(text)) return { event: null };
   try {
     return { event: JSON.parse((r.stdout || '').trim()) };
-  } catch (e) {
+  } catch {
     return { unreadable: text.slice(0, 400) };
   }
 }

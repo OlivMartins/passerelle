@@ -10,9 +10,10 @@ import { writeFileSync, readFileSync, rmSync, mkdirSync, existsSync, readdirSync
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { loadEngine } from '../../scripts/engine.mjs';
+import * as E from '../../src/engine/index.js';
 
-export const E = loadEngine();
+export { E };
+
 export const VECTOR = process.env.VECTOR_BIN || 'vector';
 export const WORK = process.env.PASSERELLE_INGEST_WORK || join(tmpdir(), 'passerelle-ingest');
 export const INTEGRATIONS = process.env.ELASTIC_INTEGRATIONS || '';

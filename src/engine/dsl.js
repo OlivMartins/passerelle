@@ -1,4 +1,50 @@
 /* Passerelle — moteur partie 2 : DSL Elasticsearch → SQL ClickHouse */
+import {
+  andJoin,
+  CH_KW,
+  chComment,
+  chIdent,
+  chInt,
+  chNum,
+  chStr,
+  chVal,
+  columnType,
+  escRe,
+  guessType,
+  hasSchema,
+  isObj,
+  isWrapped,
+  jsonDepth,
+  luceneParse,
+  makeNotes,
+  MAX_DSL_DEPTH,
+  orJoin,
+  painlessToSQL,
+  paren,
+  pArg,
+  parseColumnType,
+  scanTop,
+  simpleQueryParse,
+  tableConfig,
+  topHas,
+  tzArg,
+  zoneOf
+} from './base.js';
+import { applyStrictIssues, checkDSL } from './dsl-strict.js';
+import {
+  bindGrafana,
+  bindParams,
+  consumeParam,
+  extractTemplates,
+  grafanaParamsInSQL,
+  grafanaTime,
+  isParamMark,
+  paramsInSQL,
+  paramSource,
+  restoreDeep,
+  restoreTemplates
+} from './dsl-params.js';
+
 const DM_UNIT = { y: 'YEAR', M: 'MONTH', w: 'WEEK', d: 'DAY', h: 'HOUR', H: 'HOUR', m: 'MINUTE', s: 'SECOND' };
 const DM_ROUND = {
   y: 'toStartOfYear',
@@ -21,7 +67,7 @@ const FR_UNIT = {
 };
 const ISO_RE = /^\d{4}-\d{2}(-\d{2})?([T ][\d:.,]+)?(Z|[+-]\d{2}:?\d{2})?$/;
 
-function parseDateMath(v) {
+export function parseDateMath(v) {
   if (typeof v !== 'string') return null;
   const s = v.replace(/\s+/g, '');
   let base, rest;
@@ -116,7 +162,7 @@ function humanDate(v) {
   return String(v);
 }
 
-function makeDslCtx(cfg) {
+export function makeDslCtx(cfg) {
   const notes = makeNotes();
   const ctx = {
     cfg,
@@ -177,7 +223,7 @@ function makeDslCtx(cfg) {
  *   sql       valeur, convertie si son type est connu ; une conversion ratée ou une clé absente donnent NULL
  *   presence  le document a le champ (mapContains, chemin non NULL, liste des clés) ; null si on ne peut le savoir
  */
-const ATTR_REF = /^([A-Za-z_][A-Za-z0-9_]*)\[\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")\s*\]$/;
+export const ATTR_REF = /^([A-Za-z_][A-Za-z0-9_]*)\[\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")\s*\]$/;
 function fieldTarget(ctx, field) {
   const name = String(field).replace(/\.keyword$/, '');
   if (!ctx.targets) ctx.targets = new Map();
@@ -278,12 +324,12 @@ function fieldColumn(ctx, field) {
   return t.column;
 }
 // Type de la colonne d’après clickhouse.columns ; null pour un champ runtime ou une colonne que le schéma ne décrit pas
-function fieldType(ctx, field) {
+export function fieldType(ctx, field) {
   if (ctx.runtime[String(field).replace(/\.keyword$/, '')]) return null;
   const t = fieldTarget(ctx, field);
   return t.kind === 'attr' ? t.type : columnType(ctx.cfg, ctx.table, t.column);
 }
-const isArrayField = (ctx, field) => {
+export const isArrayField = (ctx, field) => {
   const t = fieldType(ctx, field);
   return !!t && t.array;
 };
@@ -326,14 +372,14 @@ function valueFor(ctx, field, v) {
  * « Le champ n’a pas de valeur » et son contraire, selon le type de la colonne :
  * tableau vide, chaîne vide quand elle représente l’absence (empty_as_missing), clé absente d’un attribut, NULL sinon.
  */
-function absentSQL(ctx, field) {
+export function absentSQL(ctx, field) {
   const f = mapField(ctx, field);
   const t = fieldType(ctx, field);
   if (t && t.array) return `empty(${f})`;
   if (t && t.absence) return t.absence;
   return emptyIsMissing(ctx, t) ? `${f} = ''` : `isNull(${f})`;
 }
-function presentSQL(ctx, field) {
+export function presentSQL(ctx, field) {
   const f = mapField(ctx, field);
   const t = fieldType(ctx, field);
   if (t && t.array) return `notEmpty(${f})`;
@@ -363,7 +409,7 @@ function H(ctx, kind, text) {
   }
   ctx.human[kind].push(text);
 }
-function mapField(ctx, field) {
+export function mapField(ctx, field) {
   let name = String(field);
   if (name.endsWith('.keyword')) {
     const base = name.slice(0, -8);
@@ -508,7 +554,7 @@ function regexFoldCase(re) {
   }
   return out;
 }
-function globToRe(g) {
+export function globToRe(g) {
   return '^' + String(g).split('*').map(escRe).join('.*') + '$';
 }
 function textFieldsOr(ctx, fields) {
@@ -535,7 +581,7 @@ function splitTopAnd(s) {
  * que dans un test de nullité. Dans WHERE, NULL vaut faux, ce qui convient à un filtre positif. Mais
  * NOT NULL reste NULL : la ligne est écartée, alors qu’Elasticsearch garde un document qui n’a pas le champ.
  */
-function mayBeNull(ctx, s) {
+export function mayBeNull(ctx, s) {
   if (!ctx.nullableCols.size) return false;
   const bare = String(s).replace(/'(?:[^'\\]|\\.)*'/g, "''");
   for (const col of ctx.nullableCols) {
@@ -1107,7 +1153,7 @@ function customDateFormat(fmt) {
  * En mode « tokens » (par défaut), un mot simple n’est cherché que par hasToken : « user » trouve aussi
  * « user_id », ce qu’Elasticsearch ne fait pas. Le mode « strict » ajoute la vérification à chaque mot.
  */
-function esTokens(text, keepCase) {
+export function esTokens(text, keepCase) {
   const chars = [...(keepCase ? String(text) : String(text).toLowerCase())];
   const letter = c => /\p{L}/u.test(c);
   const digit = c => /\p{N}/u.test(c);
@@ -1797,7 +1843,7 @@ function sqlSelect(o, ind) {
   if (o.settings && o.settings.length) L.push(ind + 'SETTINGS ' + o.settings.join(', '));
   return L.join('\n');
 }
-function indent(s, pre) {
+export function indent(s, pre) {
   return s
     .split('\n')
     .map(l => pre + l)
@@ -1880,7 +1926,7 @@ const aggChildren = def => def.aggs || def.aggregations || {};
  * translateDSL relève ces colonnes par une première passe, puis traduit pour de bon.
  */
 const aliasGuard = { columns: new Set(), renamed: new Map() };
-function rawAlias(name) {
+export function rawAlias(name) {
   return String(name)
     .replace(/[^A-Za-z0-9_]/g, '_')
     .replace(/^(\d)/, '_$1');
@@ -2214,7 +2260,7 @@ function parseOrder(order, def) {
 // terms et multi_terms : Elasticsearch départage toujours les égalités par clé croissante, même avec un order explicite
 const withKeyTiebreak = order => (order.some(o => o.by === '_key') ? order : [...order, { by: '_key', dir: 'asc' }]);
 // Elasticsearch écrit les bornes d’une plage comme des doubles Java : 100 devient « 100.0 »
-function javaDouble(v) {
+export function javaDouble(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return String(v);
   return Number.isInteger(n) && Math.abs(n) < 1e7 ? `${n}.0` : String(n);
@@ -3472,7 +3518,7 @@ function hitsQuery(ctx, env, dsl, where) {
 }
 
 /* ---------- Entrée principale ---------- */
-function resolveTable(ctx, index) {
+export function resolveTable(ctx, index) {
   const ch = ctx.cfg.clickhouse;
   const idx = String(index || '')
     .split(',')[0]
@@ -3496,7 +3542,7 @@ function resolveTable(ctx, index) {
   }
   return { table: ch.default_table || `${ch.database}.events`, index: '', matched: null };
 }
-function preprocessDSL(text) {
+export function preprocessDSL(text) {
   return text.replace(/"""([\s\S]*?)"""/g, (m, inner) => JSON.stringify(inner.replace(/^\n+|\s+$/g, '')));
 }
 /*
@@ -3546,7 +3592,7 @@ function sentence(h) {
   out = out.charAt(0).toUpperCase() + out.slice(1);
   return out.replace(/\s+,/g, ',') + '.';
 }
-function translateDSL(input, cfg, opts) {
+export function translateDSL(input, cfg, opts) {
   // Première passe à blanc : elle relève les colonnes citées, que les alias de la seconde passe éviteront
   const columns = new Set();
   aliasGuard.columns = new Set();

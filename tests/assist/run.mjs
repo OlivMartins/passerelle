@@ -29,11 +29,11 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
-import { loadEngine, engineSource, serverSource } from '../../scripts/engine.mjs';
+import * as E from '../../src/engine/index.js';
+import { bundleServer } from '../../scripts/bundle.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..', '..');
-const E = loadEngine();
 const TMP = mkdtempSync(join(tmpdir(), 'essai-assist-'));
 let failures = 0;
 const check = (ok, label, detail) => {
@@ -326,7 +326,7 @@ section('A. Le moteur');
 
 /* ====================================================================== */
 const BIN = join(TMP, 'passerelle.cjs');
-writeFileSync(BIN, "'use strict';\n" + engineSource() + serverSource());
+await bundleServer({ outfile: BIN });
 const BINDIR = join(TMP, 'bin');
 mkdirSync(BINDIR);
 const FAKE_VECTOR = join(BINDIR, 'vector');
@@ -355,7 +355,7 @@ function cli(args, env) {
           PATH: process.env.PATH,
           FAKE_LOG,
           VECTOR_FAKE_LOG: FAKE_LOG,
-          VECTOR_FAKE_ENGINE: join(ROOT, 'scripts', 'engine.mjs'),
+          VECTOR_FAKE_ENGINE: join(ROOT, 'src', 'engine', 'index.js'),
           PASSERELLE_VECTOR_BIN: FAKE_VECTOR
         },
         env
@@ -376,7 +376,7 @@ function cli(args, env) {
 const json = r => {
   try {
     return JSON.parse(r.stdout);
-  } catch (e) {
+  } catch {
     return null;
   }
 };
@@ -728,7 +728,7 @@ function fakeModel(answer) {
       let parsed = null;
       try {
         parsed = JSON.parse(body);
-      } catch (e) {
+      } catch {
         /* gardé tel quel */
       }
       seen.push({ method: req.method, url: req.url, headers: req.headers, raw: body, body: parsed });
@@ -1406,7 +1406,7 @@ section('E. Configuration, aide et service');
     try {
       const h = await fetch(`http://127.0.0.1:${port}/healthz`);
       up = h.ok;
-    } catch (e) {
+    } catch {
       await new Promise(r => setTimeout(r, 100));
     }
   }

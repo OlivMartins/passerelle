@@ -1,4 +1,6 @@
 /* Passerelle — moteur : KQL, le langage de requête de Kibana, vers le DSL d’Elasticsearch */
+import { escRe } from './base.js';
+
 /*
  * Kibana traduit lui-même KQL en DSL avant d’interroger Elasticsearch (kbn-es-query). La traduction ci-dessous suit
  * sa grammaire (grammar.peggy) et ses règles de conversion (functions/is.ts, range.ts, exists.ts), puis le DSL obtenu
@@ -17,7 +19,7 @@
 const KQL_WILD = '\u0000*\u0000';
 const KQL_MAX_DEPTH = 64;
 const KQL_SPECIAL = '\\():<>"*{}';
-function kqlParse(input) {
+export function kqlParse(input) {
   const s = String(input === undefined || input === null ? '' : input);
   let i = 0;
   let depth = 0;
@@ -275,7 +277,7 @@ const kqlLoneWildcard = v => !!v && v.wildcard && String(v.value).replace(KQL_WI
  * Kibana interroge alors le champ tel quel par match). opts.fields : noms connus, pour les champs à motif.
  * opts.issues reçoit ce qui ne se traduit pas fidèlement ({ kind: 'todo' | 'review', label, detail }).
  */
-function kqlToDSL(node, opts) {
+export function kqlToDSL(node, opts) {
   opts = opts || {};
   const issues = opts.issues || [];
   const typeOf = name => (opts.fieldType ? opts.fieldType(name) : null);
@@ -364,6 +366,6 @@ function kqlToDSL(node, opts) {
   }
   return walk(node, opts.nestedPath || '');
 }
-function kqlTranslate(query, opts) {
+export function kqlTranslate(query, opts) {
   return kqlToDSL(kqlParse(query), opts);
 }

@@ -1,6 +1,9 @@
 /* Passerelle — moteur partie 3 : Logstash → Vector */
+import { dissectRegex, isObj, makeNotes, segName, splitTopArgs, vq, vraw } from './base.js';
+import { clickhouseOutput } from './sink.js';
+
 const LS_MAX_DEPTH = 64;
-function parseLogstash(src) {
+export function parseLogstash(src) {
   let i = 0;
   const s = String(src);
   const n = s.length;
@@ -330,8 +333,8 @@ function lsPairs(v) {
   }
   return [];
 }
-const lsList = v => (v === undefined || v === null ? [] : Array.isArray(v) ? v : [v]);
-function fieldSegs(ref) {
+export const lsList = v => (v === undefined || v === null ? [] : Array.isArray(v) ? v : [v]);
+export function fieldSegs(ref) {
   ref = String(ref).trim();
   if (ref.startsWith('[')) {
     const segs = [];
@@ -349,7 +352,7 @@ const KAFKA_META = {
   headers: 'headers',
   consumer_group: 'consumer_group'
 };
-function vPathOf(segs, ns) {
+export function vPathOf(segs, ns) {
   if (segs[0] === '@metadata') {
     const rest = segs.slice(1);
     if (rest[0] === 'kafka' && rest[1]) {
@@ -383,7 +386,7 @@ const RUBY_POSIX = {
   xdigit: '0-9A-Fa-f',
   word: '\\p{L}\\p{M}\\p{Nd}\\p{Pc}'
 };
-function rubyRe(re) {
+export function rubyRe(re) {
   re = String(re);
   let out = '';
   let depth = 0;
@@ -443,7 +446,7 @@ function rubyRe(re) {
   }
   return anchors ? '(?m)' + out : out;
 }
-function joda2strf(f) {
+export function joda2strf(f) {
   let out = '';
   let i = 0;
   const tok = (c, run) => {
@@ -508,7 +511,7 @@ function joda2strf(f) {
   }
   return out;
 }
-function compName(s) {
+export function compName(s) {
   return (
     String(s)
       .toLowerCase()
@@ -2226,7 +2229,7 @@ const GROK_COMPOSITE =
   /^(BACULA|BIND9|BRO_|CATALINA|CISCO|CLOUDFRONT|CRONLOG|ELB_|EXIM_|HAPROXY|HTTPD|JAVASTACKTRACE|MCOLLECTIVE|MONGO|NAGIOS|NETSCREEN|POSTGRESQL|RAILS3|REDIS|RPROCESSING|RT_FLOW|RUBY_LOGGER|S3_|SFW2|SHOREWALL|SQUID3|SYSLOG|TOMCATLOG|URIHOST)/;
 // Lecture ISO8601 à la façon de Logstash : avec ou sans fuseau, espace ou T, secondes et décimales facultatives,
 // ou le jour seul (à minuit) ; null si rien ne convient. x : variable VRL contenant la chaîne, virgule décimale déjà ramenée à un point.
-function isoParse(x, tz) {
+export function isoParse(x, tz) {
   const forms = ['%+', '%Y-%m-%dT%H:%M:%S%.f', '%Y-%m-%d %H:%M:%S%.f', '%Y-%m-%dT%H:%M', '%Y-%m-%d %H:%M'].map(
     f => `parse_timestamp(${x}, ${vq(f)}${tz || ''})`
   );
@@ -2447,7 +2450,7 @@ function listenTLS(v, s, src, name) {
     );
   src.tls = tls;
 }
-function uniq(used, base) {
+export function uniq(used, base) {
   let n = base,
     i = 2;
   while (used.has(n)) n = `${base}_${i++}`;
@@ -2974,7 +2977,7 @@ function httpSink(v, s) {
   }
   return sink;
 }
-function flatOutputs(stmts, conds, out) {
+export function flatOutputs(stmts, conds, out) {
   for (const st of stmts) {
     if (st.k === 'plugin') out.push({ plugin: st, conds: conds.slice() });
     else {
@@ -3058,7 +3061,7 @@ function throttleTransform(v, st, rest) {
     );
   return out;
 }
-function translateLogstash(src, cfg, opts) {
+export function translateLogstash(src, cfg, opts) {
   try {
     return translatePipeline(src, cfg, opts || {});
   } catch (e) {
@@ -3402,7 +3405,7 @@ function translatePipeline(src, cfg, opts) {
  * Configuration Vector complète, à partir des composants d’un pipeline ou d’un ensemble de pipelines : $ doublés,
  * notes communes (API, accusés de réception, namespace), en-tête, YAML et TOML.
  */
-function vectorDocument(v, parts, cfg, origin) {
+export function vectorDocument(v, parts, cfg, origin) {
   const { sources, transforms, sinks } = parts;
   // Vector interpole ${VAR} et $VAR dans tout le fichier : les $ du code VRL sont doublés
   let dollar = false;
@@ -3534,7 +3537,7 @@ function yamlScalar(v) {
     return yq(s);
   return s;
 }
-function toYAML(obj, ind) {
+export function toYAML(obj, ind) {
   ind = ind || 0;
   const pad = ' '.repeat(ind);
   const L = [];
@@ -3605,7 +3608,7 @@ function toTOML(obj) {
   return out.join('\n').replace(/^\n+/, '');
 }
 /* Petit analyseur YAML pour importer le fichier de configuration de Passerelle */
-function parseYAMLConfig(text) {
+export function parseYAMLConfig(text) {
   const lines = String(text)
     .split('\n')
     .map(l => l.replace(/\s+#.*$/, '').replace(/^#.*$/, ''))
@@ -3674,13 +3677,13 @@ function parseYAMLConfig(text) {
   }
   return block(0);
 }
-function configToYAML(cfg) {
+export function configToYAML(cfg) {
   const head =
     '# Configuration Passerelle — à versionner avec vos pipelines (infrastructure as code)\n# Les secrets restent des variables d’environnement ${…}, résolues au déploiement.\n\n';
   return head + toYAML({ version: 1, clickhouse: cfg.clickhouse, kafka: cfg.kafka, vector: cfg.vector }) + '\n';
 }
 /* Archive ZIP sans compression (stored), pour regrouper les fichiers générés */
-function makeZip(files) {
+export function makeZip(files) {
   const enc = new TextEncoder();
   const crcTable = (() => {
     const t = new Uint32Array(256);

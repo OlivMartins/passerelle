@@ -27,7 +27,7 @@ import {
   translatedChain,
   logstashChain
 } from './transport.mjs';
-import { loadEngine } from '../../scripts/engine.mjs';
+import * as E from '../../src/engine/index.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const args = Object.fromEntries(
@@ -41,8 +41,6 @@ const LS = join(WORK, 'logstash');
 const VEC = join(WORK, 'vector');
 const ONLY = args.only ? new RegExp(args.only) : null;
 const modes = args.ecs ? [args.ecs] : ECS_MODES;
-
-const E = loadEngine();
 
 /* ---------- Dossier de travail ---------- */
 // Chaque moteur a son dossier, monté sur /work dans son conteneur : conf/ ce qu’il joue, in/ ses entrées, out/ ses événements

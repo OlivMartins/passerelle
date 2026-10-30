@@ -1,8 +1,10 @@
 /* Passerelle — moteur de traduction (partie 1 : socle, Painless, Lucene, grok) */
-const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
-const clone = v => JSON.parse(JSON.stringify(v));
+import { absentSQL, isArrayField, presentSQL } from './dsl.js';
 
-const DEFAULT_CONFIG = {
+export const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+export const clone = v => JSON.parse(JSON.stringify(v));
+
+export const DEFAULT_CONFIG = {
   clickhouse: {
     endpoint: 'https://clickhouse.internal:8443',
     database: 'logs',
@@ -71,7 +73,7 @@ const DEFAULT_CONFIG = {
   }
 };
 // Tables de correspondance : leurs clés sont libres, et une valeur donnée remplace la valeur par défaut en entier
-const FREE_MAPS = [
+export const FREE_MAPS = [
   'index_mapping',
   'field_mapping',
   'columns',
@@ -83,7 +85,7 @@ const FREE_MAPS = [
   'headers'
 ];
 
-function mergeConfig(base, over) {
+export function mergeConfig(base, over) {
   const out = clone(base);
   (function walk(dst, src) {
     if (!isObj(src)) return;
@@ -112,7 +114,7 @@ function mergeConfig(base, over) {
  * Pour la table visée, chaque clé du profil remplace la clé du même nom de clickhouse. Un préréglage (preset) fournit
  * les valeurs de départ d’un schéma connu, que le profil complète clé par clé dans ses tables de correspondance.
  */
-const PROFILE_KEYS = [
+export const PROFILE_KEYS = [
   'preset',
   'time_field',
   'time_key',
@@ -127,7 +129,7 @@ const PROFILE_KEYS = [
   'analyzers'
 ];
 // Domaines de noms que la convention sémantique d’OpenTelemetry range dans les attributs de ressource
-const OTEL_RESOURCE = [
+export const OTEL_RESOURCE = [
   'service.*',
   'host.*',
   'os.*',
@@ -165,7 +167,7 @@ const OTEL_FIELDS = {
   'event.name': 'EventName'
 };
 const MAP_TYPE = 'Map(LowCardinality(String), String)';
-const PRESETS = {
+export const PRESETS = {
   // Schéma otel_logs de l’exportateur ClickHouse d’OpenTelemetry (ClickStack) : attributs en Map de chaînes
   otel: {
     time_field: 'Timestamp',
@@ -206,7 +208,7 @@ function tableProfile(cfg, table) {
   return null;
 }
 // Configuration effective pour une table : celle de clickhouse, complétée par le préréglage puis le profil
-function tableConfig(cfg, table) {
+export function tableConfig(cfg, table) {
   const profile = tableProfile(cfg, table);
   if (!profile) return cfg;
   const preset = profile.preset ? PRESETS[profile.preset] : null;
@@ -230,7 +232,7 @@ function tableConfig(cfg, table) {
  * Le fuseau est donc passé explicitement aux fonctions de date, sauf si la configuration déclare
  * clickhouse.timezone: UTC (serveur et colonnes en UTC) : le SQL reste alors sans argument de fuseau.
  */
-function zoneOf(cfg, tz) {
+export function zoneOf(cfg, tz) {
   if (tz) {
     // Elasticsearch accepte un décalage (+01:00) ; ClickHouse veut un nom de fuseau. Etc/GMT inverse le signe.
     const m = /^([+-])(\d{1,2}):?(\d{2})$/.exec(String(tz).trim());
@@ -242,7 +244,7 @@ function zoneOf(cfg, tz) {
   }
   return String(cfg.clickhouse.timezone || '').toUpperCase() === 'UTC' ? null : 'UTC';
 }
-function tzArg(cfg, tz) {
+export function tzArg(cfg, tz) {
   const zone = zoneOf(cfg, tz);
   return zone ? `, ${chStr(zone)}` : '';
 }
@@ -259,7 +261,7 @@ function tzArg(cfg, tz) {
  *   kind : 'string' | 'int' | 'float' | 'date' | 'bool' | 'other' (celui des éléments pour un tableau)
  */
 // Arguments d’un type ou d’une expression, séparés par les virgules de premier niveau (hors parenthèses et guillemets)
-function splitTopArgs(s) {
+export function splitTopArgs(s) {
   const out = [];
   let depth = 0;
   let cur = '';
@@ -301,7 +303,7 @@ function jsonTypedPaths(args) {
   }
   return paths;
 }
-function parseColumnType(raw) {
+export function parseColumnType(raw) {
   let t = String(raw).trim();
   const unwrap = name => {
     if (!t.startsWith(`${name}(`) || !t.endsWith(')')) return false;
@@ -329,18 +331,18 @@ function parseColumnType(raw) {
   // Un tableau n’est jamais NULL lui-même : seul le caractère Nullable d’une colonne simple compte ici
   return { array, nullable: !array && nullable, kind };
 }
-function columnType(cfg, table, column) {
+export function columnType(cfg, table, column) {
   const columns = cfg.clickhouse.columns;
   if (!isObj(columns)) return null;
   const qualified = columns[`${table}.${column}`];
   const raw = qualified !== undefined ? qualified : columns[column];
   return raw === undefined || raw === null || raw === '' ? null : parseColumnType(raw);
 }
-const hasSchema = cfg => isObj(cfg.clickhouse.columns) && Object.keys(cfg.clickhouse.columns).length > 0;
+export const hasSchema = cfg => isObj(cfg.clickhouse.columns) && Object.keys(cfg.clickhouse.columns).length > 0;
 
 // Profondeur d’imbrication d’une valeur JSON, mesurée sans récursion
-const MAX_DSL_DEPTH = 128;
-function jsonDepth(v) {
+export const MAX_DSL_DEPTH = 128;
+export function jsonDepth(v) {
   let max = 0;
   const stack = [[v, 1]];
   while (stack.length) {
@@ -352,7 +354,7 @@ function jsonDepth(v) {
   return max;
 }
 
-function makeNotes() {
+export function makeNotes() {
   const list = [];
   return {
     list,
@@ -372,35 +374,35 @@ function makeNotes() {
  *   ready         traduction directe
  * Le pourcentage ne vient qu’en second : il compte des clauses, pas des requêtes prêtes.
  */
-const VERDICTS = { ready: 'prête', review: 'à vérifier', todo: 'à reprendre', unrecognized: 'non reconnue' };
-const VERDICT_RANK = { ready: 0, review: 1, todo: 2, unrecognized: 3 };
-function verdictOf(r) {
+export const VERDICTS = { ready: 'prête', review: 'à vérifier', todo: 'à reprendre', unrecognized: 'non reconnue' };
+export const VERDICT_RANK = { ready: 0, review: 1, todo: 2, unrecognized: 3 };
+export function verdictOf(r) {
   if (!r || r.empty || r.error) return 'unrecognized';
   if (r.stats.ko || r.notes.some(n => n.level === 'err')) return 'todo';
   if (r.stats.approx || r.notes.some(n => n.level === 'warn')) return 'review';
   return 'ready';
 }
 // Arrondi vers le bas : une seule clause à reprendre suffit à ne jamais afficher 100 %
-function coverage(stats) {
+export function coverage(stats) {
   const total = stats.ok + stats.approx + stats.ko;
   return Object.assign({}, stats, { percent: total ? Math.floor((100 * (stats.ok + stats.approx)) / total) : 100 });
 }
 
 /* ---------- ClickHouse : littéraux et identifiants ---------- */
-const CH_KW = new Set(
+export const CH_KW = new Set(
   'select from where order group by limit and or not as in is null like between case when then else end with having prewhere final sample union all distinct join on using interval format settings offset asc desc'.split(
     ' '
   )
 );
-function chIdent(n) {
+export function chIdent(n) {
   n = String(n);
   if (/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(n) && !CH_KW.has(n.toLowerCase())) return n;
   return '`' + n.replace(/\\/g, '\\\\').replace(/`/g, '\\`') + '`';
 }
-function chStr(s) {
+export function chStr(s) {
   return "'" + String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
 }
-function chVal(v) {
+export function chVal(v) {
   if (v === null || v === undefined) return 'NULL';
   if (typeof v === 'number') return String(v);
   if (typeof v === 'boolean') return v ? 'true' : 'false';
@@ -411,19 +413,19 @@ function chVal(v) {
  * Seul un nombre fini est accepté, ou une chaîne purement numérique comme le tolère Elasticsearch :
  * toute autre valeur est refusée, comme Elasticsearch le fait avec une erreur 400.
  */
-function chNum(v, what) {
+export function chNum(v, what) {
   const n = typeof v === 'string' && /^\s*-?\d+(\.\d+)?\s*$/.test(v) ? Number(v) : v;
   if (typeof n !== 'number' || !Number.isFinite(n))
     throw new Error(`${what} : nombre attendu, reçu ${JSON.stringify(v)}`);
   return n;
 }
-function chInt(v, what) {
+export function chInt(v, what) {
   const n = chNum(v, what);
   if (!Number.isInteger(n) || n < 0) throw new Error(`${what} : entier positif attendu, reçu ${JSON.stringify(v)}`);
   return n;
 }
 /* Texte libre placé dans un commentaire SQL : il ne doit pas pouvoir le refermer */
-function chComment(s) {
+export function chComment(s) {
   return String(s)
     .replace(/\*\//g, '* /')
     .replace(/[\r\n]+/g, ' ');
@@ -432,20 +434,20 @@ function chComment(s) {
  * Chaîne littérale VRL. Les guillemets doubles de VRL interpolent « {{ variable }} » : sans échappement, "a{{b" vaut
  * silencieusement "a" (Vector 0.59). Chaque accolade ouvrante suivie d’une autre devient \{, ce que VRL lit comme « { ».
  */
-const vq = s =>
+export const vq = s =>
   JSON.stringify(String(s))
     .replace(/\\u([0-9a-fA-F]{4})/g, '\\u{$1}')
     .replace(/\{(?=\{)/g, '\\{');
-const segName = x => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(x) ? x : vq(x));
+export const segName = x => (/^[A-Za-z_][A-Za-z0-9_]*$/.test(x) ? x : vq(x));
 // Une expression régulière (r'…') reçoit les caractères de contrôle sous la forme \xNN : bruts, ils font refuser le YAML
-const vraw = (s, pre) =>
+export const vraw = (s, pre) =>
   `${pre}'${String(s).replace(/\\'/g, "\\\\'").replace(/'/g, "\\'")}'`.replace(
     pre === 'r' || pre === 's' ? /[\x00-\x1f\x7f]/g : /(?!)/g,
     c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`
   );
 
 /* Analyse lexicale légère pour savoir si une expression SQL doit être parenthésée */
-function scanTop(s, cb) {
+export function scanTop(s, cb) {
   let d = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
@@ -463,7 +465,7 @@ function scanTop(s, cb) {
   }
   return true;
 }
-function isWrapped(s) {
+export function isWrapped(s) {
   if (s[0] !== '(' || s[s.length - 1] !== ')') return false;
   let d = 0,
     ok = true;
@@ -488,7 +490,7 @@ function isWrapped(s) {
   }
   return ok;
 }
-function topHas(s, re) {
+export function topHas(s, re) {
   let found = false;
   scanTop(s, i => {
     if (re.test(s.slice(i, i + 6))) {
@@ -498,20 +500,20 @@ function topHas(s, re) {
   });
   return found;
 }
-function paren(s, ctxOp) {
+export function paren(s, ctxOp) {
   if (isWrapped(s)) return s;
   if (ctxOp === 'AND' && topHas(s, /^ OR /)) return `(${s})`;
   if (ctxOp === 'OR' && topHas(s, /^ AND /)) return `(${s})`;
   if (ctxOp === 'ARG' && topHas(s, /^ (AND|OR|[-+*/=<>!]|IN |NOT|LIKE|ILIKE)/)) return `(${s})`;
   return s;
 }
-function andJoin(list) {
+export function andJoin(list) {
   const xs = list.filter(x => x !== null && x !== undefined && x !== '1' && x !== 'true');
   if (!xs.length) return null;
   if (xs.length === 1) return xs[0];
   return xs.map(x => paren(x, 'AND')).join(' AND ');
 }
-function orJoin(list) {
+export function orJoin(list) {
   if (!list.length) return null;
   if (list.some(x => x === null || x === '1' || x === 'true')) return null;
   const xs = [...new Set(list)];
@@ -595,7 +597,7 @@ function grokRegex(pattern, target, custom, depth) {
     return `(?:${inner})`;
   });
 }
-function escRe(s) {
+export function escRe(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 function dissectParts(pattern) {
@@ -612,7 +614,7 @@ function dissectParts(pattern) {
   return parts;
 }
 /* Renvoie { regex, fields:[{group, field}], warnings } */
-function dissectRegex(pattern, target, named) {
+export function dissectRegex(pattern, target, named) {
   const ps = dissectParts(pattern);
   let out = '^';
   const fields = [];
@@ -678,8 +680,8 @@ const P_OPS = [
   '::'
 ];
 // Fermeture de chevrons d’un type générique : « >> » et « >>> » en ferment deux ou trois
-const P_ANG = t => (t && t.t === 'op' ? { '>': 1, '>>': 2, '>>>': 3 }[t.v] || 0 : 0);
-function ptokens(src) {
+export const P_ANG = t => (t && t.t === 'op' ? { '>': 1, '>>': 2, '>>>': 3 }[t.v] || 0 : 0);
+export function ptokens(src) {
   const t = [];
   let i = 0;
   const n = src.length;
@@ -762,7 +764,7 @@ function ptokens(src) {
   }
   return t;
 }
-const P_TYPES = new Set([
+export const P_TYPES = new Set([
   'def',
   'var',
   'String',
@@ -1056,7 +1058,7 @@ const bothInt = (a, b) =>
 const pStr = sql => ({ sql, ty: 'str' });
 const pBool = sql => ({ sql, ty: 'bool' });
 
-function guessType(ctx, field) {
+export function guessType(ctx, field) {
   const rt = ctx.runtime && ctx.runtime[field];
   if (rt)
     return rt.type === 'keyword'
@@ -1099,7 +1101,7 @@ function pval(ctx, x) {
   if (x.kind) throw new Error(`expression « ${x.kind} » inutilisable comme valeur`);
   return x;
 }
-function pArg(s) {
+export function pArg(s) {
   return paren(s, 'ARG');
 }
 function asStrSQL(v) {
@@ -1693,7 +1695,7 @@ function prType(r) {
   }
   return null;
 }
-function painlessToSQL(ctx, src, o) {
+export function painlessToSQL(ctx, src, o) {
   o = o || {};
   const prog = pparse(String(src));
   const r = pexec(ctx, prog, {}, o);
@@ -1794,7 +1796,7 @@ function luceneTokens(qs) {
   return toks;
 }
 const LUCENE_MAX_DEPTH = 64;
-function luceneParse(qs, defaultOp) {
+export function luceneParse(qs, defaultOp) {
   const toks = luceneTokens(qs);
   let p = 0;
   const peek = () => toks[p];
@@ -1899,7 +1901,7 @@ function luceneParse(qs, defaultOp) {
  * Sans opérateur, deux termes sont reliés par l’opérateur par défaut. Une négation forme une clause à part
  * entière : avec OU par défaut, « a -b » vaut a OU (NON b).
  */
-function simpleQueryParse(qs, defaultOp) {
+export function simpleQueryParse(qs, defaultOp) {
   const text = String(qs);
   const defOp = String(defaultOp || 'OR').toUpperCase() === 'AND' ? 'and' : 'or';
   const isSpace = c => c === ' ' || c === '\t' || c === '\n' || c === '\r';

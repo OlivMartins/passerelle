@@ -528,7 +528,7 @@ npm run build:server     # interface et dist/passerelle.cjs, sans binaire (image
 npm run build            # interface, binaire Linux x86_64 et archive de release
 ```
 
-Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction (assemblé dans l’ordre donné par `scripts/engine.mjs`), `src/node/` pour les entrées-sorties de la ligne de commande (assemblé après le moteur), `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur.
+Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction (des modules ES, réunis par la façade `src/engine/index.js` ; il n’importe rien de Node.js ni du navigateur), `src/node/` pour les entrées-sorties de la ligne de commande, `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur. `scripts/bundle.mjs` (esbuild) réunit ces modules en un seul fichier pour la page, le binaire et l’image conteneur. `npm run check` lance Biome (formatage sur 120 colonnes et règles de lint : variable non déclarée, import ou variable inutilisés, code mort) ; la CI le lance avant les tests.
 
 ## Licence
 

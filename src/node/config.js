@@ -1,6 +1,18 @@
 /* Passerelle — lecture et contrôle du fichier de configuration (passerelle.yaml ou .json) */
+import fs from 'node:fs';
+import {
+  DEFAULT_CONFIG,
+  FREE_MAPS,
+  isObj,
+  mergeConfig,
+  parseYAMLConfig,
+  PRESETS,
+  PROFILE_KEYS
+} from '../engine/index.js';
+import { fail } from './common.js';
+import { opsCheckConfig } from './ops.js';
 
-function loadConfig(file) {
+export function loadConfig(file) {
   let over = {};
   if (file) {
     let text;
@@ -58,7 +70,7 @@ function unknownKeys(src, ref, prefix) {
   }
   return out;
 }
-function loadCfgOrFail(o) {
+export function loadCfgOrFail(o) {
   try {
     return loadConfig(o.config || process.env.PASSERELLE_CONFIG || null);
   } catch (e) {

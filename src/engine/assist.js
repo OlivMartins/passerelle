@@ -1,4 +1,8 @@
 /* Passerelle — moteur : aide aux cas « à reprendre » (filtres ruby de Logstash, scripts Painless) */
+import { segName, vq, vraw } from './base.js';
+import { fieldSegs, rubyRe, vPathOf } from './logstash.js';
+import { eqFrDate, eqHtml, eqMd } from './equivalence.js';
+
 /*
  * Une traduction qui ne sait pas faire laisse un commentaire « À TRADUIRE » / « À REPRENDRE » et le code d’origine.
  * Ce module prépare une PROPOSITION pour ce code : jamais une traduction. Une proposition est toujours « à vérifier » ;
@@ -15,7 +19,7 @@
  * Rien ici n’ouvre de connexion ni de fichier : les entrées-sorties sont dans src/node/assist.js.
  */
 
-class AssistError extends Error {}
+export class AssistError extends Error {}
 const assistFail = msg => {
   throw new AssistError(msg);
 };
@@ -259,7 +263,7 @@ function assistRubyTokens(src) {
 /* ====================================================================== */
 /* Ruby : analyse syntaxique (sous-ensemble)                              */
 /* ====================================================================== */
-function assistRubyParse(src) {
+export function assistRubyParse(src) {
   const toks = assistRubyTokens(src);
   let p = 0;
   const peek = () => toks[p] || { t: 'eof' };
@@ -1269,7 +1273,7 @@ function assistRubyNested(list, depth, out) {
 /*
  * Code Ruby d’un filtre → { vrl, notes } ou { error }. Le VRL est celui du corps d’un transform remap, sur l’événement « . ».
  */
-function assistRuby(code, opts) {
+export function assistRuby(code, opts) {
   try {
     const ast = assistRubyParse(String(code));
     if (!ast.length) return { error: 'le filtre ne contient aucune instruction' };
@@ -1302,7 +1306,7 @@ const assistDollar = x => String(x).replace(/\$/g, '$$$$');
  * transforms remap d’une configuration Vector. Les blocs de l’ingestion sans code (un processeur qui n’est pas un
  * script) ne sont pas des cas : il n’y a rien à proposer. Rend [{ id, kind, label, code, why, transform, at, length, indent }].
  */
-function assistCases(config) {
+export function assistCases(config) {
   const out = [];
   for (const [tname, t] of Object.entries((config && config.transforms) || {})) {
     if (!t || t.type !== 'remap' || typeof t.source !== 'string') continue;
@@ -1358,7 +1362,7 @@ function assistCases(config) {
  * Une copie de la configuration où chaque proposition prend la place du commentaire de son cas.
  * proposals : { [id du cas]: { vrl, origin } }. Le code d’origine reste en commentaire, la proposition est marquée.
  */
-function assistApply(config, cases, proposals) {
+export function assistApply(config, cases, proposals) {
   const out = JSON.parse(JSON.stringify(config));
   const byTransform = new Map();
   for (const c of cases)
@@ -1408,7 +1412,7 @@ const ASSIST_KIND_VRL = {
  * La demande faite à un modèle local : le code du cas et la raison donnée par le traducteur, rien d’autre. Ni événement,
  * ni échantillon, ni configuration, ni nom de machine ne sont dans la demande.
  */
-function assistPrompt(c, previousError) {
+export function assistPrompt(c, previousError) {
   const user = [
     ASSIST_KIND_VRL[c.kind] || '',
     c.why ? `The automatic translator stopped on: ${c.why}` : '',
@@ -1425,7 +1429,7 @@ function assistPrompt(c, previousError) {
   return { system: ASSIST_RULES_VRL, user };
 }
 // Le VRL d’une réponse de modèle, ou la raison de son refus
-function assistFromModel(text) {
+export function assistFromModel(text) {
   const t = String(text || '');
   const m = /```(?:vrl|VRL|ruby)?[ \t]*\r?\n([\s\S]*?)```/.exec(t);
   if (!m)
@@ -1445,7 +1449,7 @@ function assistFromModel(text) {
 /* ====================================================================== */
 /* Le rapport                                                             */
 /* ====================================================================== */
-const ASSIST_STATES = {
+export const ASSIST_STATES = {
   confirmed: 'confirmée sur l’échantillon',
   different: 'différente',
   inconclusive: 'non concluante',
@@ -1459,12 +1463,12 @@ const ASSIST_CASE_STATUS = { proposed: 'proposée', refused: 'sans proposition' 
 const ASSIST_BANNER =
   'Une proposition n’est pas une traduction : elle est à relire. « Confirmée » veut dire identique à la référence sur l’échantillon rejoué, pas sur toutes les données.';
 
-function assistSummarize(items) {
+export function assistSummarize(items) {
   const by = Object.fromEntries(ASSIST_STATE_ORDER.map(k => [k, 0]));
   for (const it of items) by[it.state]++;
   return { total: items.length, byState: by };
 }
-function assistSentence(sum, what) {
+export function assistSentence(sum, what) {
   const s = sum.byState;
   if (!sum.total) return `Aucun ${what} lu.`;
   const plural = (n, w) => `${n} ${w}${n > 1 ? 's' : ''}`;
@@ -1485,7 +1489,7 @@ const assistSorted = items =>
     .map(x => x[0]);
 const assistTitle = rep => (rep.kind === 'painless' ? 'scripts Painless' : 'filtres ruby de Logstash');
 
-function assistReportMarkdown(rep) {
+export function assistReportMarkdown(rep) {
   const L = [];
   const what = rep.kind === 'painless' ? 'pipeline d’ingestion' : 'pipeline';
   L.push(`# Aide aux cas « à reprendre » — ${assistTitle(rep)}`, '');
@@ -1549,7 +1553,7 @@ function assistReportMarkdown(rep) {
   );
   return L.join('\n') + '\n';
 }
-function assistReportCSV(rep) {
+export function assistReportCSV(rep) {
   const cell = v => {
     const s = String(v === undefined || v === null ? '' : v);
     return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -1575,7 +1579,7 @@ function assistReportCSV(rep) {
   }
   return '﻿' + rows.join('\r\n') + '\r\n';
 }
-function assistReportHTML(rep) {
+export function assistReportHTML(rep) {
   const h = eqHtml;
   const what = rep.kind === 'painless' ? 'pipeline d’ingestion' : 'pipeline';
   const badge = st => `<span class="v v-${st}">${h(ASSIST_STATES[st])}</span>`;

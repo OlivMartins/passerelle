@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
-import { engineSource, serverSource } from '../../scripts/engine.mjs';
+import { bundleServer } from '../../scripts/bundle.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const rd = p => readFileSync(join(ROOT, p), 'utf8');
@@ -25,7 +25,7 @@ const check = (ok, label, detail) => {
 
 /* ---------- Montage ---------- */
 const BIN = join(TMP, 'passerelle.cjs');
-writeFileSync(BIN, "'use strict';\n" + engineSource() + serverSource());
+await bundleServer({ outfile: BIN });
 const UI = join(TMP, 'passerelle.html');
 writeFileSync(UI, '<!doctype html><html><body><script>void 0;</script></body></html>');
 // Faux Vector : recopie son environnement dans sa sortie, que l'API renvoie au client
@@ -108,7 +108,7 @@ async function start(env) {
     try {
       await request(srv, 'GET', '/healthz');
       return srv;
-    } catch (e) {
+    } catch {
       await new Promise(r => setTimeout(r, 50));
     }
   }
@@ -128,7 +128,7 @@ function request(srv, method, path, { body, headers } = {}) {
           let j = null;
           try {
             j = JSON.parse(data);
-          } catch (e) {
+          } catch {
             /* page HTML */
           }
           resolve({ status: res.statusCode, body: data, json: j });

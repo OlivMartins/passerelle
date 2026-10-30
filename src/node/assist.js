@@ -1,4 +1,47 @@
 /* Passerelle — Node.js : aide aux cas « à reprendre » (passerelle assist) */
+import asstDns from 'node:dns';
+import fs from 'node:fs';
+import http from 'node:http';
+import asstNet from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  ASSIST_STATES,
+  assistApply,
+  assistCases,
+  assistFromModel,
+  assistPrompt,
+  assistReportCSV,
+  assistReportHTML,
+  assistReportMarkdown,
+  assistRuby,
+  assistSentence,
+  assistSummarize,
+  coverage,
+  EQ_ECS_MODES,
+  eqComparePipelineOutputs,
+  eqPipelineParts,
+  eqVectorSource,
+  mergeConfig,
+  toYAML,
+  translateIngest,
+  translateLogstash,
+  verdictOf
+} from '../engine/index.js';
+import { collect, expand, fail, HttpError, ingestInputs, outDir, VERSION } from './common.js';
+import { loadCfgOrFail } from './config.js';
+import { validateVector } from './vector.js';
+import {
+  lastLines,
+  verifyDiffs,
+  verifyEvents,
+  verifyOutputs,
+  verifyPlayVector,
+  verifyReference,
+  verifyRetouch,
+  verifyRun
+} from './verify.js';
+
 /*
  * Une traduction qui ne sait pas faire laisse un commentaire « À TRADUIRE » (filtre ruby de Logstash) ou « À REPRENDRE »
  * (script Painless) et le code d’origine. « passerelle assist » prépare une PROPOSITION pour chacun de ces cas, puis la
@@ -12,11 +55,8 @@
  * d’un modèle qui tourne sur ce poste. Rien ne part du poste : le modèle est joint sur la boucle locale (toute autre
  * adresse est refusée avant la moindre connexion), il ne reçoit que le code du cas (jamais un événement de
  * l’échantillon, jamais la configuration), et Vector rejoue l’échantillon avec des sources et des sorties remplacées par
- * des fichiers. Ce code ne s’exécute pas à son chargement : il emploie les modules et fonctions que src/server.js
- * et src/node/verify.js déclarent, dans ses fonctions seulement.
+ * des fichiers. Il s’appuie sur common.js, verify.js et le moteur ; src/server.js l’appelle.
  */
-const asstNet = require('node:net');
-const asstDns = require('node:dns');
 
 const ASST_MARK = {
   confirmed: '✓',
@@ -35,7 +75,7 @@ const asstStamp = d =>
     .replace('T', '-');
 
 /* ---------- Le modèle local ---------- */
-const asstLoopback = a => (asstNet.isIPv4(a) ? a.split('.')[0] === '127' : a === '::1');
+export const asstLoopback = a => (asstNet.isIPv4(a) ? a.split('.')[0] === '127' : a === '::1');
 const ASST_REFUSED =
   'le modèle local doit être sur la boucle locale de ce poste : utilisez http://127.0.0.1:PORT, http://[::1]:PORT ou http://localhost:PORT';
 
@@ -49,7 +89,7 @@ async function asstModelTarget(m) {
   let u;
   try {
     u = new URL(raw);
-  } catch (e) {
+  } catch {
     throw new Error(`adresse du modèle illisible : ${raw}`);
   }
   if (u.protocol !== 'http:') throw new Error(`${ASST_REFUSED} (pas ${u.protocol}//)`);
@@ -112,7 +152,7 @@ function asstModelAsk(m, prompt) {
             const out = openai ? j.choices[0].message.content : j.message.content;
             if (typeof out !== 'string') throw new Error('contenu absent');
             resolve(out);
-          } catch (e) {
+          } catch {
             reject(new Error('réponse illisible'));
           }
         });
@@ -597,7 +637,7 @@ async function asstRun(o, kind) {
   asstExit(rep, o);
 }
 
-function assistCommand(o) {
+export function assistCommand(o) {
   const sub = o._.shift();
   if (sub === 'ruby' || sub === 'painless') return asstRun(o, sub).catch(e => fail(e.message));
   return fail(`sous-commande inconnue : assist ${sub || ''}`.trim() + ' (ruby ou painless)');

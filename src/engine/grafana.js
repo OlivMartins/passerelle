@@ -1,4 +1,7 @@
 /* Passerelle — moteur : tableaux de bord Grafana branchés sur Elasticsearch, vers le plugin ClickHouse */
+import { chStr, clone, isObj, tableConfig, VERDICT_RANK, verdictOf, VERDICTS } from './base.js';
+import { indent, javaDouble, makeDslCtx, mapField, rawAlias, translateDSL } from './dsl.js';
+
 /*
  * Un panneau Grafana interroge Elasticsearch par un modèle de requête (Lucene, mesures, regroupements) que la source
  * de données traduit elle-même en DSL. La traduction ci-dessous reconstruit ce DSL comme le fait la source
@@ -668,7 +671,7 @@ function esVariableSQL(v, env, cfg, index, vars) {
   if (typeof q === 'string') {
     try {
       q = JSON.parse(q);
-    } catch (e) {
+    } catch {
       return { error: `requête de variable illisible : ${v.query}` };
     }
   }
@@ -708,7 +711,7 @@ function esVariableSQL(v, env, cfg, index, vars) {
 }
 
 /* ---------- Conversion du tableau de bord ---------- */
-function grafanaDashboard(text, cfg, opts) {
+export function grafanaDashboard(text, cfg, opts) {
   opts = opts || {};
   const read = grafanaRead(text);
   if (read.error) return { error: read.error };
@@ -1038,13 +1041,13 @@ function grafanaDashboard(text, cfg, opts) {
 }
 const worstGrafana = list => list.reduce((w, v) => (VERDICT_RANK[v] > VERDICT_RANK[w] ? v : w), 'ready');
 // Colonne SQL d’un champ, avec le profil de la table
-function mapFieldOf(cfg, table, field) {
+export function mapFieldOf(cfg, table, field) {
   const ctx = makeDslCtx(cfg);
   ctx.table = table;
   ctx.columns = new Set();
   try {
     ctx.cfg = tableConfig(cfg, table);
-  } catch (e) {
+  } catch {
     /* signalé par la traduction */
   }
   ctx.targets = new Map();
@@ -1052,7 +1055,7 @@ function mapFieldOf(cfg, table, field) {
 }
 
 /* ---------- Rapport ---------- */
-function grafanaReportMarkdown(r, name) {
+export function grafanaReportMarkdown(r, name) {
   const L = [];
   const s = r.summary;
   const v = s.byVerdict;

@@ -1,4 +1,25 @@
 /* Passerelle — moteur : watches Elasticsearch (Watcher) → SQL ClickHouse et rapport de migration */
+import { chStr, coverage, escRe, isObj, verdictOf, VERDICTS } from './base.js';
+import { preprocessDSL, rawAlias, translateDSL } from './dsl.js';
+import {
+  addQuery,
+  blockerLabel,
+  decisionWrap,
+  frHours,
+  frNum,
+  KB_CSS,
+  KB_EFFORT,
+  KB_PREREQ,
+  KB_PREREQ_SHOWN,
+  kbFlat,
+  kbHtml,
+  kbVerdict,
+  quarter,
+  todoHours,
+  worstVerdict
+} from './kibana.js';
+import { mapFieldOf } from './grafana.js';
+
 /*
  * Une watch réunit une planification (trigger), une entrée (input, le plus souvent une recherche), une condition
  * évaluée sur le résultat de l’entrée (ctx.payload), une transformation facultative et des actions (notifications).
@@ -71,7 +92,7 @@ const WATCH_BUCKETS = new Set([
 /* ---------- Lecture ---------- */
 const isWatchDef = o => isObj(o) && isObj(o.input) && (isObj(o.trigger) || isObj(o.condition) || isObj(o.actions));
 // Un document de l’index .watches porte aussi l’état de la watch : il n’appartient pas à sa définition
-function watchFromSource(src) {
+export function watchFromSource(src) {
   const w = Object.assign({}, src);
   const status = w.status || w._status || null;
   delete w.status;
@@ -84,7 +105,7 @@ function watchFromSource(src) {
  * (« PUT _watcher/watch/<id> » suivi du corps, plusieurs à la suite), définition seule, ou NDJSON de ces formes.
  *   name : identifiant par défaut d’une définition seule (le nom du fichier)
  */
-function watcherRead(text, name) {
+export function watcherRead(text, name) {
   const watches = [];
   const errors = [];
   const s = String(text || '').replace(/^﻿/, '');
@@ -214,7 +235,7 @@ function watcherRead(text, name) {
 // Secrets d’une watch (mots de passe, jetons, en-têtes d’autorisation) : masqués avant d’écrire un export sur disque
 const WATCH_SECRET_KEY =
   /^(password|passwd|secret|secret_key|token|api_key|apikey|authorization|x-api-key|service_key|integration_key|webhook_url)$/i;
-function watcherScrub(v) {
+export function watcherScrub(v) {
   if (Array.isArray(v)) return v.map(watcherScrub);
   if (isObj(v)) {
     const o = {};
@@ -351,7 +372,7 @@ function cronAt(times, dom, mon, dow) {
 const quartzStep = (f, first, last) =>
   f.replace(/^(\d+|\*)\/(\d+)$/, (x, a, b) => (a === '*' || +a === first ? `*/${b}` : `${a}-${last}/${b}`));
 // Cron Quartz de Watcher (secondes, minutes, heures, jour du mois, mois, jour de la semaine, année) → cron à 5 champs
-function quartzToCron(expr) {
+export function quartzToCron(expr) {
   const f = String(expr).trim().split(/\s+/);
   if (f.length < 6 || f.length > 7) return { error: `« ${expr} » n’est pas un cron Quartz (6 ou 7 champs)` };
   const [sec, min, hour, dom, mon, dow, year] = f;
@@ -385,7 +406,7 @@ function everyCron(sec) {
   if (h < 24) return 24 % h === 0 ? `0 ${h === 1 ? '*' : `*/${h}`} * * *` : null;
   return h === 24 ? '0 0 * * *' : null;
 }
-function watchSchedule(trigger) {
+export function watchSchedule(trigger) {
   const issues = [];
   const sch = isObj(trigger) && isObj(trigger.schedule) ? trigger.schedule : null;
   if (!sch)
@@ -587,7 +608,7 @@ function watchIndexName(name, issues) {
   let n = String(name).trim();
   try {
     n = decodeURIComponent(n);
-  } catch (e) {
+  } catch {
     /* nom gardé tel quel */
   }
   const m = /^<(.+)>$/.exec(n);
@@ -1490,7 +1511,7 @@ function watchScore(x) {
  * texts : un ou plusieurs exports (chaînes) ; opts.names : leurs noms ; opts.origin : provenance affichée
  * (fichiers, ou le cluster lu par passerelle watcher pull).
  */
-function watcherTranslate(text, cfg, opts) {
+export function watcherTranslate(text, cfg, opts) {
   opts = opts || {};
   const texts = Array.isArray(text) ? text : [text];
   const names = opts.names || texts.map(() => null);
@@ -1622,7 +1643,7 @@ function watchRunHelp(rep) {
     );
   return parts.join(' ');
 }
-function watcherReportMarkdown(rep) {
+export function watcherReportMarkdown(rep) {
   const L = [];
   const s = rep.summary;
   const cell = v => kbFlat(v).replace(/\|/g, '\\|');
@@ -1739,7 +1760,7 @@ function watcherReportMarkdown(rep) {
   );
   return L.join('\n');
 }
-function watcherReportCSV(rep) {
+export function watcherReportCSV(rep) {
   const q = v => {
     const s = kbFlat(v);
     return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -1791,7 +1812,7 @@ function watcherReportCSV(rep) {
   }
   return '﻿' + rows.map(r => r.map(q).join(';')).join('\r\n') + '\r\n';
 }
-function watcherReportHTML(rep, title) {
+export function watcherReportHTML(rep, title) {
   const s = rep.summary;
   const h = kbHtml;
   const badge = x =>
@@ -1875,7 +1896,7 @@ document.querySelectorAll('.filters button').forEach(function(b){b.addEventListe
 `;
 }
 // Fichiers SQL, un par watch qui a une requête : nom lisible et unique
-function watcherSQLFiles(rep) {
+export function watcherSQLFiles(rep) {
   const used = new Set();
   const files = [];
   const slugOf = s =>

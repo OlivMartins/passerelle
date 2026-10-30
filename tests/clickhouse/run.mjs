@@ -22,14 +22,13 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadEngine } from '../../scripts/engine.mjs';
+import * as E from '../../src/engine/index.js';
 import { grafanaInterpolate } from './grafana.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const VERBOSE = process.argv.includes('--verbose');
 const [CH_BIN, ...CH_PRE] = (process.env.CLICKHOUSE_LOCAL || 'clickhouse-local').split(' ');
 const WORK = process.env.PASSERELLE_CH_WORK || join(tmpdir(), 'passerelle-clickhouse');
-const E = loadEngine();
 const rd = p => readFileSync(join(ROOT, p), 'utf8');
 let failures = 0;
 const check = (ok, label, detail) => {

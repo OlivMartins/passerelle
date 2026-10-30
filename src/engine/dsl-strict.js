@@ -1,4 +1,6 @@
 /* Passerelle — moteur : contrôle strict d’une requête DSL, avant traduction */
+import { chStr, isObj } from './base.js';
+
 /*
  * Elasticsearch refuse une clé qu’il ne connaît pas. Ignorer cette clé rendait un SQL qui s’exécute
  * et répond faux : un « filtre » mal écrit lisait toute la table, un « knn » disparaissait.
@@ -477,7 +479,7 @@ const COMPOSITE_SOURCES = {
 const AGG_CONTAINER = new Set(['aggs', 'aggregations', 'meta']);
 
 /* ---------- Parcours ---------- */
-function checkDSL(dsl) {
+export function checkDSL(dsl) {
   const out = { errors: [], issues: [] };
   const error = msg => out.errors.push(msg);
   const issue = (kind, label, detail) => out.issues.push({ kind, label, detail });
@@ -638,7 +640,7 @@ function checkDSL(dsl) {
 }
 
 // Applique le contrôle à une traduction : notes, compteurs, et un throwIf par élément à reprendre
-function applyStrictIssues(ctx, issues) {
+export function applyStrictIssues(ctx, issues) {
   const guards = [];
   for (const it of issues) {
     if (it.kind === 'todo') {

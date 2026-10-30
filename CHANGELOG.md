@@ -66,7 +66,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 ### Modifié
 
 - Le script Painless que la traduction ne sait pas lire laisse désormais son code en commentaire sous « À REPRENDRE » (`passerelle assist` le retrouve à cet endroit), comme le filtre ruby de Logstash le faisait déjà.
-- Le code propre à Node.js (entrées-sorties de la ligne de commande) se range dans `src/node/`, assemblé entre le moteur et `src/server.js`.
+- Le code propre à Node.js (entrées-sorties de la ligne de commande) se range dans `src/node/`.
 - Chaque ligne de journal « requête » porte `request_id` (et `token`, `identity`, `trace_id` quand ils existent). Son `ip` est l'adresse du client, lue derrière un proxy de confiance (`peer` donne alors celle du proxy).
 - Le message sans jeton nomme aussi `server.tokens`. La section `server` n'est jamais diffusée par `/v1/config` ni par l'interface.
 

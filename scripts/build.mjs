@@ -22,9 +22,9 @@ import {
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { engineSource, nodeSource } from './engine.mjs';
+import { bundleServer, bundleUI } from './bundle.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(ROOT, 'dist');
@@ -34,27 +34,9 @@ const uiOnly = process.argv.includes('--ui-only');
 const noBinary = process.argv.includes('--no-binary');
 const step = msg => process.stdout.write(`• ${msg}\n`);
 
-/* ---------- Sources ---------- */
-const ENGINE = engineSource();
-
-function examples() {
-  const index = JSON.parse(rd('examples/index.json'));
-  const out = {};
-  for (const [kind, list] of Object.entries(index)) {
-    out[kind] = list.map(e => ({ title: e.title, file: basename(e.file), text: rd(join('examples', e.file)) }));
-  }
-  return out;
-}
-
-function buildUI() {
-  const script =
-    "(function () {\n'use strict';\n" +
-    ENGINE +
-    '\nconst EXAMPLES = ' +
-    JSON.stringify(examples()) +
-    ';\n' +
-    rd('src/ui/app.js') +
-    '\n})();\n';
+/* ---------- Interface et serveur : les modules de src/ assemblés par esbuild (scripts/bundle.mjs) ---------- */
+async function buildUI() {
+  const script = await bundleUI();
   const html = rd('src/ui/index.html')
     .replace('/* @@STYLES@@ */', () => rd('src/ui/styles.css').trimEnd())
     .replace('/* @@SCRIPT@@ */', () => script.replace(/<\/script/gi, '<\\/script').trimEnd());
@@ -62,15 +44,9 @@ function buildUI() {
   step(`dist/passerelle.html (${Math.round(html.length / 1024)} Kio)`);
 }
 
-function buildServer() {
+async function buildServer() {
   // La version vient de package.json : elle remplace celle que src/node/common.js écrit en dur
-  const node = (nodeSource() + rd('src/server.js')).replace(
-    /^const VERSION = '[^']*';$/m,
-    `const VERSION = '${VERSION}';`
-  );
-  const js =
-    "'use strict';\n/* Passerelle — binaire autonome : moteur de traduction + serveur + CLI */\n" + ENGINE + node;
-  writeFileSync(join(DIST, 'passerelle.cjs'), js);
+  await bundleServer({ version: VERSION, outfile: join(DIST, 'passerelle.cjs') });
   execFileSync(process.execPath, ['--check', join(DIST, 'passerelle.cjs')]);
   step('dist/passerelle.cjs');
 }
@@ -187,8 +163,8 @@ try {
   rmSync(DIST, { recursive: true, force: true });
   mkdirSync(DIST, { recursive: true });
   step(`Passerelle ${VERSION}`);
-  buildUI();
-  if (!uiOnly) buildServer();
+  await buildUI();
+  if (!uiOnly) await buildServer();
   if (!uiOnly && !noBinary) {
     buildBinary();
     buildArchive();

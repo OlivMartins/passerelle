@@ -1,4 +1,6 @@
 /* Passerelle — moteur : modèles d’une requête (Watcher, Kibana, Grafana) → paramètres ClickHouse */
+import { isObj } from './base.js';
+
 /*
  * Une requête stockée dans une alerte ou un tableau de bord contient des valeurs remplies à l’exécution :
  * {{ctx.trigger.scheduled_time}} (Watcher, modèles de recherche, alertes Kibana), $__timeFrom, ${service},
@@ -17,7 +19,7 @@ const PARAM_ANY = /P(\d+)/g;
 // {{…}} et ses sections, $__macro, ${var}, [[var]], puis $var seul (ni précédé d’un mot, d’un $ ou d’un \)
 const TEMPLATE_RE =
   /\{\{\{?\s*([#^\/!>]?)\s*([^{}]*?)\s*\}?\}\}|\$__(\w+)|\$\{(\w+)(?::[\w-]+)?\}|\[\[(\w+)(?::[\w-]+)?\]\]|(?<![\w$\\])\$([A-Za-z_]\w*)/g;
-const isParamMark = v => typeof v === 'string' && PARAM_WHOLE.test(v);
+export const isParamMark = v => typeof v === 'string' && PARAM_WHOLE.test(v);
 
 function paramName(raw, used) {
   const path = String(raw).split(/[\s|(]/)[0];
@@ -30,7 +32,7 @@ function paramName(raw, used) {
 }
 
 // Copie de la requête où chaque modèle est remplacé par son marqueur ; les scripts Painless restent tels quels
-function extractTemplates(dsl) {
+export function extractTemplates(dsl) {
   const params = [];
   const bySource = new Map();
   const used = new Set();
@@ -73,13 +75,13 @@ function extractTemplates(dsl) {
 }
 
 // Texte affiché (résumé, remarques, messages d’erreur) : le marqueur redevient le modèle d’origine
-function restoreTemplates(s, params) {
+export function restoreTemplates(s, params) {
   return params.length && typeof s === 'string'
     ? s.replace(PARAM_ANY, (m, i) => (params[+i] ? params[+i].source : m))
     : s;
 }
 
-function restoreDeep(v, params) {
+export function restoreDeep(v, params) {
   if (!params.length) return v;
   if (typeof v === 'string') return restoreTemplates(v, params);
   if (Array.isArray(v)) return v.map(x => restoreDeep(x, params));
@@ -88,7 +90,7 @@ function restoreDeep(v, params) {
 }
 
 // Littéraux SQL qui portent un marqueur → {nom:String}, seul ou dans un concat()
-function bindParams(sql, params) {
+export function bindParams(sql, params) {
   if (!params.length) return sql;
   return sql.replace(/'(?:[^'\\]|\\.)*'/g, lit => {
     if (!lit.includes('')) return lit;
@@ -117,11 +119,11 @@ function grafanaVar(source) {
 }
 // Début et fin de la période du tableau de bord : macros du plugin ClickHouse
 const GRAFANA_TIME = { __from: '$__fromTime_ms', __to: '$__toTime_ms' };
-const grafanaTime = source => {
+export const grafanaTime = source => {
   const v = grafanaVar(source);
   return v && GRAFANA_TIME[v] ? GRAFANA_TIME[v] : null;
 };
-function bindGrafana(sql, params, vars) {
+export function bindGrafana(sql, params, vars) {
   if (!params.length) return sql;
   const varOf = i => params[i] && grafanaVar(params[i].source);
   let out = sql.replace(/'(?:[^'\\]|\\.)*'/g, lit => {
@@ -151,7 +153,7 @@ function bindGrafana(sql, params, vars) {
   return out;
 }
 // Variables Grafana présentes dans le SQL ; les autres sont perdues
-function grafanaParamsInSQL(sqls, params) {
+export function grafanaParamsInSQL(sqls, params) {
   const seen = new Set();
   for (const sql of sqls) for (const m of sql.matchAll(/\$\{(\w+):singlequote\}/g)) seen.add(m[1]);
   const found = params
@@ -162,7 +164,7 @@ function grafanaParamsInSQL(sqls, params) {
 }
 
 // Paramètres réellement présents dans le SQL, avec leurs types ; les autres sont perdus
-function paramsInSQL(sqls, params) {
+export function paramsInSQL(sqls, params) {
   const types = new Map();
   for (const sql of sqls)
     for (const m of sql.replace(/'(?:[^'\\]|\\.)*'/g, "''").matchAll(/\{([A-Za-z_]\w*):([A-Za-z0-9_(), ]+)\}/g)) {
@@ -177,11 +179,11 @@ function paramsInSQL(sqls, params) {
 }
 
 // Modèle d’une valeur marquée, et modèle consommé par la traduction sans figurer dans le SQL (intervalle Grafana)
-function paramSource(ctx, mark) {
+export function paramSource(ctx, mark) {
   const m = PARAM_WHOLE.exec(String(mark));
   return m && ctx.params[+m[1]] ? ctx.params[+m[1]].source : '';
 }
-function consumeParam(ctx, mark) {
+export function consumeParam(ctx, mark) {
   const m = PARAM_WHOLE.exec(String(mark));
   if (m && ctx.params[+m[1]]) ctx.params[+m[1]].consumed = true;
 }

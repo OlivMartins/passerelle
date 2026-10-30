@@ -1,4 +1,6 @@
 /* Passerelle — moteur : rejeu d’un échantillon dans Logstash et Vector, comparaison des événements */
+import { isObj } from './base.js';
+
 /*
  * Le comparateur du banc d’équivalence des pipelines (tests/pipelines) et celui de « passerelle verify pipelines » :
  * le même code. Ici, aucune entrée-sortie : le pipeline du client est réduit à ses filtres, entouré du transport
@@ -6,9 +8,9 @@
  */
 
 // Compatibilité ECS de Logstash : « v8 » est son réglage par défaut depuis la version 8, « disabled » celui d’avant
-const EQ_ECS_MODES = ['v8', 'disabled'];
+export const EQ_ECS_MODES = ['v8', 'disabled'];
 const EQ_UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
-const eqCanon = v =>
+export const eqCanon = v =>
   JSON.stringify(v, (k, x) =>
     isObj(x)
       ? Object.fromEntries(
@@ -26,7 +28,7 @@ const eqCanon = v =>
  *                pas comparée non plus ; exact: ['horodatage'] la désactive
  *   UUID         tiré au hasard par chaque moteur, il n’est comparé que par sa forme
  */
-function eqNormalizeEvent(event, window, exact) {
+export function eqNormalizeEvent(event, window, exact) {
   const e = JSON.parse(JSON.stringify(event), (k, v) => (typeof v === 'string' && EQ_UUID.test(v) ? '<uuid>' : v));
   const ts = e['@timestamp'];
   if (typeof ts === 'string' && Date.parse(ts) >= window[0] && Date.parse(ts) <= window[1]) {
@@ -62,7 +64,7 @@ function eqAlignTable(a, b) {
 // Aligne les deux suites sur leurs événements identiques : un événement perdu ne décale pas les suivants.
 // Un échantillon de plusieurs milliers d’événements ne tient pas dans la table : au-delà de 4 millions de cases,
 // les débuts et les fins identiques sont écartés d’abord, et ce qui reste est apparié dans l’ordre si c’est encore trop.
-function eqAlign(a, b) {
+export function eqAlign(a, b) {
   if (a.length * b.length <= 4e6) return eqAlignTable(a, b);
   let head = 0;
   while (head < a.length && head < b.length && a[head] === b[head]) head++;
@@ -88,7 +90,7 @@ const eqShortText = s => (s.length > 120 ? s.slice(0, 117) + '…' : s);
  * (avec les valeurs) et un « safe » (le champ et le numéro de l’événement, sans valeur).
  * where : préfixe de la sortie (« [sortie erreurs] »), labels : les noms des deux moteurs.
  */
-function eqEventDiffs(ln, vn, where, labels) {
+export function eqEventDiffs(ln, vn, where, labels) {
   const L = labels || { ref: 'Logstash', vec: 'Vector' };
   const w = where || '';
   const diffs = [];
@@ -166,7 +168,7 @@ const eqSlug = s =>
  * L’entrée devient une entrée standard (ou un fichier), chaque sortie un fichier nommé d’après son topic Kafka,
  * son index ou son greffon. Les filtres et les conditions de routage ne sont pas touchés.
  */
-function eqPipelineParts(text) {
+export function eqPipelineParts(text) {
   let input;
   let sinks;
   let filter;
@@ -202,7 +204,7 @@ function eqPipelineParts(text) {
   let addField = null;
   try {
     addField = eqBlockBody(input, /add_field\s*=>\s*\{/);
-  } catch (e) {
+  } catch {
     addField = null;
   }
   if (addField !== null) options.push(`add_field => {${addField}}`);
@@ -248,13 +250,13 @@ function eqPipelineParts(text) {
 }
 
 const eqOutFile = (dir, name) => `file { path => "${dir}/${name}.ndjson" codec => json_lines }`;
-const eqOutName = (prefix, name) => `${prefix}${name ? `.${name}` : ''}`;
+export const eqOutName = (prefix, name) => `${prefix}${name ? `.${name}` : ''}`;
 const eqOutputBlock = (parts, dir, prefix) =>
   `output {\n${parts.output(name => eqOutFile(dir, eqOutName(prefix, name)))}\n}\n`;
 const eqFilterBlock = parts => `filter {\n${parts.filter}\n}\n`;
 
 // Pipeline que traduit Passerelle et que joue Vector : une entrée standard, des sorties en fichiers de dir
-function eqVectorSource(parts, dir, prefix) {
+export function eqVectorSource(parts, dir, prefix) {
   return (
     `input { stdin {${parts.json ? ' codec => json_lines' : ''}${parts.options} } }\n` +
     eqFilterBlock(parts) +
@@ -285,7 +287,7 @@ const EQ_UNDECORATE = {
 };
 
 // Pipeline que joue Logstash : le même, avec un fichier lu une fois en entrée (il s’arrête alors seul)
-function eqLogstashSource(parts, mode, input, dir, prefix) {
+export function eqLogstashSource(parts, mode, input, dir, prefix) {
   const file = `path => "${input}" mode => "read" exit_after_read => true sincedb_path => "/dev/null" file_completed_action => "log" file_completed_log_path => "${dir}/.lus"`;
   return (
     `input { file { ${file} codec => ${parts.json ? 'json' : 'plain'}${parts.options} } }\n` +
@@ -299,7 +301,7 @@ function eqLogstashSource(parts, mode, input, dir, prefix) {
  * Compare, sortie par sortie, les événements de la référence et ceux de Vector.
  * ref, vec : { nomDeSortie: [événements] } ; renvoie { diffs, events, identical }.
  */
-function eqComparePipelineOutputs(ref, vec, names, window, opts) {
+export function eqComparePipelineOutputs(ref, vec, names, window, opts) {
   const o = opts || {};
   const diffs = [];
   let events = 0;

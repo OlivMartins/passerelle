@@ -13,20 +13,18 @@
  * Linux seulement.
  *   node tests/ops/run.mjs
  */
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, statSync, renameSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, statSync, renameSync } from 'node:fs';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
-
-const VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
 import crypto from 'node:crypto';
 import http from 'node:http';
 import net from 'node:net';
-import { engineSource, nodeSource, serverSource } from '../../scripts/engine.mjs';
+import { bundleServer } from '../../scripts/bundle.mjs';
+import * as ops from '../../src/node/ops.js';
+import { DEFAULT_CONFIG, mergeConfig } from '../../src/engine/index.js';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const VERSION = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
 const TMP = mkdtempSync(join(tmpdir(), 'essai-ops-'));
 let failures = 0;
 const check = (ok, label, detail) => {
@@ -47,7 +45,7 @@ const until = async (fn, ms = 8000) => {
 };
 
 const BIN = join(TMP, 'passerelle.cjs');
-writeFileSync(BIN, "'use strict';\n" + engineSource() + serverSource());
+await bundleServer({ outfile: BIN });
 const UI = join(TMP, 'passerelle.html');
 writeFileSync(UI, '<!doctype html><html><body><script>void 0;</script></body></html>');
 const DSL = J({ size: 0, query: { term: { champ_secret_8841: 'valeur_secrete_5521' } } });
@@ -94,7 +92,7 @@ const collector = http.createServer((req, res) => {
     let json = null;
     try {
       json = JSON.parse(body);
-    } catch (e) {
+    } catch {
       /* corps illisible : noté tel quel */
     }
     otlp.push({ method: req.method, url: req.url, headers: req.headers, json, raw: body });
@@ -151,7 +149,7 @@ async function start(server, env, extra) {
       .map(l => {
         try {
           return JSON.parse(l);
-        } catch (e) {
+        } catch {
           return null;
         }
       })
@@ -176,7 +174,7 @@ async function start(server, env, extra) {
     try {
       await request(srv, 'GET', '/healthz');
       return srv;
-    } catch (e) {
+    } catch {
       await sleep(40);
     }
   }
@@ -200,7 +198,7 @@ function request(srv, method, path, { body, headers } = {}) {
             json: () => {
               try {
                 return JSON.parse(text);
-              } catch (e) {
+              } catch {
                 return null;
               }
             }
@@ -252,10 +250,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /* ====================================================================== */
 section('A. Fonctions de l’exploitation (sans serveur)');
 {
-  const code = `'use strict';\n${engineSource()}${nodeSource()}
-const crypto = require('node:crypto'); const fs = require('node:fs'); log = () => {};
-return { opsProxyList, opsTrusted, opsClientIp, opsNormIp, opsIdentity, opsCheckConfig, opsRuntime, opsScopeOf, opsActionOf, opsRouteOf, opsInc, opsObserve, opsRender, opsLabels, opsShown, DEFAULT_CONFIG, mergeConfig };`;
-  const O = new Function('require', code)(createRequire(import.meta.url));
+  // Les fonctions de l'exploitation, importées telles quelles : ops.js ne lance rien à son chargement
+  const O = { ...ops, DEFAULT_CONFIG, mergeConfig };
   const rt = list => ({ proxies: O.opsProxyList(list) });
   const req = (peer, headers) => ({ socket: { remoteAddress: peer }, headers: headers || {} });
 
@@ -411,7 +407,7 @@ return { opsProxyList, opsTrusted, opsClientIp, opsNormIp, opsIdentity, opsCheck
   let ok = true;
   try {
     O.opsCheckConfig(base(), 'x');
-  } catch (e) {
+  } catch {
     ok = false;
   }
   check(ok, 'la configuration par défaut est valide');

@@ -6,8 +6,10 @@
 
 FROM node:24-slim AS build
 WORKDIR /src
-# Aucune dépendance npm n'est nécessaire sans le binaire autonome
-COPY package.json ./
+# esbuild (réunit les modules en un fichier) est la seule dépendance de construction utile ici ; postject, celle du
+# binaire autonome, n'est pas lancé : --ignore-scripts, et la construction se fait avec --no-binary
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
 COPY scripts ./scripts
 COPY src ./src
 COPY examples ./examples

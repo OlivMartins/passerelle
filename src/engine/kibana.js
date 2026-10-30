@@ -1,4 +1,9 @@
 /* Passerelle — moteur : objets sauvegardés Kibana (.ndjson) vers SQL, et inventaire de migration */
+import { clone, coverage, isObj, tableConfig, VERDICT_RANK, verdictOf, VERDICTS } from './base.js';
+import { fieldType, indent, makeDslCtx, parseDateMath, rawAlias, resolveTable, translateDSL } from './dsl.js';
+import { frDuration } from './schema.js';
+import { kqlTranslate } from './kql.js';
+
 /*
  * Un export de Kibana (Gestion de la suite > Objets sauvegardés > Exporter) contient les vues de données, les recherches
  * Discover, les visualisations (agrégées, TSVB, Vega…), les visualisations Lens, les tableaux de bord et, depuis la 7.13,
@@ -16,11 +21,11 @@ const jsonAttr = v => {
   if (typeof v !== 'string') return v;
   try {
     return JSON.parse(v);
-  } catch (e) {
+  } catch {
     return undefined;
   }
 };
-function kibanaObjects(text) {
+export function kibanaObjects(text) {
   const src = String(text || '').trim();
   const out = { objects: [], errors: [], summary: null };
   if (!src) return out;
@@ -41,7 +46,7 @@ function kibanaObjects(text) {
             : Array.isArray(j.objects)
               ? j.objects
               : [j];
-    } catch (e) {
+    } catch {
       list = null;
     }
   }
@@ -104,7 +109,7 @@ function jsonSequence(src) {
       if (!depth) {
         try {
           out.push(JSON.parse(src.slice(start, i + 1)));
-        } catch (e) {
+        } catch {
           return null;
         }
       }
@@ -293,7 +298,7 @@ function viewEnv(cfg, view) {
   ctx.table = table;
   try {
     ctx.cfg = tableConfig(cfg, table);
-  } catch (e) {
+  } catch {
     /* préréglage inconnu : signalé par la traduction */
   }
   ctx.targets = new Map();
@@ -1803,12 +1808,12 @@ function ruleDecision(sql, rule) {
   return decisionWrap(sql, ['*', `${cond} AS declenchee`]);
 }
 // Décision d’une alerte (règle Kibana, watch) : des colonnes calculées sur le résultat de sa requête
-function decisionWrap(sql, select) {
+export function decisionWrap(sql, select) {
   return `SELECT\n    ${select.join(',\n    ')}\nFROM\n(\n${indent(String(sql).replace(/;\s*$/, ''), '    ')}\n)`;
 }
 
 /* ---------- Inventaire ---------- */
-const KB_TYPES = {
+export const KB_TYPES = {
   'index-pattern': 'Vue de données',
   search: 'Recherche',
   query: 'Requête enregistrée',
@@ -1863,7 +1868,7 @@ const KB_IGNORED = new Set([
  * Barème de l’effort, en heures : recréer l’objet dans l’outil cible, vérifier ses requêtes, reprendre ce qui ne se
  * traduit pas. Les poids d’un point à reprendre dépendent de sa nature (un panneau Vega se réécrit, un filtre se corrige).
  */
-const KB_EFFORT = {
+export const KB_EFFORT = {
   base: {
     'index-pattern': 0.25,
     search: 0.25,
@@ -1901,15 +1906,15 @@ const KB_EFFORT = {
   hoursPerDay: 7
 };
 // Remarques qui relèvent de la configuration (une fois pour tout le parc), pas d’un objet
-const KB_PREREQ = /^(Index sans correspondance|Schéma des colonnes non fourni)/;
+export const KB_PREREQ = /^(Index sans correspondance|Schéma des colonnes non fourni)/;
 // Index sans correspondance : repris par la liste des tables à déclarer
-const KB_PREREQ_SHOWN = /^Schéma des colonnes non fourni/;
-const todoHours = label => {
+export const KB_PREREQ_SHOWN = /^Schéma des colonnes non fourni/;
+export const todoHours = label => {
   for (const [re, h] of KB_EFFORT.todo) if (re.test(label)) return h;
   return KB_EFFORT.todoDefault;
 };
-const quarter = h => Math.ceil(h * 4 - 1e-9) / 4;
-const worstVerdict = list => list.reduce((w, v) => (VERDICT_RANK[v] > VERDICT_RANK[w] ? v : w), 'ready');
+export const quarter = h => Math.ceil(h * 4 - 1e-9) / 4;
+export const worstVerdict = list => list.reduce((w, v) => (VERDICT_RANK[v] > VERDICT_RANK[w] ? v : w), 'ready');
 // Champs cités par un corps de recherche, pour le bilan par vue de données
 function dslFields(dsl, out) {
   const add = f => {
@@ -1979,7 +1984,7 @@ function makeEntry(type, id, title, extra) {
   );
 }
 // Traduit un corps de recherche reconstruit et range le résultat dans l’objet
-function addQuery(entry, src, cfg, decorate) {
+export function addQuery(entry, src, cfg, decorate) {
   const text = JSON.stringify(src.dsl, null, 2);
   const r = translateDSL(text, cfg, { index: src.pattern });
   const q = {
@@ -2569,7 +2574,7 @@ const mapIssue = () => ({
 });
 
 /* ---------- Inventaire du parc ---------- */
-function kibanaInventory(text, cfg, opts) {
+export function kibanaInventory(text, cfg, opts) {
   opts = opts || {};
   // Un ou plusieurs exports (un par espace, par exemple) : les objets s’ajoutent, un objet présent deux fois compte une fois
   const texts = Array.isArray(text) ? text : [text];
@@ -2761,7 +2766,7 @@ function scoreEntry(x) {
     .concat(x.issues.filter(i => i.kind !== 'info').map(i => (i.kind === 'todo' ? 'todo' : 'review')));
   x.verdict = x.verdict === 'unrecognized' ? 'unrecognized' : worstVerdict(verdicts);
 }
-const blockerLabel = s =>
+export const blockerLabel = s =>
   String(s)
     .replace(/«[^»]*»/g, '«…»')
     .replace(/\s+/g, ' ')
@@ -2898,15 +2903,15 @@ function summarize(read, entries, ignored, cfg, opts) {
 }
 
 /* ---------- Rapports ---------- */
-const frNum = n => (Math.round(n * 100) / 100).toString().replace('.', ',');
-const frHours = h => `${frNum(h)} h`;
-const kbVerdict = v => VERDICTS[v] || v;
-function kbFlat(s) {
+export const frNum = n => (Math.round(n * 100) / 100).toString().replace('.', ',');
+export const frHours = h => `${frNum(h)} h`;
+export const kbVerdict = v => VERDICTS[v] || v;
+export function kbFlat(s) {
   return String(s === undefined || s === null ? '' : s)
     .replace(/\s+/g, ' ')
     .trim();
 }
-function inventoryMarkdown(inv) {
+export function inventoryMarkdown(inv) {
   const L = [];
   const s = inv.summary;
   const cell = v => kbFlat(v).replace(/\|/g, '\\|');
@@ -3043,7 +3048,7 @@ function inventoryMarkdown(inv) {
   );
   return L.join('\n');
 }
-function inventoryCSV(inv) {
+export function inventoryCSV(inv) {
   const q = v => {
     const s = kbFlat(v);
     return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -3094,7 +3099,7 @@ function inventoryCSV(inv) {
   return '\uFEFF' + rows.map(r => r.map(q).join(';')).join('\r\n') + '\r\n';
 }
 // Feuille de style des rapports HTML (inventaire Kibana, watches) : thème clair et sombre
-const KB_CSS = `:root{--bg:#fbfbf9;--fg:#1d1d1b;--muted:#6b6b66;--line:#e3e2dc;--card:#fff;--ready:#2f7d4f;--review:#b7791f;--todo:#c0392b;--unrec:#7a7a7a;--code:#f3f2ee}
+export const KB_CSS = `:root{--bg:#fbfbf9;--fg:#1d1d1b;--muted:#6b6b66;--line:#e3e2dc;--card:#fff;--ready:#2f7d4f;--review:#b7791f;--todo:#c0392b;--unrec:#7a7a7a;--code:#f3f2ee}
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#161615;--fg:#ecebe6;--muted:#a3a29b;--line:#34332f;--card:#1f1f1d;--ready:#5fbf86;--review:#e0a84a;--todo:#ec7063;--unrec:#a0a0a0;--code:#262624}}
 :root[data-theme="dark"]{--bg:#161615;--fg:#ecebe6;--muted:#a3a29b;--line:#34332f;--card:#1f1f1d;--ready:#5fbf86;--review:#e0a84a;--todo:#ec7063;--unrec:#a0a0a0;--code:#262624}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -3111,13 +3116,13 @@ ul.todo li::marker,li.err::marker{color:var(--todo)}ul.review li::marker,li.warn
 .q{border-top:1px dashed var(--line);margin-top:10px;padding-top:10px}pre{background:var(--code);border-radius:8px;padding:10px 12px;overflow-x:auto;font-size:12.5px;line-height:1.45}
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.filters button{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:999px;padding:3px 12px;cursor:pointer}.filters button[aria-pressed="true"]{border-color:var(--fg)}
 .eff summary{cursor:pointer;color:var(--muted);font-size:13px}p.err{color:var(--todo)}`;
-const kbHtml = s =>
+export const kbHtml = s =>
   String(s === undefined || s === null ? '' : s)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-function inventoryHTML(inv, title) {
+export function inventoryHTML(inv, title) {
   const s = inv.summary;
   const h = kbHtml;
   const byKey = new Map(inv.entries.map(x => [x.key, x]));
@@ -3210,7 +3215,7 @@ document.querySelectorAll('.filters button').forEach(function(b){b.addEventListe
 `;
 }
 // Fichiers SQL d’un inventaire, un par objet : nom lisible et unique
-function inventorySQLFiles(inv) {
+export function inventorySQLFiles(inv) {
   const used = new Set();
   const files = [];
   const slugOf = s =>

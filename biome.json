@@ -30,6 +30,9 @@
         "noEmptyCharacterClassInRegex": "error",
         "noSelfAssign": "error",
         "noUnreachable": "error",
+        "noUndeclaredVariables": "error",
+        "noUnusedImports": "error",
+        "noUnusedVariables": "error",
         "noUnusedLabels": "error"
       },
       "suspicious": {

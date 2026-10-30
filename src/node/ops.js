@@ -1,24 +1,29 @@
 /* Passerelle — Node.js : exploitation du service (identifiant de requête, jetons à portée, identité du reverse proxy, journal d’audit, /metrics, traces OpenTelemetry) */
+import { AsyncLocalStorage } from 'node:async_hooks';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import opsNet from 'node:net';
+import { clone, isObj } from '../engine/index.js';
+import { ENV_REF, expand, jobs, log, VERSION } from './common.js';
+
 /*
- * Ce code ne s’exécute pas à son chargement : il emploie les modules et les fonctions que src/server.js déclare
- * (crypto, fs, log, expand, VERSION…), dans ses fonctions seulement. Tous ses noms commencent par « ops ».
+ * Ne dépend que de common.js et du moteur ; src/server.js et src/node/vector.js s’en servent. Les noms exportés
+ * commencent par « ops ».
  *
  * Ce que les trois sorties (journal d’audit, métriques, traces) ne contiennent jamais : une requête, un pipeline,
  * un SQL ou un jeton. Elles décrivent l’appel (qui, quoi, quand, combien de temps, avec quel résultat), pas son contenu ;
  * le journal d’audit n’en garde qu’une empreinte (SHA-256, 16 premiers caractères) pour retrouver quel texte a été soumis.
  */
-const { AsyncLocalStorage } = require('node:async_hooks');
-const opsNet = require('node:net');
 
 // La requête en cours, accessible de toute fonction qu’elle appelle (pour les spans enfants, sans passer la requête partout)
-const opsContext = new AsyncLocalStorage();
+export const opsContext = new AsyncLocalStorage();
 
 /* ---------- Configuration du service (section « server ») ---------- */
 const OPS_SCOPES = ['translate', 'validate', 'metrics'];
 const OPS_LEGACY_TOKEN = 'principal';
 
 // Contrôle de forme, sans variable d’environnement : il vaut pour toutes les commandes qui lisent la configuration
-function opsCheckConfig(s, file) {
+export function opsCheckConfig(s, file) {
   const where = file ? ` (${file})` : '';
   const err = m => {
     throw new Error(m + where);
@@ -70,7 +75,7 @@ function opsCheckConfig(s, file) {
 }
 
 // Adresses des reverse proxies de confiance → net.BlockList (null si aucun)
-function opsProxyList(list) {
+export function opsProxyList(list) {
   if (!list.length) return null;
   const bl = new opsNet.BlockList();
   for (const raw of list) {
@@ -92,7 +97,7 @@ const opsDigest = s => crypto.createHash('sha256').update(String(s)).digest();
  * Ce que le service applique, avec les variables d’environnement résolues. Il refuse de démarrer (ou de recharger)
  * plutôt que de laisser l’API ouverte : un jeton dont la variable est absente ne disparaît pas en silence.
  */
-function opsRuntime(cfg) {
+export function opsRuntime(cfg) {
   const s = cfg.server;
   const tokens = [];
   const seen = new Map();
@@ -119,7 +124,7 @@ function opsRuntime(cfg) {
     let u;
     try {
       u = new URL(endpoint);
-    } catch (e) {
+    } catch {
       u = null;
     }
     if (!u || !/^https?:$/.test(u.protocol))
@@ -144,10 +149,10 @@ function opsRuntime(cfg) {
 
 // Configuration montrée par check-config : les jetons y sont des références, jamais des valeurs
 // Une valeur d’en-tête qui ne contient que des références ${VARIABLE} et, au plus, un mot de schéma (« Bearer ${JETON} »).
-const opsHeaderRef = v =>
+export const opsHeaderRef = v =>
   /\$\{[A-Za-z_][A-Za-z0-9_]*\}/.test(v) &&
   /^[A-Za-z]*\s*$/.test(String(v).replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g, ''));
-function opsShown(server) {
+export function opsShown(server) {
   const c = clone(server);
   c.tokens = c.tokens.map(t => ({
     name: t.name,
@@ -160,11 +165,11 @@ function opsShown(server) {
 }
 
 /* ---------- Adresse du client, identité, jeton ---------- */
-const opsNormIp = addr => {
+export const opsNormIp = addr => {
   const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(String(addr || ''));
   return m ? m[1] : String(addr || '');
 };
-function opsTrusted(rt, addr) {
+export function opsTrusted(rt, addr) {
   if (!rt.proxies) return false;
   const a = opsNormIp(addr);
   const family = opsNet.isIP(a);
@@ -172,7 +177,7 @@ function opsTrusted(rt, addr) {
 }
 // Le client est le premier saut, en partant de la droite de X-Forwarded-For, qui n’est pas un proxy de confiance.
 // L’en-tête n’est lu que si la connexion vient d’un proxy de confiance : n’importe qui peut en écrire un.
-function opsClientIp(req, rt) {
+export function opsClientIp(req, rt) {
   const peer = opsNormIp(req.socket.remoteAddress);
   if (!opsTrusted(rt, peer)) return peer;
   const hops = String(req.headers['x-forwarded-for'] || '')
@@ -183,7 +188,7 @@ function opsClientIp(req, rt) {
   for (let i = hops.length - 1; i >= 0; i--) if (!opsTrusted(rt, hops[i])) return hops[i];
   return hops[0];
 }
-function opsIdentity(req, rt, trusted) {
+export function opsIdentity(req, rt, trusted) {
   if (!rt.identityHeader) return {};
   const raw = req.headers[rt.identityHeader];
   if (typeof raw !== 'string' || !raw.trim()) return {};
@@ -196,7 +201,7 @@ function opsIdentity(req, rt, trusted) {
   };
 }
 // Sans jeton configuré, l’API reste ouverte (aux seuls appels adressés à localhost : voir crossSiteRefusal)
-function opsAuth(req, rt) {
+export function opsAuth(req, rt) {
   if (!rt.authRequired) return { ok: true, name: null, scopes: new Set(OPS_SCOPES) };
   const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
   if (!m) return { ok: false, reason: 'absent' };
@@ -206,7 +211,7 @@ function opsAuth(req, rt) {
   for (const t of rt.tokens) if (crypto.timingSafeEqual(digest, t.digest) && !found) found = t;
   return found ? { ok: true, name: found.name, scopes: found.scopes } : { ok: false, reason: 'invalide' };
 }
-function opsScopeOf(pathname) {
+export function opsScopeOf(pathname) {
   if (pathname === '/metrics') return 'metrics';
   if (pathname === '/v1/config' || /^\/v1\/(translate|inventory|schema)\//.test(pathname)) return 'translate';
   if (/^\/v1\/validate\//.test(pathname)) return 'validate';
@@ -234,9 +239,10 @@ const OPS_ROUTES = new Set([
 ]);
 const OPS_METHODS = new Set(['GET', 'POST', 'HEAD', 'PUT', 'DELETE', 'OPTIONS', 'PATCH']);
 const opsLive = { inflight: 0 };
-const opsRouteOf = pathname => (pathname === '/index.html' ? '/' : OPS_ROUTES.has(pathname) ? pathname : 'autre');
+export const opsRouteOf = pathname =>
+  pathname === '/index.html' ? '/' : OPS_ROUTES.has(pathname) ? pathname : 'autre';
 // /v1/translate/dsl → translate.dsl ; ce qui n’est pas une route connue → autre
-const opsActionOf = pathname =>
+export const opsActionOf = pathname =>
   pathname === '/metrics'
     ? 'metrics'
     : pathname === '/v1/config'
@@ -250,7 +256,7 @@ const opsActionOf = pathname =>
  * (X-Request-Id) : c’est alors celui de son propre journal d’accès. Celui d’un autre client est gardé à part
  * (client_request_id) : il peut être choisi pour semer la confusion dans le journal.
  */
-function opsBegin(req, res, rt) {
+export function opsBegin(req, res, rt) {
   const peer = opsNormIp(req.socket.remoteAddress);
   const trusted = opsTrusted(rt, peer);
   const supplied = req.headers['x-request-id'];
@@ -285,17 +291,17 @@ function opsBegin(req, res, rt) {
   return rq;
 }
 // Ce que la réponse dit de la requête, sans en garder le contenu : verdict d’une traduction, validité d’une validation
-function opsNote(rq, obj) {
+export function opsNote(rq, obj) {
   if (!obj || typeof obj !== 'object') return;
   if (typeof obj.verdict === 'string') rq.verdict = obj.verdict;
   if (typeof obj.valid === 'boolean') rq.valid = obj.valid;
 }
-function opsBody(rq, body) {
+export function opsBody(rq, body) {
   rq.bodyBytes = Buffer.byteLength(body);
   rq.bodySha = crypto.createHash('sha256').update(body).digest('hex').slice(0, 16);
 }
 
-function opsEnd(rq, res) {
+export function opsEnd(rq, res) {
   if (rq.done) return;
   rq.done = true;
   opsLive.inflight--;
@@ -380,12 +386,12 @@ function opsEnd(rq, res) {
 let opsAuditFd = null;
 let opsAuditFile = '';
 // Ouvre (ou rouvre, après une rotation) le fichier d’audit : l’erreur remonte, le service ne démarre pas sans son audit
-function opsAuditOpen(file) {
+export function opsAuditOpen(file) {
   const fd = file ? fs.openSync(file, 'a', 0o600) : null;
   if (opsAuditFd !== null) {
     try {
       fs.closeSync(opsAuditFd);
-    } catch (e) {
+    } catch {
       /* déjà fermé */
     }
   }
@@ -462,19 +468,19 @@ const OPS_LIVE = {
   }
 };
 const opsStore = new Map();
-function opsLabels(labels) {
+export function opsLabels(labels) {
   return Object.keys(labels || {})
     .sort()
     .map(n => `${n}="${String(labels[n]).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`)
     .join(',');
 }
-function opsInc(name, labels, n) {
+export function opsInc(name, labels, n) {
   let series = opsStore.get(name);
   if (!series) opsStore.set(name, (series = new Map()));
   const key = opsLabels(labels);
   series.set(key, (series.get(key) || 0) + (n === undefined ? 1 : n));
 }
-function opsObserve(name, labels, seconds) {
+export function opsObserve(name, labels, seconds) {
   let series = opsStore.get(name);
   if (!series) opsStore.set(name, (series = new Map()));
   const key = opsLabels(labels);
@@ -494,11 +500,11 @@ const OPS_PLAIN_COUNTERS = [
   'passerelle_trace_spans_dropped_total',
   'passerelle_trace_export_errors_total'
 ];
-function opsMetricsInit() {
+export function opsMetricsInit() {
   for (const name of OPS_PLAIN_COUNTERS) opsInc(name, {}, 0);
 }
 const opsNum = v => (Number.isInteger(v) ? String(v) : String(Number(v.toPrecision(12))));
-function opsRender() {
+export function opsRender() {
   const out = [];
   const line = (name, labels, v) => out.push(`${name}${labels ? `{${labels}}` : ''} ${opsNum(v)}`);
   for (const [name, [type, help]] of Object.entries(OPS_METRICS)) {
@@ -614,7 +620,7 @@ function opsSpanEnd(span, code, attrs) {
   opsTraceQueue.push(json);
   if (opsTraceQueue.length >= 64) opsTraceFlush();
 }
-async function opsWithSpan(name, kind, attrs, fn) {
+export async function opsWithSpan(name, kind, attrs, fn) {
   const rq = opsContext.getStore();
   if (!rq || !rq.span) return fn(null);
   const span = opsSpanNew(rq, name, kind, rq.span.spanId, attrs);
@@ -628,12 +634,12 @@ async function opsWithSpan(name, kind, attrs, fn) {
   }
 }
 // En-tête traceparent à transmettre à un service appelé depuis le span donné
-function opsTraceparent(span) {
+export function opsTraceparent(span) {
   const rq = opsContext.getStore();
   if (!rq || !rq.traceId) return '';
   return `00-${rq.traceId}-${span ? span.spanId : rq.span ? rq.span.spanId : opsRand(8)}-${rq.sampled ? '01' : '00'}`;
 }
-function opsTraceConfigure(rt) {
+export function opsTraceConfigure(rt) {
   opsTraceCfg = rt.tracing;
   if (opsTraceTimer) {
     clearInterval(opsTraceTimer);
@@ -689,7 +695,7 @@ function opsTraceFlush() {
   return sent;
 }
 // À l’arrêt : ce qui attend part, dans la limite de deux secondes
-async function opsShutdown() {
+export async function opsShutdown() {
   if (opsTraceFlushing) await Promise.race([opsTraceFlushing, new Promise(r => setTimeout(r, 2000))]);
   if (opsTraceQueue.length) await Promise.race([opsTraceFlush(), new Promise(r => setTimeout(r, 2000))]);
 }

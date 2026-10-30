@@ -1,4 +1,6 @@
 /* Passerelle — moteur partie 6 : écriture dans ClickHouse (sortie elasticsearch → table de index_mapping) */
+import { isObj, parseColumnType, segName, tableConfig, vq, vraw } from './base.js';
+import { ATTR_REF, globToRe } from './dsl.js';
 
 /*
  * Table d’un nom d’index : la correspondance la plus précise de clickhouse.index_mapping (la partie fixe la plus
@@ -29,7 +31,7 @@ function chSplitTable(cfg, table) {
  * déclarées reçoivent un nombre, les Map de chaînes du texte.
  *   ind : indentation des lignes rendues
  */
-function chShapeLines(cfg, table, ind) {
+export function chShapeLines(cfg, table, ind) {
   const tc = tableConfig(cfg, table);
   const ch = tc.clickhouse;
   const pad = '  '.repeat(ind || 0);
@@ -159,7 +161,7 @@ function chShapeLines(cfg, table, ind) {
  * Sortie ClickHouse d’une sortie elasticsearch de Logstash, ou d’un pipeline d’ingestion. index : nom d’index
  * fixe, ou { expr } calculé dans l’événement. Rend le programme de mise en forme et le sink.
  */
-function clickhouseOutput(v, cfg, index, label) {
+export function clickhouseOutput(v, cfg, index, label) {
   const ch = cfg.clickhouse;
   const notes = [];
   let lines = [];

@@ -14,12 +14,11 @@ import { CASES } from '../tests/differential/cases.mjs';
 import { INDEX, configOverride } from '../tests/differential/dataset.mjs';
 import { CASES as PIPELINE_CASES } from '../tests/pipelines/cases.mjs';
 import { translatedPipeline, translatedChain } from '../tests/pipelines/transport.mjs';
-import { loadEngine, engineSource, serverSource } from './engine.mjs';
+import * as E from '../src/engine/index.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const UPDATE = process.argv.includes('--update');
 const rd = p => readFileSync(join(ROOT, p), 'utf8');
-const E = loadEngine();
 
 // Éléments « à reprendre » attendus : le filtre ruby de batch.conf n’a pas d’équivalent automatique
 const EXPECTED_TODO = { 'logstash/batch.conf': 1 };
@@ -1452,12 +1451,62 @@ check(
   'schéma déclaré : une colonne qu’il ne connaît pas est à vérifier, pas prête'
 );
 
-// Les fichiers du moteur et le serveur partagent une portée : un nom déclaré deux fois casserait le binaire
-const declared = (engineSource() + serverSource())
-  .match(/^(?:function|const|let|class) +[A-Za-z_$][\w$]*/gm)
-  .map(d => d.split(/ +/)[1]);
-const twice = [...new Set(declared.filter((d, i) => declared.indexOf(d) !== i))];
-check(!twice.length, 'aucun nom déclaré deux fois dans le binaire assemblé', twice.join(', '));
+// Graphe des modules du moteur : il n'importe que ses propres fichiers (il tourne dans le navigateur comme dans le
+// serveur), et le seul cycle toléré est celui, connu, de la base et du DSL (dsl-params et dsl-strict en dépendent
+// comme du reste du DSL)
+{
+  const dir = join(ROOT, 'src/engine');
+  const files = readdirSync(dir).filter(f => f.endsWith('.js') && f !== 'index.js');
+  const deps = new Map();
+  const foreign = [];
+  for (const f of files) {
+    const targets = [];
+    for (const m of readFileSync(join(dir, f), 'utf8').matchAll(/^(?:import|export)\b[^;]*?\bfrom '([^']+)';/gm)) {
+      if (/^\.\/[\w-]+\.js$/.test(m[1])) targets.push(m[1].slice(2));
+      else foreign.push(`${f} → ${m[1]}`);
+    }
+    deps.set(f, [...new Set(targets)]);
+  }
+  check(!foreign.length, 'moteur : les modules n’importent que des modules du moteur', foreign.join(', '));
+
+  // Composantes fortement connexes (Tarjan) : celles de plus d'un module sont des cycles
+  const index = new Map();
+  const low = new Map();
+  const stack = [];
+  const cycles = [];
+  let n = 0;
+  const visit = v => {
+    index.set(v, n);
+    low.set(v, n++);
+    stack.push(v);
+    for (const w of deps.get(v) || []) {
+      if (!index.has(w)) {
+        visit(w);
+        low.set(v, Math.min(low.get(v), low.get(w)));
+      } else if (stack.includes(w)) low.set(v, Math.min(low.get(v), index.get(w)));
+    }
+    if (low.get(v) === index.get(v)) {
+      const comp = [];
+      let w;
+      do comp.push((w = stack.pop()));
+      while (w !== v);
+      if (comp.length > 1) cycles.push(comp.map(f => f.replace(/\.js$/, '')).sort());
+    }
+  };
+  for (const f of files) if (!index.has(f)) visit(f);
+  const known = ['base', 'dsl', 'dsl-params', 'dsl-strict'];
+  const unexpected = cycles.filter(c => c.join() !== [...known].sort().join());
+  check(
+    !unexpected.length,
+    'moteur : aucun cycle d’import hors celui de base et du DSL',
+    unexpected.map(c => c.join(' ↔ ')).join(' ; ')
+  );
+  const missing = [...deps.values()].flat().filter(t => !deps.has(t));
+  check(!missing.length, 'moteur : tout module importé existe', missing.join(', '));
+  const facade = readFileSync(join(dir, 'index.js'), 'utf8');
+  const unexported = files.filter(f => !facade.includes(`'./${f}'`));
+  check(!unexported.length, 'moteur : la façade src/engine/index.js réexporte chaque module', unexported.join(', '));
+}
 
 /* ---------- Watches Elasticsearch ---------- */
 {

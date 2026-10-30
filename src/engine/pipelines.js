@@ -1,4 +1,6 @@
 /* Passerelle — moteur partie 4 : ensembles de pipelines Logstash (pipelines.yml, pipeline { send_to }) */
+import { makeNotes, mergeConfig, verdictOf } from './base.js';
+import { compName, flatOutputs, parseLogstash, translateLogstash, uniq, vectorDocument } from './logstash.js';
 
 /*
  * Lecture de pipelines.yml : une liste de réglages par pipeline (pipeline.id, path.config ou config.string,
@@ -6,7 +8,7 @@
  * imbriquées (aplaties en clés pointées, comme le fait Logstash), chaînes entre guillemets, blocs | et >,
  * listes [a, b], commentaires.
  */
-function parsePipelinesYML(text) {
+export function parsePipelinesYML(text) {
   const raw = String(text)
     .replace(/\r\n?/g, '\n')
     .replace(/^\uFEFF/, '')
@@ -236,7 +238,7 @@ function globRegex(pattern) {
  * puis *.conf. Un dossier vaut tous ses fichiers. Comme Logstash, les fichiers sont lus dans l’ordre alphabétique,
  * et ceux qui finissent par ~ (sauvegardes d’éditeur) sont écartés.
  */
-function pipelineConfigFiles(pathConfig, available) {
+export function pipelineConfigFiles(pathConfig, available) {
   const norm = String(pathConfig).trim().replace(/\\/g, '/').replace(/^\.\//, '');
   const files = available.map(f => f.replace(/\\/g, '/').replace(/^\.\//, '')).filter(f => !/~$/.test(f));
   const tries = [];
@@ -281,7 +283,7 @@ const PIPELINE_SETTINGS_IGNORED = [
   'pipeline.system',
   'pipeline.buffer.type'
 ];
-function translatePipelines(list, cfg) {
+export function translatePipelines(list, cfg) {
   const notes = makeNotes();
   const env = new Set();
   const all = { sources: {}, transforms: {}, sinks: {}, enrich: {} };
@@ -304,7 +306,7 @@ function translatePipelines(list, cfg) {
       const ast = parseLogstash(p.config);
       kafkaOutputs += flatOutputs(ast.output, [], []).filter(o => o.plugin.name === 'kafka').length;
       kafkaInputs += ast.input.filter(st => st.k === 'plugin' && st.name === 'kafka').length;
-    } catch (e) {
+    } catch {
       /* signalé à la traduction */
     }
   }
@@ -594,7 +596,7 @@ function translatePipelines(list, cfg) {
  * pipelines.yml et ses fichiers → liste de pipelines prête pour translatePipelines.
  *   readFile(path) rend le texte d’un fichier disponible (chemins relatifs au dossier de pipelines.yml).
  */
-function pipelinesFromYML(text, available, readFile) {
+export function pipelinesFromYML(text, available, readFile) {
   const entries = parsePipelinesYML(text);
   return entries.map(e => {
     const st = e.settings;

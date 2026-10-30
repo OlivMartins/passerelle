@@ -1,11 +1,73 @@
 /* Passerelle — serveur HTTP (interface + API) et ligne de commande */
-const http = require('node:http');
-const fs = require('node:fs');
-const fsp = require('node:fs/promises');
-const path = require('node:path');
-const os = require('node:os');
-const crypto = require('node:crypto');
-const { execFile } = require('node:child_process');
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import http from 'node:http';
+import { isIP } from 'node:net';
+import path from 'node:path';
+import sea from 'node:sea';
+import { parseArgs as utilParseArgs } from 'node:util';
+import {
+  anReport,
+  clone,
+  configToYAML,
+  coverage,
+  DEFAULT_CONFIG,
+  eqEsError,
+  grafanaDashboard,
+  grafanaReportMarkdown,
+  inventoryCSV,
+  inventoryHTML,
+  inventoryMarkdown,
+  inventorySQLFiles,
+  isObj,
+  kibanaInventory,
+  pipelinesFromYML,
+  profilesFromSystem,
+  schemaFromElastic,
+  schemaPullQueries,
+  toYAML,
+  translateDSL,
+  translateIngest,
+  translateLogstash,
+  translatePipelines,
+  VERDICT_RANK,
+  verdictOf,
+  VERDICTS,
+  watcherReportCSV,
+  watcherReportHTML,
+  watcherReportMarkdown,
+  watcherScrub,
+  watcherSQLFiles,
+  watcherTranslate,
+  watchFromSource
+} from './engine/index.js';
+import { collect, ENV_REF, expand, fail, HttpError, ingestInputs, jobs, log, outDir, VERSION } from './node/common.js';
+import {
+  opsActionOf,
+  opsAuditOpen,
+  opsAuth,
+  opsBegin,
+  opsBody,
+  opsContext,
+  opsEnd,
+  opsHeaderRef,
+  opsInc,
+  opsMetricsInit,
+  opsNote,
+  opsRender,
+  opsRouteOf,
+  opsRuntime,
+  opsScopeOf,
+  opsShown,
+  opsShutdown,
+  opsTraceConfigure,
+  opsTraceparent,
+  opsWithSpan
+} from './node/ops.js';
+import { loadCfgOrFail, loadConfig } from './node/config.js';
+import { validateVector } from './node/vector.js';
+import { esClient, verifyCommand } from './node/verify.js';
+import { assistCommand, asstLoopback } from './node/assist.js';
 
 /* ---------- Journalisation JSON (lue par journald) ---------- */
 
@@ -49,9 +111,8 @@ function configWarnings(cfg) {
       const h = u.hostname.replace(/^\[|\]$/g, '');
       if (u.protocol !== 'http:') reason = `${u.protocol}// n’est pas admis`;
       else if (u.username || u.password) reason = 'l’adresse porte un identifiant';
-      else if (h !== 'localhost' && !(asstNet.isIP(h) && asstLoopback(h)))
-        reason = `${h} n’est pas une adresse de bouclage`;
-    } catch (e) {
+      else if (h !== 'localhost' && !(isIP(h) && asstLoopback(h))) reason = `${h} n’est pas une adresse de bouclage`;
+    } catch {
       reason = 'adresse illisible';
     }
     if (reason)
@@ -79,12 +140,11 @@ function publicConfig(cfg) {
 /* ---------- Interface embarquée ---------- */
 function loadUIHtml() {
   try {
-    const sea = require('node:sea');
     if (sea.isSea()) return sea.getAsset('index.html', 'utf8');
-  } catch (e) {
+  } catch {
     /* hors binaire */
   }
-  const p = process.env.PASSERELLE_UI || path.join(__dirname, 'passerelle.html');
+  const p = process.env.PASSERELLE_UI || path.join(import.meta.dirname, 'passerelle.html');
   return fs.readFileSync(p, 'utf8');
 }
 function buildUI(cfg) {
@@ -354,7 +414,7 @@ function serve(opts) {
     // Une adresse comme « // » ne s’analyse pas : sans cette garde, l’exception arrêterait le processus
     try {
       url = new URL(req.url, 'http://localhost');
-    } catch (e) {
+    } catch {
       return json(res, 400, { error: 'adresse de requête invalide' });
     }
     rq.path = url.pathname;
@@ -506,7 +566,7 @@ function serve(opts) {
                     text: String(text)
                   }))
                 : null;
-          } catch (e) {
+          } catch {
             inputs = null;
           }
           if (!inputs) inputs = [{ name: url.searchParams.get('name') || 'pipeline', text: body }];
@@ -784,7 +844,7 @@ const OPTIONS = {
 function parseArgs(argv) {
   let r;
   try {
-    r = require('node:util').parseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true });
+    r = utilParseArgs({ args: argv, options: OPTIONS, allowPositionals: true, strict: true });
   } catch (e) {
     const opt = /'(-[^' ]+)/.exec(e.message);
     if (!opt) fail(`option invalide : ${e.message}`);
@@ -828,7 +888,7 @@ function pipelineSet(file, cfg) {
     let names;
     try {
       names = fs.readdirSync(d, { withFileTypes: true });
-    } catch (e) {
+    } catch {
       return;
     }
     for (const n of names.sort((a, b) => (a.name < b.name ? -1 : 1))) {
@@ -878,7 +938,7 @@ function batch(kind, o) {
       let dir = false;
       try {
         dir = fs.statSync(p).isDirectory();
-      } catch (e) {
+      } catch {
         /* signalé par collect */
       }
       const yml = ['pipelines.yml', 'pipelines.yaml'].map(n => path.join(p, n)).find(f => dir && fs.existsSync(f));
@@ -1112,7 +1172,7 @@ function schemaBlocks(body) {
   if (/^\s*\{/.test(body)) {
     try {
       j = JSON.parse(body);
-    } catch (e) {
+    } catch {
       j = null;
     }
   }
@@ -1169,7 +1229,7 @@ function validTimeZone(tz) {
   try {
     new Intl.DateTimeFormat('fr', { timeZone: tz });
     return true;
-  } catch (e) {
+  } catch {
     return false;
   }
 }

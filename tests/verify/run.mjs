@@ -28,12 +28,12 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
-import { loadEngine, engineSource, serverSource } from '../../scripts/engine.mjs';
+import * as E from '../../src/engine/index.js';
+import { bundleServer } from '../../scripts/bundle.mjs';
 import { diff as RD, pipe as RP } from './reference.mjs';
 import { example, translatedPipeline, logstashPipeline, outputsOf } from '../pipelines/transport.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const E = loadEngine();
 const TMP = mkdtempSync(join(tmpdir(), 'essai-verify-'));
 let failures = 0;
 const check = (ok, label, detail) => {
@@ -967,7 +967,7 @@ const ES_URL = `http://127.0.0.1:${esServer.address().port}`;
 const CH_URL = `http://127.0.0.1:${chServer.address().port}`;
 
 const BIN = join(TMP, 'passerelle.cjs');
-writeFileSync(BIN, "'use strict';\n" + engineSource() + serverSource());
+await bundleServer({ outfile: BIN });
 const CONFIG = join(TMP, 'passerelle.json');
 writeFileSync(CONFIG, J({ clickhouse: { endpoint: CH_URL }, elasticsearch: { endpoint: ES_URL } }));
 
@@ -1025,7 +1025,7 @@ function cli(args, env) {
 const json = r => {
   try {
     return JSON.parse(r.stdout);
-  } catch (e) {
+  } catch {
     return null;
   }
 };

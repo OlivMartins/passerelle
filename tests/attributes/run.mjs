@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dataset, INDEX, clickhouseDDL, clickhouseRow, configOverride } from '../differential/dataset.mjs';
 import { CASES } from '../differential/cases.mjs';
-import { loadEngine } from '../../scripts/engine.mjs';
+import * as E from '../../src/engine/index.js';
 
 const args = Object.fromEntries(
   process.argv.slice(2).map(a => {
@@ -31,7 +31,6 @@ const args = Object.fromEntries(
 const [CH_BIN, ...CH_PRE] = (process.env.CLICKHOUSE_LOCAL || 'clickhouse-local').split(' ');
 const WORK = process.env.PASSERELLE_ATTR_WORK || join(tmpdir(), 'passerelle-attributs');
 const ONLY = args.only ? new RegExp(args.only) : null;
-const E = loadEngine();
 
 /*
  * Écarts inventoriés : la traduction vers les attributs ne peut pas donner le même résultat, pour une raison connue.

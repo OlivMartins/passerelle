@@ -1,4 +1,6 @@
 /* Passerelle — moteur partie 8 : analyseurs personnalisés d’Elasticsearch (aperçu et plan ClickHouse) */
+import { chIdent, chStr, escRe } from './base.js';
+import { esTokens } from './dsl.js';
 
 /*
  * Un champ text est découpé en mots par son analyseur : caractères filtrés (char_filter), découpage (tokenizer),
@@ -542,7 +544,7 @@ function anCharFilter(c, text, notes) {
  * Aperçu : { tokens: [{ t, pos }], stages: [{ stage, text|tokens }], notes, error }. Sur un composant que l’on ne
  * reproduit pas, error dit lequel : aucun mot n’est inventé.
  */
-function anAnalyze(spec, text, canonical) {
+export function anAnalyze(spec, text, canonical) {
   const notes = [];
   const stages = [];
   try {
@@ -583,7 +585,7 @@ const anSqlRepl = r =>
  * Rend { expr, steps, notes, verdict } : expr est une expression SQL de type Array(String) à partir de col (une
  * expression de type String). Chaque étape dit si elle est exacte (même résultat qu’Elasticsearch) ou à vérifier.
  */
-function anPlan(spec, col) {
+export function anPlan(spec, col) {
   const steps = [];
   const notes = [];
   const note = (level, title, detail) => notes.push({ level, title, detail });
@@ -923,7 +925,7 @@ const anId = n =>
  * qui retrouve les mêmes lignes que match / match_phrase. sample : un texte d’exemple pour la requête ; src : la
  * colonne qui porte le texte et son type (un sous-champ « titre.debut » est calculé depuis la colonne « titre »).
  */
-function anFieldPlan(table, field, spec, sample, src) {
+export function anFieldPlan(table, field, spec, sample, src) {
   const column = src && src.column ? src.column : field;
   const type = src && src.type ? String(src.type) : 'String';
   const base = String(column);
@@ -982,7 +984,7 @@ function anFieldPlan(table, field, spec, sample, src) {
  * Plans de tous les analyseurs des tables d’un résultat de schemaFromElastic() : { plans, markdown, verdict }.
  * sample : un texte d’exemple dont l’aperçu et la requête sont donnés pour chaque champ ; only : un seul champ.
  */
-function anReport(tables, sample, only) {
+export function anReport(tables, sample, only) {
   const plans = [];
   for (const t of tables) {
     for (const [field, spec] of Object.entries((t.profile && t.profile.analyzers) || {})) {

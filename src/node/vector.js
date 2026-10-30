@@ -1,6 +1,11 @@
 /* Passerelle — validation d’une configuration Vector par « vector validate » */
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { runProcess } from './common.js';
+import { opsWithSpan } from './ops.js';
 
-async function validateVector(text, format) {
+export async function validateVector(text, format) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'passerelle-'));
   try {
     const dataDir = path.join(dir, 'data');

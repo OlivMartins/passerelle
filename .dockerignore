@@ -1,4 +1,4 @@
-# Seuls package.json, scripts/, src/, examples/, packaging/passerelle.yaml, LICENSE et NOTICE entrent dans l'image
+# Seuls package.json, package-lock.json, scripts/, src/, examples/, packaging/passerelle.yaml, LICENSE et NOTICE entrent dans l'image
 .git
 .github
 node_modules

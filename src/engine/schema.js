@@ -1,4 +1,8 @@
 /* Passerelle — moteur : schéma ClickHouse tiré d’Elasticsearch (mappings, modèles d’index, politiques ILM) */
+import { CH_KW, chIdent, chStr, clone, isObj, makeNotes, OTEL_RESOURCE, painlessToSQL, PRESETS } from './base.js';
+import { globToRe, makeDslCtx, mayBeNull, preprocessDSL } from './dsl.js';
+import { toYAML } from './logstash.js';
+
 /*
  * Une table ClickHouse bien faite décide de la vitesse de toutes les requêtes traduites. Elle se déduit en grande
  * partie de ce qu’Elasticsearch sait déjà de l’index :
@@ -163,7 +167,7 @@ function intervalOf(seconds) {
   if (s % 60 === 0) return { n: s / 60, unit: 'MINUTE' };
   return { n: s, unit: 'SECOND' };
 }
-const frDuration = sec =>
+export const frDuration = sec =>
   sec % 86400 === 0
     ? `${sec / 86400} j`
     : sec % 3600 === 0
@@ -1049,7 +1053,7 @@ function buildOtelTable(cfg, src, opts) {
 }
 
 /* ---------- Entrée principale ---------- */
-function schemaFromElastic(text, cfg, opts) {
+export function schemaFromElastic(text, cfg, opts) {
   opts = opts || {};
   if (opts.preset && !PRESETS[opts.preset])
     return { error: `préréglage inconnu : ${opts.preset} (${Object.keys(PRESETS).join(' ou ')})` };
@@ -1163,7 +1167,7 @@ function unflatSettings(flat) {
 
 /* ---------- Lecture d’un schéma existant (passerelle schema pull) ---------- */
 // Requêtes envoyées à ClickHouse pour décrire des tables : colonnes, clé de tri, index de saut
-function schemaPullQueries(tables) {
+export function schemaPullQueries(tables) {
   const list = tables
     .map(t => {
       const [db, tb] = String(t).includes('.') ? String(t).split(/\.(.+)/) : ['', String(t)];
@@ -1182,7 +1186,7 @@ function schemaPullQueries(tables) {
  * texte (colonnes qui portent un index text ou tokenbf_v1), une colonne de clés JSON, une colonne TimestampTime.
  * Rien n’est inventé : ce qui ne se déduit pas du schéma (field_mapping, attributs) reste à écrire.
  */
-function profilesFromSystem(rows, tableRows, indexRows, wanted, cfg) {
+export function profilesFromSystem(rows, tableRows, indexRows, wanted, cfg) {
   const out = {};
   const notes = [];
   for (const t of wanted) {

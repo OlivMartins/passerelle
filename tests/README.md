@@ -12,7 +12,7 @@ Un changement du SQL ou du YAML généré fait échouer le test et apparaît en 
 npm run test:update
 ```
 
-S’y ajoutent des garde-fous ciblés : refus des clés inconnues, verdicts, paramètres de requête, sorties Elasticsearch, profondeur d’imbrication, et aucun nom déclaré deux fois dans le binaire assemblé.
+S’y ajoutent des garde-fous ciblés : refus des clés inconnues, verdicts, paramètres de requête, sorties Elasticsearch, profondeur d’imbrication, et le graphe des modules du moteur (il n’importe que ses propres fichiers, aucun cycle d’import hors celui, connu, de la base et du DSL, la façade réexporte tout).
 
 `npm test` lance aussi `tests/server/run.mjs` : le serveur et la ligne de commande, interrogés à travers une fausse instance ClickHouse et un faux binaire Vector (Linux seulement). Il couvre les codes HTTP, les refus de sécurité, les options et les codes de sortie.
 

@@ -1,4 +1,7 @@
 /* Passerelle — moteur partie 5 : ingest pipelines Elasticsearch → VRL */
+import { dissectRegex, isObj, makeNotes, P_ANG, P_TYPES, ptokens, segName, verdictOf, vq, vraw } from './base.js';
+import { compName, isoParse, joda2strf, lsList, uniq, vectorDocument } from './logstash.js';
+import { clickhouseOutput } from './sink.js';
 
 // VRL ne lit pas la notation 1e18 : le flottant est écrit en décimal
 // Plafond de lignes recopiées pour un groupe de fonctions récursives : au-delà, Vector consomme des gigaoctets à compiler
@@ -90,7 +93,7 @@ function vrlExp(lit) {
  * listes « - clé: valeur », scalaires simples ou entre guillemets, blocs | et >, collections [a, b] et {a: b},
  * commentaires. Ancres, alias et balises ne sont pas lus : le texte les garde tels quels.
  */
-function yamlLoad(text) {
+export function yamlLoad(text) {
   const src = String(text)
     .replace(/\r\n?/g, '\n')
     .replace(/^\uFEFF/, '')
@@ -420,7 +423,7 @@ function yamlLoad(text) {
  * _simulate ({ pipeline: … }) ou YAML d’un paquet d’intégration.
  *   name : nom par défaut d’une définition seule (le nom du fichier)
  */
-function ingestRead(text, name) {
+export function ingestRead(text, name) {
   const out = [];
   const errors = [];
   const s = String(text).replace(/^\uFEFF/, '');
@@ -6160,7 +6163,7 @@ function ingestProgram(name, def, t) {
  * inputs : [{ text, name }]. Chaque pipeline lu devient un programme VRL ; ceux qu’aucun autre n’appelle reçoivent
  * leur transform remap, aiguillé selon data_stream (Elastic Agent) ou @metadata.pipeline (modules Beats).
  */
-function translateIngest(inputs, cfg, opts) {
+export function translateIngest(inputs, cfg, opts) {
   opts = opts || {};
   const notes = makeNotes();
   const defs = new Map();
@@ -6456,7 +6459,7 @@ function ingestPruneIdiom(src) {
   let toks;
   try {
     toks = ptokens(String(src));
-  } catch (e) {
+  } catch {
     return null;
   }
   if (!toks.some(t => t.t === 'id' && t.v === 'removeIf')) return null;

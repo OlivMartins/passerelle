@@ -3,29 +3,32 @@
  * références ${VAR}, erreur HTTP, compteur de validations, processus externes, lecture de dossiers.
  * Ne dépend de rien d'autre que de Node.js : les autres fichiers de src/node en dépendent.
  */
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
-const VERSION = '1.7.1';
-function log(level, msg, extra) {
+export const VERSION = '1.7.1';
+export function log(level, msg, extra) {
   const line = Object.assign({ ts: new Date().toISOString(), level, msg }, extra || {});
   (level === 'error' || level === 'warn' ? process.stderr : process.stdout).write(JSON.stringify(line) + '\n');
 }
-function fail(msg, code) {
+export function fail(msg, code) {
   process.stderr.write(`passerelle : ${msg}\n`);
   process.exit(code || 1);
 }
-const ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
-function expand(s) {
+export const ENV_REF = /^\$\{[A-Za-z_][A-Za-z0-9_]*\}$/;
+export function expand(s) {
   return String(s || '').replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, v) => process.env[v] || '');
 }
 // Validations en cours : le serveur en limite le nombre, l'exploitation le publie (métrique passerelle_validation_jobs_running)
-const jobs = { running: 0 };
-class HttpError extends Error {
+export const jobs = { running: 0 };
+export class HttpError extends Error {
   constructor(status, msg) {
     super(msg);
     this.status = status;
   }
 }
-function runProcess(bin, args, env, timeout) {
+export function runProcess(bin, args, env, timeout) {
   return new Promise((resolve, reject) => {
     execFile(bin, args, { env, timeout, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
       if (err && err.code === 'ENOENT')
@@ -41,13 +44,13 @@ function runProcess(bin, args, env, timeout) {
     });
   });
 }
-function collect(inputs, exts) {
+export function collect(inputs, exts) {
   const out = [];
   const walk = p => {
     let st;
     try {
       st = fs.statSync(p);
-    } catch (e) {
+    } catch {
       fail(`introuvable : ${p}`);
     }
     if (st.isDirectory())
@@ -60,7 +63,7 @@ function collect(inputs, exts) {
   return out;
 }
 // Dossier de sortie (--out) : une erreur lisible plutôt qu’une pile Node.js
-function outDir(dir) {
+export function outDir(dir) {
   try {
     fs.mkdirSync(dir, { recursive: true });
   } catch (e) {
@@ -71,7 +74,7 @@ function outDir(dir) {
 }
 // Les pipelines d’un même dossier s’appellent entre eux (processeur pipeline) : ils sont lus ensemble. Un fichier
 // « .yml.link » d’une intégration Elastic (elastic-package) désigne un pipeline partagé : on lit le fichier désigné.
-function ingestInputs(files) {
+export function ingestInputs(files) {
   return files.map(f => {
     const name = path.basename(f).replace(/\.(ya?ml|json)(\.link)?$/i, '');
     if (!/\.link$/i.test(f)) return { name, text: fs.readFileSync(f, 'utf8') };

@@ -27,7 +27,7 @@ import {
   configOverride
 } from './dataset.mjs';
 import { CASES } from './cases.mjs';
-import { loadEngine } from '../../scripts/engine.mjs';
+import * as E from '../../src/engine/index.js';
 
 const args = Object.fromEntries(
   process.argv.slice(2).map(a => {
@@ -40,8 +40,6 @@ const [CH_BIN, ...CH_PRE] = (process.env.CLICKHOUSE_LOCAL || 'clickhouse-local')
 const WORK = process.env.PASSERELLE_DIFF_WORK || join(tmpdir(), 'passerelle-diff');
 const ONLY = args.only ? new RegExp(args.only) : null;
 const variants = args.variant ? [args.variant] : Object.keys(VARIANTS);
-
-const E = loadEngine();
 
 /* ---------- Accès aux deux moteurs ---------- */
 async function es(path, body, method) {

@@ -1,4 +1,6 @@
 /* Passerelle — moteur : équivalence de deux moteurs (Elasticsearch / ClickHouse, Logstash / Vector) */
+import { isObj, tableConfig, VERDICTS } from './base.js';
+
 /*
  * Le comparateur du banc différentiel (tests/differential, tests/pipelines) et celui de « passerelle verify »,
  * qui joue les requêtes et les pipelines d’un client sur ses propres données : le même code, donc la même preuve.
@@ -13,8 +15,8 @@
 
 /* ---------- Résultats de requêtes ---------- */
 const eqIsDate = v => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}(T[\d:.]+Z)?$/.test(v);
-const eqNormKey = v => (v === undefined ? null : eqIsDate(v) ? Date.parse(v) : v);
-function eqSame(a, b, tol) {
+export const eqNormKey = v => (v === undefined ? null : eqIsDate(v) ? Date.parse(v) : v);
+export function eqSame(a, b, tol) {
   if (a === undefined) a = null;
   if (b === undefined) b = null;
   if (eqIsDate(b)) b = Date.parse(b);
@@ -38,7 +40,7 @@ const EQ_BUCKET_FIELDS = new Set([
 ]);
 
 // Colonnes attendues côté ClickHouse pour une mesure Elasticsearch (null : ce n’est pas une mesure)
-function eqMetricColumns(name, a, type) {
+export function eqMetricColumns(name, a, type) {
   if (a === null || typeof a !== 'object') return {};
   if ('buckets' in a) return null;
   if ('values' in a) {
@@ -76,7 +78,7 @@ function eqMetricColumns(name, a, type) {
   if ('hits' in a || 'doc_count' in a) return null;
   return {};
 }
-function eqLeafMetrics(bucket, defs) {
+export function eqLeafMetrics(bucket, defs) {
   const typeOf = n => {
     const d = defs && defs[n];
     return d ? Object.keys(d).find(k => k !== 'aggs' && k !== 'aggregations') : null;
@@ -139,7 +141,7 @@ function eqWalkBuckets(aggs, defs, path, onLeaf) {
   })(aggs, defs, 0, {}, {});
   return keyed;
 }
-function eqBucketRows(aggs, defs, path) {
+export function eqBucketRows(aggs, defs, path) {
   const rows = [];
   rows.keyed = eqWalkBuckets(aggs, defs, path, (b, keys, children, labels) =>
     rows.push({ keys, labels, doc_count: b.doc_count, m: eqLeafMetrics(b, children) })
@@ -156,7 +158,7 @@ const eqShort = v => {
  * Chaque écart porte deux textes : « text » (avec des exemples de clés et de valeurs, pour qui lit le banc)
  * et « safe » (comptes seulement, sans aucune valeur : pour un rapport qui quitte la machine du client).
  */
-function eqCompareRowsDetailed(esRows, chRows, tol, unordered) {
+export function eqCompareRowsDetailed(esRows, chRows, tol, unordered) {
   const keyNames = [...new Set(esRows.flatMap(r => Object.keys(r.keys)))];
   const metricNames = [...new Set(esRows.flatMap(r => Object.keys(r.m)))];
   // Une agrégation qui porte le nom d’une colonne citée par la requête est suffixée _agg par la traduction
@@ -209,11 +211,11 @@ function eqCompareRowsDetailed(esRows, chRows, tol, unordered) {
   if (!sameOrder && !unordered) both('ordre différent');
   return out;
 }
-const eqCompareRows = (esRows, chRows, tol, unordered) =>
+export const eqCompareRows = (esRows, chRows, tol, unordered) =>
   eqCompareRowsDetailed(esRows, chRows, tol, unordered).map(d => d.text);
 
 // safeLabel : le libellé sans les valeurs des clés de groupe (qui sont des données du client)
-function eqCompareIdsDetailed(label, esIds, chIds, safeLabel) {
+export function eqCompareIdsDetailed(label, esIds, chIds, safeLabel) {
   if (JSON.stringify(esIds) === JSON.stringify(chIds)) return [];
   const sameSet = esIds.length === chIds.length && [...esIds].sort().join() === [...chIds].sort().join();
   return [
@@ -223,9 +225,9 @@ function eqCompareIdsDetailed(label, esIds, chIds, safeLabel) {
     }
   ];
 }
-const eqCompareIds = (label, esIds, chIds) => eqCompareIdsDetailed(label, esIds, chIds).map(d => d.text);
+export const eqCompareIds = (label, esIds, chIds) => eqCompareIdsDetailed(label, esIds, chIds).map(d => d.text);
 
-const eqEsError = r => {
+export const eqEsError = r => {
   const e = (r.body && r.body.error) || {};
   const cause = (e.root_cause && e.root_cause[0]) || e;
   return `HTTP ${r.status} ${cause.type || ''} : ${String(cause.reason || '').slice(0, 160)}`;
@@ -237,7 +239,7 @@ const eqEsError = r => {
  * Renvoie { failed, diffs, skipped, compared } : skipped liste les instructions que le comparateur ne sait pas
  * lire. Un appelant qui prouve quelque chose ne les compte pas comme égales.
  */
-async function eqCompareStatements(dsl, t, esBody, io, tol) {
+export async function eqCompareStatements(dsl, t, esBody, io, tol) {
   const defs = dsl.aggs || dsl.aggregations || {};
   const diffs = [];
   const skipped = [];
@@ -333,7 +335,7 @@ function eqEsEstimate(node) {
 }
 
 // Agrégation composite : les pages sont lues jusqu’au bout des deux côtés
-async function eqRunComposite(c, io) {
+export async function eqRunComposite(c, io) {
   const name = c.composite;
   const sources = c.dsl.aggs[name].composite.sources.map(s => Object.keys(s)[0]);
   const size = c.dsl.aggs[name].composite.size;
@@ -422,7 +424,7 @@ async function eqRunComposite(c, io) {
  * (un moteur ou la traduction refuse), « RP » (traduction à reprendre : rien n’est comparé, option skipTodo),
  * « INC » (comparaison interrompue). c : { dsl, pit, unsupported, composite, tol, stream, skipTodo, noProbe, config }.
  */
-async function eqRunCase(c, io) {
+export async function eqRunCase(c, io) {
   if (c.composite) return eqRunComposite(c, io);
   const t = io.translate(c.dsl);
   // Sans appel à Elasticsearch quand la traduction échoue : sur un cluster de production, une requête inutile pèse
@@ -496,7 +498,7 @@ async function eqRunCase(c, io) {
  */
 const EQ_DATE_KEYS = new Set(['gte', 'gt', 'lte', 'lt', 'from', 'to', 'min', 'max']);
 // Les bornes « now-15m/m » deviennent « <instant>||-15m/m » : la date math d’Elasticsearch et la traduction les lisent toutes deux
-function eqPinNow(dsl, instant) {
+export function eqPinNow(dsl, instant) {
   const iso = new Date(instant).toISOString();
   let pinned = 0;
   const walk = (v, key, skip) => {
@@ -522,7 +524,7 @@ function eqPinNow(dsl, instant) {
 }
 
 // La requête d’origine reste en « must » (le score est conservé) ; la fenêtre est un filtre
-function eqBoundWindow(dsl, field, from, to) {
+export function eqBoundWindow(dsl, field, from, to) {
   const range = { range: { [field]: { gte: new Date(from).toISOString(), lt: new Date(to).toISOString() } } };
   const out = Object.assign({}, dsl);
   out.query = dsl.query ? { bool: { must: [dsl.query], filter: [range] } } : { bool: { filter: [range] } };
@@ -530,12 +532,12 @@ function eqBoundWindow(dsl, field, from, to) {
 }
 
 // Champ de date côté Elasticsearch : verify.time_field, sinon le champ que field_mapping envoie sur la colonne de temps de la table
-function eqTimeField(cfg, table) {
+export function eqTimeField(cfg, table) {
   if (cfg.verify && cfg.verify.time_field) return cfg.verify.time_field;
   let ch = cfg.clickhouse;
   try {
     ch = tableConfig(cfg, table).clickhouse;
-  } catch (e) {
+  } catch {
     /* profil invalide : la traduction le signale */
   }
   const fm = ch.field_mapping || {};
@@ -544,7 +546,7 @@ function eqTimeField(cfg, table) {
 
 const EQ_UNITS = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
 // « 90s », « 15m », « 2h », « 7d » → millisecondes ; null si la durée n’est pas lisible
-function eqDuration(text) {
+export function eqDuration(text) {
   const m = /^(\d+)\s*([smhd])$/.exec(String(text).trim());
   return m ? Number(m[1]) * EQ_UNITS[m[2]] : null;
 }
@@ -552,7 +554,7 @@ function eqDuration(text) {
  * Fenêtre de la comparaison : [from, to) fournis, ou « length » se terminant à now − lag, arrondi à la minute
  * (les mêmes bornes à chaque lancement dans la même minute).
  */
-function eqWindow(opts, now) {
+export function eqWindow(opts, now) {
   const minute = 60000;
   if (opts.from || opts.to) {
     const from = Date.parse(opts.from);
@@ -571,7 +573,7 @@ function eqWindow(opts, now) {
 }
 
 /* ---------- États et rapport ---------- */
-const EQ_STATES = {
+export const EQ_STATES = {
   identical: 'identique',
   different: 'différent',
   inconclusive: 'non concluant',
@@ -581,7 +583,7 @@ const EQ_STATES = {
 const EQ_STATE_ORDER = ['different', 'error', 'inconclusive', 'not_compared', 'identical'];
 
 // État d’une requête d’après le résultat d’eqRunCase
-function eqStateOf(res) {
+export function eqStateOf(res) {
   switch (res.verdict) {
     case '=':
       // Deux résultats vides sont égaux sans rien prouver
@@ -614,7 +616,7 @@ function eqStateOf(res) {
   }
 }
 
-function eqSummarize(items) {
+export function eqSummarize(items) {
   const by = Object.fromEntries(Object.keys(EQ_STATES).map(k => [k, 0]));
   const translation = { ready: 0, review: 0, todo: 0, unrecognized: 0 };
   for (const it of items) {
@@ -624,7 +626,7 @@ function eqSummarize(items) {
   return { total: items.length, byState: by, byTranslation: translation };
 }
 // Verdict d’ensemble : ce que dit le rapport en une phrase
-function eqSentence(sum, what) {
+export function eqSentence(sum, what) {
   const s = sum.byState;
   if (!sum.total) return `Aucun ${what} comparé.`;
   const parts = [`${s.identical} identique${s.identical > 1 ? 's' : ''}`];
@@ -635,16 +637,16 @@ function eqSentence(sum, what) {
   return `${sum.total} ${what}${sum.total > 1 ? 's' : ''} : ${parts.join(', ')}.`;
 }
 
-const eqMd = s =>
+export const eqMd = s =>
   String(s === undefined || s === null ? '' : s)
     .replace(/\|/g, '\\|')
     .replace(/\n/g, ' ');
-const eqHtml = s =>
+export const eqHtml = s =>
   String(s === undefined || s === null ? '' : s).replace(
     /[&<>"']/g,
     c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]
   );
-const eqFrDate = iso =>
+export const eqFrDate = iso =>
   new Date(iso)
     .toISOString()
     .replace('T', ' ')
@@ -656,7 +658,7 @@ function eqSorted(items) {
     .sort((a, b) => EQ_STATE_ORDER.indexOf(a[0].state) - EQ_STATE_ORDER.indexOf(b[0].state) || a[1] - b[1])
     .map(x => x[0]);
 }
-function eqReportMarkdown(rep) {
+export function eqReportMarkdown(rep) {
   const L = [];
   const what = rep.kind === 'pipelines' ? 'pipeline' : 'requête';
   L.push(`# Rapport d’équivalence — ${rep.kind === 'pipelines' ? 'pipelines' : 'requêtes'}`, '');
@@ -709,7 +711,7 @@ function eqReportMarkdown(rep) {
   );
   return L.join('\n') + '\n';
 }
-function eqReportCSV(rep) {
+export function eqReportCSV(rep) {
   const cell = v => {
     const s = String(v === undefined || v === null ? '' : v);
     return /[";\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -734,12 +736,11 @@ function eqReportCSV(rep) {
     );
   return '﻿' + rows.join('\r\n') + '\r\n';
 }
-function eqReportHTML(rep) {
+export function eqReportHTML(rep) {
   const h = eqHtml;
   const s = rep.summary;
   const what = rep.kind === 'pipelines' ? 'pipeline' : 'requête';
   const badge = st => `<span class="v v-${st}">${h(EQ_STATES[st])}</span>`;
-  const total = s.total || 1;
   const bar = EQ_STATE_ORDER.filter(k => s.byState[k])
     .map(
       k => `<span class="seg v-${k}" style="flex:${s.byState[k]}" title="${h(EQ_STATES[k])} : ${s.byState[k]}"></span>`

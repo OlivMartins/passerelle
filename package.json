@@ -1,6 +1,7 @@
 {
   "name": "passerelle",
   "version": "1.7.1",
+  "type": "module",
   "private": true,
   "description": "Traduction des requêtes DSL Elasticsearch en SQL ClickHouse et des pipelines Logstash en configurations Vector",
   "license": "Apache-2.0",
@@ -27,6 +28,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
+    "esbuild": "0.28.2",
     "postject": "1.0.0-alpha.6"
   }
 }

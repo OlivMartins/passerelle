@@ -151,7 +151,6 @@ export const diff = (() => {
   function compareRows(esRows, chRows, tol, unordered) {
     const keyNames = [...new Set(esRows.flatMap(r => Object.keys(r.keys)))];
     const metricNames = [...new Set(esRows.flatMap(r => Object.keys(r.m)))];
-    const keyOf = get => JSON.stringify(keyNames.map(k => normKey(get(k))));
     // Une agrégation qui porte le nom d’une colonne citée par la requête est suffixée _agg par la traduction
     const col = (row, name) => (name in row || !(`${name}_agg` in row) ? row[name] : row[`${name}_agg`]);
     // Semaine, mois, année : ClickHouse renvoie une date sans heure. Elle se compare au jour écrit par

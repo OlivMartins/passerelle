@@ -8,7 +8,7 @@
  *   validate --skip-healthchecks FICHIER     code 0, ou 1 avec une erreur au format de Vector
  *   --quiet --color never --config FICHIER   les événements de l’entrée standard vont dans les sorties « file »
  * Variables (préfixe VECTOR_ : seules celles-là passent jusqu’à « vector validate », qui filtre l’environnement) :
- *   VECTOR_FAKE_LOG (journal JSON), VECTOR_FAKE_ENGINE (scripts/engine.mjs), VECTOR_FAKE_REFUSE, VECTOR_FAKE_FAIL, VECTOR_FAKE_TWEAK=champ=valeur
+ *   VECTOR_FAKE_LOG (journal JSON), VECTOR_FAKE_ENGINE (src/engine/index.js), VECTOR_FAKE_REFUSE, VECTOR_FAKE_FAIL, VECTOR_FAKE_TWEAK=champ=valeur
  */
 const fs = require('fs');
 const { pathToFileURL } = require('url');
@@ -49,8 +49,8 @@ const literal = t => {
     process.stderr.write('configuration refusée par le faux Vector\n');
     process.exit(3);
   }
-  const { loadEngine } = await import(pathToFileURL(process.env.VECTOR_FAKE_ENGINE).href);
-  const cfg = /\.json$/.test(conf) ? JSON.parse(text) : loadEngine().yamlLoad(text);
+  const E = await import(pathToFileURL(process.env.VECTOR_FAKE_ENGINE).href);
+  const cfg = /\.json$/.test(conf) ? JSON.parse(text) : E.yamlLoad(text);
   const events = fs
     .readFileSync(0, 'utf8')
     .split('\n')

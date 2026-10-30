@@ -11,12 +11,11 @@
  * d’Elasticsearch (API _analyze) : ils sont comparés à l’aperçu par scripts/test.mjs, sans ClickHouse.
  */
 import { execFileSync } from 'node:child_process';
-import { loadEngine } from '../../scripts/engine.mjs';
+import * as E from '../../src/engine/index.js';
 import { CAS, TEXTES } from './analyseurs.cas.mjs';
 
 const [CH_BIN, ...CH_PRE] = (process.env.CLICKHOUSE_LOCAL || 'clickhouse-local').split(' ');
 const VERBOSE = process.argv.includes('--verbose');
-const E = loadEngine();
 const lit = s => "'" + String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
 function ch(expr) {
   const out = execFileSync(

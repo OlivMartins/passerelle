@@ -1,4 +1,40 @@
 /* Passerelle — Node.js : équivalence sur les données du client (passerelle verify) */
+import { spawn as nodeSpawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  coverage,
+  EQ_ECS_MODES,
+  EQ_STATES,
+  eqBoundWindow,
+  eqComparePipelineOutputs,
+  eqLogstashSource,
+  eqOutName,
+  eqPinNow,
+  eqPipelineParts,
+  eqReportCSV,
+  eqReportHTML,
+  eqReportMarkdown,
+  eqRunCase,
+  eqSentence,
+  eqStateOf,
+  eqSummarize,
+  eqTimeField,
+  eqVectorSource,
+  eqWindow,
+  isObj,
+  KB_TYPES,
+  kibanaInventory,
+  mergeConfig,
+  preprocessDSL,
+  translateDSL,
+  translateLogstash,
+  verdictOf
+} from '../engine/index.js';
+import { collect, expand, fail, outDir, VERSION } from './common.js';
+import { loadCfgOrFail } from './config.js';
+
 /*
  * Le banc différentiel prouve la traduction sur un jeu de données de test. « passerelle verify » rejoue la même
  * preuve sur les données du client : chaque requête DSL est jouée sur son Elasticsearch et sa traduction sur son
@@ -6,10 +42,9 @@
  * (src/engine/equivalence.js). Le résultat est un rapport daté, requête par requête.
  *
  * Lecture seule des deux côtés : Elasticsearch ne reçoit que des _search (jamais d’écriture, jamais de scroll ni de
- * point-in-time), ClickHouse que des SELECT sous readonly = 1. Ce code ne s’exécute pas à son chargement : il emploie
- * les modules et les fonctions que src/server.js déclare, dans ses fonctions seulement.
+ * point-in-time), ClickHouse que des SELECT sous readonly = 1. Il s’appuie sur common.js et le moteur ;
+ * src/server.js et src/node/assist.js l’appellent.
  */
-const { spawn: nodeSpawn } = require('node:child_process');
 
 /* ---------- Elasticsearch (lecture seule) ---------- */
 // Les seules routes appelées. Tout le reste est refusé ici, quoi que demande l’appelant.
@@ -20,13 +55,13 @@ const ES_ALLOWED = [
   ['POST', /^\/_watcher\/_query\/watches$/]
 ];
 
-function esClient(cfg, override) {
+export function esClient(cfg, override) {
   const es = cfg.elasticsearch;
   const endpoint = expand(override || es.endpoint).replace(/\/+$/, '');
   if (!endpoint) throw new Error('elasticsearch.endpoint n’est pas configuré (ou --es URL)');
   try {
     new URL(endpoint);
-  } catch (e) {
+  } catch {
     throw new Error(`elasticsearch.endpoint illisible : ${endpoint}`);
   }
   const headers = { 'content-type': 'application/json', accept: 'application/json' };
@@ -52,7 +87,7 @@ function esClient(cfg, override) {
       let parsed = {};
       try {
         parsed = JSON.parse(text);
-      } catch (e) {
+      } catch {
         parsed = { error: { type: 'réponse illisible', reason: text.slice(0, 160) } };
       }
       return { status: r.status, body: parsed };
@@ -130,7 +165,7 @@ function clickhouseReader(cfg) {
           .filter(Boolean)
           .map(l => JSON.parse(l))
       };
-    } catch (e) {
+    } catch {
       return { error: `réponse illisible de ClickHouse : ${text.slice(0, 120)}` };
     }
   }
@@ -240,7 +275,7 @@ function verifyExit(rep, o) {
   if (o.strict && (s.inconclusive || s.not_compared)) process.exit(2);
 }
 // Écarts cités : au plus « examples », avec ou sans valeurs
-function verifyDiffs(diffs, cfg, o) {
+export function verifyDiffs(diffs, cfg, o) {
   const max = Math.max(1, Number(o.examples) || Number(cfg.verify.examples) || 3);
   const list = (diffs || []).map(d => (o['no-values'] ? d.safe : d.text));
   return list.length > max
@@ -402,12 +437,12 @@ async function verifyQueries(o) {
 
 /* ---------- passerelle verify pipelines ---------- */
 // Un moteur lancé sur un fichier : { code, out, timedOut }
-function verifyRun(bin, args, opts) {
+export function verifyRun(bin, args, opts) {
   return new Promise(resolve => {
     let fd = null;
     try {
       fd = opts.stdin ? fs.openSync(opts.stdin, 'r') : null;
-    } catch (e) {
+    } catch {
       return resolve({ code: -1, out: `lecture impossible : ${opts.stdin}`, error: true });
     }
     const child = nodeSpawn(bin, args, {
@@ -436,7 +471,7 @@ function verifyRun(bin, args, opts) {
       if (fd !== null)
         try {
           fs.closeSync(fd);
-        } catch (e) {
+        } catch {
           /* déjà fermé */
         }
       resolve({
@@ -452,7 +487,7 @@ function verifyRun(bin, args, opts) {
     });
   });
 }
-const verifyEvents = file =>
+export const verifyEvents = file =>
   fs.existsSync(file)
     ? fs
         .readFileSync(file, 'utf8')
@@ -460,9 +495,9 @@ const verifyEvents = file =>
         .filter(Boolean)
         .map(l => JSON.parse(l))
     : [];
-const verifyOutputs = (dir, prefix, names) =>
+export const verifyOutputs = (dir, prefix, names) =>
   Object.fromEntries(names.map(n => [n, verifyEvents(path.join(dir, `${eqOutName(prefix, n)}.ndjson`))]));
-const lastLines = (text, n) =>
+export const lastLines = (text, n) =>
   String(text)
     .split('\n')
     .filter(l => l.trim() && !/librdkafka|rdkafka::/.test(l))
@@ -472,10 +507,10 @@ const lastLines = (text, n) =>
 
 // Deux retouches d’environnement, pas de traitement : un dossier de données à soi, et pas d’API (le port 8686
 // est peut-être celui du Vector qui tourne déjà sur cette machine)
-const verifyRetouch = (yaml, dataDir) =>
+export const verifyRetouch = (yaml, dataDir) =>
   yaml.replace(/^data_dir:.*$/m, `data_dir: ${dataDir}`).replace(/^api:\n(?: {2}.*\n)+/m, 'api:\n  enabled: false\n');
 // Vector joue l’échantillon (entrée standard) avec cette configuration : null, ou la raison de l’échec
-async function verifyPlayVector(yaml, vecDir, input, vectorBin, timeout) {
+export async function verifyPlayVector(yaml, vecDir, input, vectorBin, timeout) {
   const conf = path.join(vecDir, 'vector.yaml');
   fs.writeFileSync(conf, yaml);
   const venv = Object.assign({}, process.env, { VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION: 'true' });
@@ -490,12 +525,12 @@ async function verifyPlayVector(yaml, vecDir, input, vectorBin, timeout) {
 }
 // La référence : les événements déjà produits par le pipeline du client, ou son Logstash rejouant l’échantillon.
 // Rend { ref } ou { error }
-async function verifyReference(o, parts, dirs, input, mode, id, timeout) {
+export async function verifyReference(o, parts, dirs, input, mode, id, timeout) {
   if (o.reference) {
     let st;
     try {
       st = fs.statSync(o.reference);
-    } catch (e) {
+    } catch {
       return { error: `référence introuvable : ${o.reference}` };
     }
     if (st.isDirectory())
@@ -665,7 +700,7 @@ async function verifyPipelines(o) {
   verifyExit(rep, o);
 }
 
-function verifyCommand(o) {
+export function verifyCommand(o) {
   const sub = o._.shift();
   if (sub === 'queries') return verifyQueries(o).catch(e => fail(e.message));
   if (sub === 'pipelines') return verifyPipelines(o).catch(e => fail(e.message));
