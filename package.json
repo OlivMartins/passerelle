@@ -17,12 +17,16 @@
     "test:attributes": "node tests/attributes/run.mjs",
     "test:clickhouse": "node tests/clickhouse/run.mjs",
     "test:ui": "node tests/ui/run.mjs",
-    "test:ingest": "node tests/ingest/valider.mjs && node tests/ingest/valider.mjs --clickhouse && node tests/ingest/tls.mjs && node tests/ingest/painless.mjs"
+    "test:ingest": "node tests/ingest/valider.mjs && node tests/ingest/valider.mjs --clickhouse && node tests/ingest/tls.mjs && node tests/ingest/painless.mjs",
+    "check": "biome ci",
+    "lint": "biome lint",
+    "format": "biome format --write"
   },
   "engines": {
     "node": ">=24"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.15",
     "postject": "1.0.0-alpha.6"
   }
 }
