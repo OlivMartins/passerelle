@@ -1,5 +1,5 @@
 /* Passerelle — serveur HTTP (interface + API) et ligne de commande */
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
 const http = require('node:http');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');

@@ -159,7 +159,8 @@ function run(kind, pulse) {
 const debounced = {};
 function runSoon(kind) { clearTimeout(debounced[kind]); debounced[kind] = setTimeout(() => run(kind, true), 180); }
 function pulseSeam(kind) {
-  const seam = $(`#view-${kind} .seam`); seam.classList.remove('run'); void seam.offsetWidth; seam.classList.add('run');
+  // Le banc Kibana n’est plus une vue : il vit dans « Autres sources », sous #kb
+  const seam = $(`${kind === 'kibana' ? '#kb' : `#view-${kind}`} .seam`); seam.classList.remove('run'); void seam.offsetWidth; seam.classList.add('run');
 }
 
 /* ---------- Rendu des vues de traduction ---------- */
@@ -335,15 +336,16 @@ function handleFiles(files) {
   const kindOf = f => {
     const grafana = /"panels"\s*:|"rows"\s*:/.test(f.text) && /"(?:datasource|targets)"/.test(f.text);
     // Un export Kibana (.ndjson, ou une première ligne qui est un objet sauvegardé ou une règle de détection)
-    // va à la section Kibana, sauf depuis l’inventaire de la vue « autres sources »
+    // va à l’outil Kibana de la vue « autres sources », d’où qu’il soit déposé
     const firstLine = (/^\s*(\{.*)$/m.exec(f.text) || [])[1] || '';
     const savedObject = /"attributes"\s*:/.test(firstLine) && /"type"\s*:\s*"/.test(firstLine) && /"id"\s*:/.test(firstLine);
     const detectionRule = /"rule_id"\s*:/.test(firstLine) && /"(?:severity|risk_score)"\s*:/.test(firstLine);
-    if (/\.ndjson$/i.test(f.name) || savedObject || detectionRule) return S.view === 'tools' ? 'kibana-tool' : 'kibana';
+    if (/\.ndjson$/i.test(f.name) || savedObject || detectionRule) return 'kibana';
     // Des watches (console, export _query/watches, définition) vont à l’outil Watcher, d’où qu’elles soient déposées
     if (/^[ \t]*(?:PUT|POST)[ \t]+\/?_watcher\/watch\//m.test(f.text) || /"watches"\s*:\s*\[/.test(f.text) || (/"trigger"\s*:/.test(f.text) && /"input"\s*:/.test(f.text) && /"(?:condition|actions)"\s*:/.test(f.text))) return 'watcher';
-    // Dans la vue « autres sources », un fichier .json ou .txt va à l’outil choisi (schéma, analyseurs), sauf un tableau Grafana reconnu
-    if (S.view === 'tools' && /\.(json|txt|es)$/i.test(f.name) && !grafana) return 'tools';
+    // Dans la vue « autres sources », un fichier .json ou .txt va à l’outil choisi (schéma, analyseurs), sauf un tableau Grafana reconnu ;
+    // l’outil Kibana ne lit que les exports reconnus plus haut : tout autre fichier va où son contenu l’envoie
+    if (S.view === 'tools' && !TOOLS[S.tools.tool].bench && /\.(json|txt|es)$/i.test(f.name) && !grafana) return 'tools';
     if (/\.(conf|cfg|logstash)$/i.test(f.name)) return 'ls';
     if (grafana) return 'grafana';
     if (/^\s*[{\[]?\s*"?(?:processors|description)"?\s*:/m.test(f.text) && /"?processors"?\s*:/.test(f.text)) return 'ingest';
@@ -355,8 +357,8 @@ function handleFiles(files) {
   let last = null;
   for (const [k, list] of Object.entries(groups)) {
     if (k === 'tools') { S.tools.texts[S.tools.tool] = list[0].text; S.tools.ed.value = list[0].text; runTool(); last = 'tools'; }
-    else if (k === 'kibana') { addKibanaFiles(list); last = 'kibana'; }
-    else if (k === 'kibana-tool' || k === 'grafana' || k === 'watcher') { const t = k === 'kibana-tool' ? 'kibana' : k; S.tools.tool = t; S.tools.texts[t] = list[0].text; S.tools.ed && (S.tools.ed.value = list[0].text); runTool(); last = 'tools'; }
+    else if (k === 'kibana') { addKibanaFiles(list); S.tools.tool = 'kibana'; last = 'tools'; }
+    else if (k === 'grafana' || k === 'watcher') { S.tools.tool = k; S.tools.texts[k] = list[0].text; S.tools.ed && (S.tools.ed.value = list[0].text); runTool(); last = 'tools'; }
     else { addFiles(k, list); last = k; }
   }
   if (last) show(last);
@@ -364,7 +366,9 @@ function handleFiles(files) {
 }
 let dragDepth = 0;
 const hasFiles = e => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
-window.addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; const pane = $(`#view-${S.view} .pane-in`); if (pane) pane.classList.add('dragging'); });
+// La zone de dépôt de la vue ouverte : dans « Autres sources », celle du banc affiché (Kibana ou générique)
+const dropPane = () => $$(`#view-${S.view} .pane-in`).find(p => !p.closest('[hidden]'));
+window.addEventListener('dragenter', e => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; const pane = dropPane(); if (pane) pane.classList.add('dragging'); });
 window.addEventListener('dragover', e => { if (hasFiles(e)) e.preventDefault(); });
 window.addEventListener('dragleave', e => { if (!hasFiles(e)) return; dragDepth--; if (dragDepth <= 0) $$('.dragging').forEach(x => x.classList.remove('dragging')); });
 window.addEventListener('drop', e => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth = 0; $$('.dragging').forEach(x => x.classList.remove('dragging')); handleDrop(e.dataTransfer.files); });
@@ -563,18 +567,9 @@ const worstOf = list => ['unrecognized', 'todo', 'review', 'ready'].find(v => li
 const schemaText = t => (/^\s*(GET|PUT|POST)\s/i.test(t) ? t : `POST _passerelle\n${t}`);
 const notesMDList = notes => notes.map(n => `- **${LEVEL[n.level] || n.level}** — ${n.title}${n.detail ? ` : ${n.detail}` : ''}`).join('\n');
 const TOOLS = {
-  kibana: {
-    label: 'Inventaire Kibana', title: 'Export Kibana', file: 'export.ndjson', hint: 'Fichiers .ndjson : l’export de Gestion de la pile > Objets enregistrés',
-    run(text) {
-      const inv = kibanaInventory(text, cfg, {});
-      if (!inv.summary.objects && !Object.keys(inv.source.ignored).length) return { error: `Aucun objet sauvegardé lisible${inv.source.errors.length ? ` (${inv.source.errors[0]})` : ''}.` };
-      const s = inv.summary; const b = s.byVerdict;
-      return { verdict: worstOf(Object.keys(b).filter(k => b[k])), counts: { ok: b.ready, approx: b.review, ko: b.todo + b.unrecognized },
-        sentence: `${s.objects} objet${s.objects > 1 ? 's' : ''} à migrer, ${s.queries} requête${s.queries > 1 ? 's' : ''} traduite${s.queries > 1 ? 's' : ''}. Effort estimé : ${frHours(s.effort.hours)}.`,
-        tabs: [['rapport', 'Inventaire', 'md', inventoryMarkdown(inv)], ['csv', 'CSV', 'text', inventoryCSV(inv)]],
-        files: [{ name: 'inventaire/inventaire.md', content: inventoryMarkdown(inv) }, { name: 'inventaire/inventaire.csv', content: inventoryCSV(inv) }, { name: 'inventaire/inventaire.html', content: inventoryHTML(inv, 'Inventaire Kibana') }], copy: inventoryMarkdown(inv) };
-    }
-  },
+  // Kibana n’a pas de rapport générique : son banc (l’arbre des objets à gauche, les requêtes de l’objet choisi à droite)
+  // est plus bas, avec le reste de son code (setupKibana, renderKibana)
+  kibana: { label: 'Kibana', bench: 'kibana' },
   grafana: {
     label: 'Tableau Grafana', title: 'Tableau de bord Grafana (JSON)', file: 'tableau.json', hint: 'Fichiers .json : l’export d’un tableau de bord (schéma classique)',
     opts: [['index', 'Index', 'text', 'logs-*']],
@@ -634,22 +629,34 @@ const TOOLS = {
 };
 S.tools = { tool: store.get('tool', 'kibana'), texts: {}, opts: { index: 'logs-*', preset: '', field: '', text: 'Les téléviseurs d’été' }, tab: {}, res: null, ed: null };
 if (!TOOLS[S.tools.tool]) S.tools.tool = 'kibana';
-Object.keys(TOOLS).forEach(k => { S.tools.texts[k] = EXAMPLES[k][0].text; S.tools.tab[k] = null; });
+Object.keys(TOOLS).forEach(k => { if (!TOOLS[k].bench) S.tools.texts[k] = EXAMPLES[k][0].text; S.tools.tab[k] = null; });
 function runTool() {
-  const st = S.tools; const t = TOOLS[st.tool]; const text = st.texts[st.tool] || '';
-  try { st.res = text.trim() ? t.run(text) : { empty: true }; } catch (e) { st.res = { error: `Erreur interne : ${e.message}` }; }
+  const st = S.tools; const t = TOOLS[st.tool];
+  if (!t.bench) {
+    const text = st.texts[st.tool] || '';
+    try { st.res = text.trim() ? t.run(text) : { empty: true }; } catch (e) { st.res = { error: `Erreur interne : ${e.message}` }; }
+  }
   renderTools();
 }
 function renderTools() {
   const st = S.tools; const t = TOOLS[st.tool]; const view = $('#view-tools'); if (!view) return;
   $$('[data-tool]', view).forEach(b => b.setAttribute('aria-pressed', b.dataset.tool === st.tool));
-  $('[data-role="tool-title"]', view).textContent = t.title; $('[data-role="drop-hint"]', view).textContent = t.hint;
-  $('[data-role="tool-opts"]', view).innerHTML = (t.opts || []).map(([k, label, kind, ph, choices]) => `<label for="tool-${k}">${esc(label)}</label>${kind === 'select' ? `<select id="tool-${k}" data-opt="${k}" class="btn" style="height:30px">${choices.map(([v, l]) => `<option value="${esc(v)}"${st.opts[k] === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>` : `<input id="tool-${k}" data-opt="${k}" value="${esc(st.opts[k] || '')}" placeholder="${esc(ph)}" spellcheck="false">`}`).join('') + '<button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>';
+  // Kibana a son propre banc ; les autres outils se partagent le banc générique
+  const kb = t.bench === 'kibana';
+  $('#kb', view).hidden = !kb; $('#tools-bench', view).hidden = kb;
+  $('[data-role="file"]', view).accept = kb ? '.ndjson,.json,.txt' : '';
+  // Les exemples proposés suivent l’outil, qu’on l’ait choisi ou qu’un fichier déposé l’ait ouvert
+  const sel = $('[data-act="example"]', view);
+  if (sel.dataset.examplesFor !== st.tool) { sel.dataset.examplesFor = st.tool; sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES[st.tool].map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`; }
+  if (kb) { renderKibana(); return; }
+  const bench = $('#tools-bench', view);
+  $('[data-role="tool-title"]', bench).textContent = t.title; $('[data-role="drop-hint"]', bench).textContent = t.hint;
+  $('[data-role="tool-opts"]', bench).innerHTML = (t.opts || []).map(([k, label, kind, ph, choices]) => `<label for="tool-${k}">${esc(label)}</label>${kind === 'select' ? `<select id="tool-${k}" data-opt="${k}" class="btn" style="height:30px">${choices.map(([v, l]) => `<option value="${esc(v)}"${st.opts[k] === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>` : `<input id="tool-${k}" data-opt="${k}" value="${esc(st.opts[k] || '')}" placeholder="${esc(ph)}" spellcheck="false">`}`).join('') + '<button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>';
   const r = st.res || { empty: true };
-  const v = $('[data-role="verdict"]', view); const tabs = $('[data-role="tabs"]', view); const out = $('[data-role="out"]', view);
-  $('.out-foot', view).hidden = !!(r.empty || r.error);
+  const v = $('[data-role="verdict"]', bench); const tabs = $('[data-role="tabs"]', bench); const out = $('[data-role="out"]', bench);
+  $('.out-foot', bench).hidden = !!(r.empty || r.error);
   if (r.empty) { v.hidden = true; tabs.hidden = true; out.innerHTML = `<div class="empty"><strong>Rien à analyser</strong><span>${esc(t.hint)}. Collez le contenu à gauche ou chargez un exemple.</span><div class="row">${EXAMPLES[st.tool].map((e, i) => `<button class="btn" type="button" data-load-example="${i}">${esc(e.title)}</button>`).join('')}</div></div>`; return; }
-  if (r.error) { v.hidden = false; v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-unrecognized"><i></i>${verdictLabel('unrecognized')}</span></div><p class="sentence error">${esc(r.error)}</p>`; tabs.hidden = true; out.innerHTML = ''; $('.out-foot', view).hidden = true; return; }
+  if (r.error) { v.hidden = false; v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-unrecognized"><i></i>${verdictLabel('unrecognized')}</span></div><p class="sentence error">${esc(r.error)}</p>`; tabs.hidden = true; out.innerHTML = ''; $('.out-foot', bench).hidden = true; return; }
   const { ok, approx, ko } = r.counts; const total = ok + approx + ko || 1;
   v.hidden = false;
   v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-${r.verdict}"><i></i>${verdictLabel(r.verdict)}</span>
@@ -663,20 +670,22 @@ function renderTools() {
   out.innerHTML = kind === 'md' ? mdHTML(body) : `<pre class="code">${kind === 'text' ? esc(body) : hl(body, kind)}</pre>`;
 }
 function setupTools() {
-  const view = $('#view-tools'); const st = S.tools;
-  st.ed = makeEditor($('[data-role="editor"]', view), 'json', 'Source à analyser', 'Collez ici un export Kibana, un tableau de bord Grafana, des watches, un modèle d’index ou la définition d’un index.', text => { st.texts[st.tool] = text; clearTimeout(setupTools.h); setupTools.h = setTimeout(runTool, 180); });
+  const view = $('#view-tools'); const st = S.tools; const bench = $('#tools-bench', view);
+  st.ed = makeEditor($('[data-role="editor"]', bench), 'json', 'Source à analyser', 'Collez ici un tableau de bord Grafana, des watches, un modèle d’index ou la définition d’un index.', text => { st.texts[st.tool] = text; clearTimeout(setupTools.h); setupTools.h = setTimeout(runTool, 180); });
   $('[data-role="tool-seg"]', view).innerHTML = Object.entries(TOOLS).map(([k, t]) => `<button type="button" data-tool="${k}" aria-pressed="false">${esc(t.label)}</button>`).join('');
+  // L’en-tête (exemples, ouverture de fichiers) sert tous les outils : pour Kibana, il alimente le banc Kibana
+  const isKb = () => !!TOOLS[st.tool].bench;
+  const load = i => { if (isKb()) { loadKibanaExample(i); return; } const e = EXAMPLES[st.tool][i]; if (!e) return; st.texts[st.tool] = e.text; st.ed.value = e.text; runTool(); };
+  const pick = k => { st.tool = k; store.set('tool', k); st.ed.value = st.texts[k] || ''; runTool(); };
   const sel = $('[data-act="example"]', view);
-  const fillExamples = () => { sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES[st.tool].map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`; };
-  const load = i => { const e = EXAMPLES[st.tool][i]; if (!e) return; st.texts[st.tool] = e.text; st.ed.value = e.text; runTool(); };
-  const pick = k => { st.tool = k; store.set('tool', k); st.ed.value = st.texts[k] || ''; fillExamples(); runTool(); };
   sel.addEventListener('change', () => { load(+sel.value); sel.value = ''; });
-  const fi = $('input[type="file"]', view);
+  const fi = $('[data-role="file"]', view);
   $('[data-act="open"]', view).addEventListener('click', () => fi.click());
-  fi.addEventListener('change', async () => { const files = await readFiles(fi.files); if (files.length) handleFiles(files); fi.value = ''; });
-  $('[data-act="copy"]', view).addEventListener('click', () => { const r = st.res; if (r && r.copy) copyText(r.copy, 'Rapport'); });
-  $('[data-act="export"]', view).addEventListener('click', () => { const r = st.res; if (r && r.files) saveFile(`passerelle-${st.tool}.zip`, makeZip(r.files)); });
+  fi.addEventListener('change', async () => { const files = await readFiles(fi.files); if (files.length) (isKb() ? addKibanaFiles(files) : handleFiles(files)); fi.value = ''; });
+  $('[data-act="copy"]', bench).addEventListener('click', () => { const r = st.res; if (r && r.copy) copyText(r.copy, 'Rapport'); });
+  $('[data-act="export"]', bench).addEventListener('click', () => { const r = st.res; if (r && r.files) saveFile(`passerelle-${st.tool}.zip`, makeZip(r.files)); });
   view.addEventListener('click', e => {
+    if (e.target.closest('#kb')) return; // le banc Kibana a ses propres gestionnaires (setupKibana)
     const t = e.target.closest('[data-tool],[data-tab],[data-load-example],[data-act="clear"]'); if (!t) return;
     if (t.dataset.tool) pick(t.dataset.tool);
     else if (t.dataset.tab) { st.tab[st.tool] = t.dataset.tab; renderTools(); }
@@ -684,10 +693,10 @@ function setupTools() {
     else if (t.dataset.act === 'clear') { st.texts[st.tool] = ''; st.ed.value = ''; runTool(); st.ed.focus(); }
   });
   view.addEventListener('input', e => { const o = e.target.closest('[data-opt]'); if (!o) return; st.opts[o.dataset.opt] = o.value.trim(); clearTimeout(setupTools.h2); setupTools.h2 = setTimeout(runTool, 180); });
-  st.ed.value = st.texts[st.tool]; fillExamples(); runTool();
+  st.ed.value = st.texts[st.tool] || ''; runTool();
 }
-/* ---------- Tableaux de bord Kibana : un export, ses objets à gauche, leurs requêtes à droite ---------- */
-// L’inventaire (moteur, kibana.js) fait l’analyse ; cette vue la parcourt objet par objet
+/* ---------- Outil Kibana : un export, ses objets à gauche, leurs requêtes à droite ---------- */
+// L’inventaire (moteur, kibana.js) fait l’analyse ; ce banc la parcourt objet par objet
 const KB_OVERVIEW = '@ensemble';
 const KB_LEVEL = { todo: 'err', review: 'warn', info: 'info' };
 const KB_RANK = { err: 0, warn: 1, opt: 2, info: 3 };
@@ -724,7 +733,7 @@ function kbDefault() { const d = kbDashboards()[0]; return d ? d.key : KB_OVERVI
 function kbSelect(key, focus) {
   const st = S.kibana; if (st.sel === key) return;
   st.sel = key; renderKibana(); pulseSeam('kibana');
-  const view = $('#view-kibana');
+  const view = $('#kb');
   $('[data-role="out"]', view).scrollTop = 0;
   if (focus) { const row = $(`.kb-row[data-key="${CSS.escape(key)}"]`, view); if (row) { row.focus(); row.scrollIntoView({ block: 'nearest' }); } }
 }
@@ -777,7 +786,7 @@ function kbSelection() {
 }
 
 function renderKibana() {
-  const st = S.kibana; const view = $('#view-kibana'); if (!view) return;
+  const st = S.kibana; const view = $('#kb'); if (!view) return;
   const files = $('[data-role="files"]', view);
   files.hidden = st.files.length < 2;
   files.innerHTML = st.files.map((f, i) => `<button class="file-chip" type="button" data-file="${i}" aria-pressed="${i === st.active}"><i class="${f.status || 'ok'}"></i>${esc(f.name)}<span class="x" data-close="${i}" role="button" aria-label="Fermer ${esc(f.name)}">×</span></button>`).join('');
@@ -943,7 +952,7 @@ function addKibanaFiles(files) {
   if (st.files.length === 1 && (st.files[0].example || !st.files[0].text.trim())) st.files = [];
   files.forEach(f => st.files.push({ name: f.name, text: f.text, status: kbFileStatus(f) }));
   st.active = st.files.length - files.length; st.sel = null; st.filter = '';
-  $('#view-kibana [data-role="filter"]').value = '';
+  $('#kb [data-role="filter"]').value = '';
   st.ed.value = st.files[st.active].text;
   runKibana(true);
 }
@@ -953,18 +962,13 @@ function loadKibanaExample(i) {
   runKibana(true);
 }
 function setupKibana() {
-  const view = $('#view-kibana'); const st = S.kibana;
+  const view = $('#kb'); const st = S.kibana;
   st.ed = makeEditor($('[data-role="editor"]', view), 'json', 'Export Kibana (NDJSON)', 'Collez ici un export d’objets sauvegardés : un objet JSON par ligne, avec type, id et attributes.', text => {
     const f = st.files[st.active]; if (f) { f.text = text; f.example = false; f.status = kbFileStatus(f); } else st.files.push({ name: 'export.ndjson', text });
     clearTimeout(setupKibana.h); setupKibana.h = setTimeout(() => runKibana(true), 300);
   });
   st.ed.value = st.files[st.active].text;
-  const sel = $('[data-act="example"]', view);
-  sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES.kibana.map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`;
-  sel.addEventListener('change', () => { loadKibanaExample(+sel.value); sel.value = ''; });
-  const fi = $('input[type="file"]', view);
-  $('[data-act="open"]', view).addEventListener('click', () => fi.click());
-  fi.addEventListener('change', async () => { const files = await readFiles(fi.files); if (files.length) addKibanaFiles(files); fi.value = ''; });
+  // Les exemples et l’ouverture de fichiers sont dans l’en-tête d’« Autres sources » (voir setupTools)
   $('[data-act="clear"]', view).addEventListener('click', () => { st.files = [{ name: 'export.ndjson', text: '' }]; st.active = 0; st.mode = 'source'; st.ed.value = ''; runKibana(); st.ed.focus(); });
   $('[data-act="copy"]', view).addEventListener('click', () => { if (!st.inv) return; const t = kbSQLText(kbSelection()); if (t.trim()) copyText(t, 'SQL'); else toast('Aucune requête SQL pour cet objet.'); });
   $('[data-act="export"]', view).addEventListener('click', () => {
@@ -1100,7 +1104,9 @@ window.addEventListener('resize', () => { const k = S.view; if ((k === 'ls' || k
 
 setupTheme(); setupBench('dsl'); setupBench('ls'); setupBench('ingest'); setupKibana(); setupTools(); setupConfig();
 run('dsl'); run('ls'); run('ingest');
-show(['dsl', 'ls', 'ingest', 'kibana', 'tools', 'config', 'api', 'arch'].includes(S.view) ? S.view : 'dsl');
+// La section « Kibana » est devenue l’outil Kibana d’« Autres sources » : une vue mémorisée par une version précédente y mène
+if (S.view === 'kibana') { S.view = 'tools'; S.tools.tool = 'kibana'; store.set('tool', 'kibana'); }
+show(['dsl', 'ls', 'ingest', 'tools', 'config', 'api', 'arch'].includes(S.view) ? S.view : 'dsl');
 // Téléchargement classique par le navigateur (page servie par le binaire ou ouverte en local)
 downloads = { save: async ({ filename, data }) => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], { type: 'application/zip' })); a.download = filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); return { status: 'saved' }; } };
 $$('.dl').forEach(b => (b.hidden = false));
