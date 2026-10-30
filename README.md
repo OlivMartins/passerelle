@@ -520,6 +520,7 @@ Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc diffé
 ```bash
 npm ci
 npm test                 # traduit chaque exemple et vérifie le résultat
+npm run check            # mise en forme et lint (Biome), comme la CI ; « npm run format » corrige la mise en forme
 npm run test:diff        # compare les résultats de ClickHouse à ceux d’Elasticsearch (voir tests/README.md)
 npm run test:pipelines   # compare les événements de Vector à ceux de Logstash (voir tests/README.md)
 npm run build:ui         # dist/passerelle.html : l’interface autonome

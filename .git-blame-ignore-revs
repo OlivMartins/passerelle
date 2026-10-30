@@ -1,0 +1,5 @@
+# Commits de mise en forme seule : git blame les ignore (GitHub lit ce fichier tel quel).
+# En local : git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# Mise en forme : Biome sur tout le code, rien d'autre
+a537db435d23c9c608f1dbb4332b0ac2a6ec2f21
