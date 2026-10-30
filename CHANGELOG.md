@@ -2,6 +2,19 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [1.7.1] - 2026-10-30
+
+### Modifié
+
+- **Interface** : la section « Kibana » rejoint « Autres sources » et en devient le premier outil, à la place de l’« Inventaire Kibana ». L’arbre des objets, les onglets SQL, Requête DSL, Remarques et Lecture, la vue d’ensemble, l’ouverture de plusieurs exports (une puce par fichier), le filtre par titre, l’affichage NDJSON, le clavier et l’archive `passerelle-kibana.zip` sont ceux de l’ancienne section, sans changement. La barre de navigation passe de huit à sept sections, sur mobile comme sur ordinateur.
+  - L’inventaire en Markdown, CSV et HTML ne s’affiche plus dans un onglet à part : la « Synthèse » de la vue d’ensemble en reprend le rapport, et les trois fichiers restent dans l’archive, dans l’API (`POST /v1/inventory/kibana`) et en ligne de commande (`passerelle kibana`).
+  - Un export Kibana (`.ndjson`, ou `.json` dont la première ligne est un objet sauvegardé ou une règle de détection), déposé n’importe où dans l’interface ou ouvert depuis l’en-tête d’« Autres sources », ouvre l’outil Kibana. Un autre fichier déposé pendant que l’outil Kibana est affiché va où son contenu l’envoie, comme avant : une requête `.json` est traduite dans « Requêtes ».
+  - Une vue « Kibana » mémorisée par le navigateur lors d’une session avec une version précédente ouvre l’outil Kibana d’« Autres sources » au lieu de retomber sur « Requêtes ».
+
+### Corrigé
+
+- Dans « Autres sources », le menu « Charger un exemple » gardait la liste de l’outil précédent quand un fichier déposé (watches, tableau Grafana, export Kibana) changeait l’outil affiché. Il suit maintenant l’outil.
+
 ## [1.7.0] - 2026-10-28
 
 ### Ajouté
@@ -389,6 +402,7 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
+[1.7.1]: https://github.com/OlivMartins/passerelle/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/OlivMartins/passerelle/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/OlivMartins/passerelle/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/OlivMartins/passerelle/compare/v1.4.0...v1.5.0
