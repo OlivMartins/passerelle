@@ -31,7 +31,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/demo-dark.gif">
-  <img src="docs/assets/demo-light.gif" width="100%" alt="Démonstration : un fichier de requête déposé dans Passerelle est traduit instantanément en SQL ClickHouse, avec remarques d’optimisation et lecture en langage clair ; puis la topologie d’un pipeline Logstash traduit pour Vector, et un export Kibana dont chaque panneau donne ses requêtes SQL">
+  <img src="docs/assets/demo-light.gif" width="100%" alt="Démonstration : un fichier de requête déposé dans Passerelle est traduit instantanément en SQL ClickHouse, avec remarques d’optimisation et lecture en langage clair ; puis la topologie d’un pipeline Logstash traduit pour Vector, et, dans « Autres sources », un export Kibana dont chaque panneau donne ses requêtes SQL">
 </picture>
 
 <br>

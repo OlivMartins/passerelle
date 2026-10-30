@@ -11,6 +11,8 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
   - Un export Kibana (`.ndjson`, ou `.json` dont la première ligne est un objet sauvegardé ou une règle de détection), déposé n’importe où dans l’interface ou ouvert depuis l’en-tête d’« Autres sources », ouvre l’outil Kibana. Un autre fichier déposé pendant que l’outil Kibana est affiché va où son contenu l’envoie, comme avant : une requête `.json` est traduite dans « Requêtes ».
   - Une vue « Kibana » mémorisée par le navigateur lors d’une session avec une version précédente ouvre l’outil Kibana d’« Autres sources » au lieu de retomber sur « Requêtes ».
 
+- **README** : le GIF de démonstration et les captures (Lecture, Remarques, Pipelines, en clair et en sombre) sont refaits avec l’interface de cette version : sept entrées de navigation, et l’export Kibana ouvert depuis « Autres sources ».
+
 ### Corrigé
 
 - Dans « Autres sources », le menu « Charger un exemple » gardait la liste de l’outil précédent quand un fichier déposé (watches, tableau Grafana, export Kibana) changeait l’outil affiché. Il suit maintenant l’outil.
