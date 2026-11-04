@@ -2,7 +2,7 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
-## [Non publié]
+## [1.7.4] - 2026-11-04
 
 ### Corrigé
 
@@ -17,6 +17,11 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
   - Une dérivée, un cumul ou une moyenne mobile posés sur une mesure filtrée sont traduits au lieu d’être « à reprendre ».
   - `single_percentile` trie sur son centile, et non sur un `.50` écrit en dur.
   - Une mesure qui trie un regroupement parent est aussi calculée sur ce niveau, comme le fait Kibana : le top N lisait une colonne absente, et le SQL échouait.
+- **`top_hits` qui ne se traduit pas** (taille ou tri invalide, par exemple) : il est « à reprendre » à lui seul, avec la raison, et le reste de la requête est traduit. Toute la traduction échouait (« Traduction impossible »).
+- Pas encore traités :
+  - les pipelines frères à la racine qui lisent un chemin (`max_bucket` sur `svc>s.avg`, ou sur une mesure filtrée de Kibana) : le SQL écrit `max(s)`, une colonne que ClickHouse ne connaît pas ;
+  - dans les requêtes enfants, l’ordre des lignes d’un parent trié sur une mesure (il suit la clé ; le top N reste juste) ;
+  - le tri par centile de Grafana, toujours « à reprendre ».
 
 ## [1.7.3] - 2026-11-04
 
@@ -462,6 +467,7 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
+[1.7.4]: https://github.com/OlivMartins/passerelle/compare/v1.7.3...v1.7.4
 [1.7.3]: https://github.com/OlivMartins/passerelle/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/OlivMartins/passerelle/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/OlivMartins/passerelle/compare/v1.7.0...v1.7.1
