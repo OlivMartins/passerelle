@@ -1349,6 +1349,241 @@ check(
   'KQL invalide : à reprendre ; ligne illisible : signalée'
 );
 
+/* ---------- Tableaux de bord Kibana 9.4+ : nouveaux noms de panneaux, forme de l’API, sections ---------- */
+check(
+  Object.keys(E.KB_PANEL_ALIASES).length === 21 && new Set(Object.values(E.KB_PANEL_ALIASES)).size === 21,
+  'panneaux 9.4+ : les 21 types renommés par Kibana ont chacun leur ancien nom'
+);
+check(
+  E.kbPanelType('legacy_vis') === 'visualization' &&
+    E.kbPanelType('vis') === 'lens' &&
+    E.kbPanelType('discover_session') === 'search' &&
+    E.kbPanelType('visualization') === 'visualization' &&
+    E.kbPanelType('constructor') === 'constructor' &&
+    E.kbPanelType(undefined) === undefined,
+  'panneaux 9.4+ : nom canonique, ancien nom inchangé, type forgé ou absent laissé tel quel'
+);
+const kbWeb = rd('examples/kibana/supervision_web.ndjson');
+const kbOldNames = Object.fromEntries(Object.entries(E.KB_PANEL_ALIASES).map(([nouveau, ancien]) => [ancien, nouveau]));
+// Le tableau de bord de l’exemple, ses panneaux transformés par `mutate(objet, panneaux)`
+const kbWebWith = mutate =>
+  kbWeb
+    .split('\n')
+    .filter(Boolean)
+    .map(l => {
+      const o = JSON.parse(l);
+      return JSON.stringify(o.type === 'dashboard' ? mutate(o, JSON.parse(o.attributes.panelsJSON)) : o);
+    })
+    .join('\n');
+const kbSig = text =>
+  JSON.stringify(
+    E.kibanaInventory(text, kibanaCfg, {}).entries.map(x => [
+      x.key,
+      x.verdict,
+      x.effort,
+      x.queries.map(q => [q.title, q.verdict, q.sql])
+    ])
+  );
+const kbRef = kbSig(kbWeb);
+check(
+  JSON.parse(kbRef).reduce((n, x) => n + x[3].length, 0) >= 19,
+  'panneaux 9.4+ : la comparaison porte sur toutes les requêtes de l’exemple'
+);
+// Forme stockée, panneaux sous leurs nouveaux noms (legacy_vis, vis, discover_session…)
+const kbStored = kbWebWith((o, panels) => {
+  o.attributes.panelsJSON = JSON.stringify(
+    panels.map(p => Object.assign({}, p, { type: kbOldNames[p.type] || p.type }))
+  );
+  return o;
+});
+// Types des panneaux du tableau de bord de test (le mot « lens » reste dans les attributs d’un panneau Lens par valeur)
+const kbPanelTypes = new Set(
+  JSON.parse(
+    kbStored
+      .split('\n')
+      .map(l => JSON.parse(l))
+      .find(o => o.type === 'dashboard').attributes.panelsJSON
+  ).map(p => p.type)
+);
+check(
+  ['legacy_vis', 'vis', 'discover_session'].every(t => kbPanelTypes.has(t)) &&
+    ['visualization', 'lens', 'search'].every(t => !kbPanelTypes.has(t)),
+  'panneaux 9.4+ : le tableau de bord de test ne porte plus que les nouveaux noms'
+);
+check(
+  kbSig(kbStored) === kbRef,
+  'panneaux 9.4+ (nouveaux noms) : SQL, verdicts et effort identiques à ceux de l’export 8.x'
+);
+// Forme de l’API : { type, grid, id, config }, références dans config.ref_id, une section qui range des panneaux
+const kbApi = kbWebWith((o, panels) => {
+  const refs = o.references;
+  const toApi = p => {
+    const { gridData, panelIndex, embeddableConfig, panelRefName } = p;
+    const config = Object.assign({}, embeddableConfig);
+    if (panelRefName) config.ref_id = refs.find(r => r.name === `${panelIndex}:${panelRefName}`).id;
+    return {
+      type: kbOldNames[p.type] || p.type,
+      grid: { x: gridData.x, y: gridData.y, w: gridData.w, h: gridData.h },
+      id: panelIndex,
+      config
+    };
+  };
+  const list = panels.map(toApi);
+  delete o.attributes.panelsJSON;
+  o.attributes.panels = [
+    ...list.slice(0, 3),
+    { title: 'Détails', collapsed: false, grid: { y: 99 }, id: 'sec1', panels: list.slice(3) }
+  ];
+  o.references = refs.filter(r => !/:panel_/.test(r.name));
+  return o;
+});
+const kbApiDash = E.kibanaInventory(kbApi, kibanaCfg, {}).entries.find(x => x.type === 'dashboard');
+check(
+  kbSig(kbApi) === kbRef && kbApiDash.panels === 11 && kbApiDash.children.length === 11,
+  'forme de l’API (type, grid, id, config) avec une section : mêmes panneaux, même SQL, section aplatie'
+);
+check(
+  !kbApiDash.issues.some(i => /absent de l’export/.test(i.label)),
+  'forme de l’API : l’id d’un panneau n’est pas pris pour celui d’un objet absent de l’export'
+);
+// Cas synthétiques : un export réduit à ce que le cas demande
+const kbObjs = (...list) => list.map(o => JSON.stringify(o)).join('\n');
+const kbSearch = (id, title) => ({
+  type: 'search',
+  id,
+  attributes: {
+    title,
+    kibanaSavedObjectMeta: {
+      searchSourceJSON: JSON.stringify({ query: { query: 'a:b', language: 'kuery' }, filter: [] })
+    }
+  }
+});
+const kbDashOf = (panels, refs) => ({
+  type: 'dashboard',
+  id: 'd9',
+  attributes: { title: 'Tableau 9.x', panels, kibanaSavedObjectMeta: { searchSourceJSON: '{}' } },
+  references: refs || []
+});
+const kbRun = (...list) => E.kibanaInventory(kbObjs(...list), kibanaCfg, {});
+// Panneaux qui citent un objet : savedObjectId et ref_id dans la configuration, id et type de la forme 6.x
+const kbCited = kbRun(
+  kbSearch('s1', 'Recherche S1'),
+  kbSearch('s2', 'Recherche S2'),
+  kbSearch('s3', 'Recherche S3'),
+  kbDashOf(
+    [
+      { type: 'discover_session', panelIndex: 'a', gridData: { i: 'a' }, embeddableConfig: { savedObjectId: 's1' } },
+      { type: 'discover_session', grid: { x: 0, y: 0, w: 24, h: 10 }, id: 'b', config: { ref_id: 's2' } },
+      { type: 'search', panelIndex: 'c', gridData: { i: 'c' }, id: 's3', version: '6.5.0', embeddableConfig: {} },
+      { type: 'discover_session', grid: { x: 0, y: 0, w: 24, h: 10 }, id: 'd', config: { ref_id: 'absente' } }
+    ],
+    []
+  )
+);
+const kbCitedDash = kbCited.entries.find(x => x.type === 'dashboard');
+check(
+  ['search:s1', 'search:s2', 'search:s3'].every(k => kbCitedDash.children.includes(k)),
+  'panneau qui cite un objet : savedObjectId, ref_id (API) et id + type (6.x) sont résolus'
+);
+check(
+  kbCitedDash.issues.filter(i => /absent de l’export/.test(i.label)).length === 1 &&
+    /search absente/.test(kbCitedDash.issues.find(i => /absent de l’export/.test(i.label)).detail),
+  'panneau dont l’objet cité manque : toujours signalé « absent de l’export », jamais compté comme prêt'
+);
+// Contenu illisible d’un type connu : à reprendre, jamais « non reconnu »
+const kbUnread = kbRun(
+  kbDashOf([
+    {
+      type: 'vis',
+      grid: { x: 0, y: 0, w: 24, h: 10 },
+      id: 'p1',
+      config: { title: 'Lens aplati', type: 'xy', layers: [] }
+    },
+    { type: 'legacy_vis', grid: { x: 0, y: 0, w: 24, h: 10 }, id: 'p2', config: { title: 'Visualisation plate' } },
+    { type: 'discover_session', grid: { x: 0, y: 0, w: 24, h: 10 }, id: 'p3', config: { title: 'Session plate' } },
+    { type: 'slo_overview', grid: { x: 0, y: 0, w: 24, h: 10 }, id: 'p4', config: { title: 'SLO' } },
+    { type: 'constructor', grid: { x: 0, y: 0, w: 24, h: 10 }, id: 'p5', config: { title: 'Forgé' } }
+  ])
+);
+const kbU = title =>
+  kbUnread.entries.find(x => x.title === title) || { verdict: '?', type: '?', issues: [{ label: '', detail: '' }] };
+check(
+  ['Lens aplati', 'Visualisation plate', 'Session plate'].every(t => kbU(t).verdict === 'todo'),
+  'vis, legacy_vis et discover_session sans contenu lisible : à reprendre, pas « non reconnu »'
+);
+check(
+  /panneau Lens au format non lu/.test(kbU('Lens aplati').issues[0].label) &&
+    /attributes/.test(kbU('Lens aplati').issues[0].detail) &&
+    kbU('Lens aplati').type === 'lens',
+  'Lens au format aplati de l’API : remarque claire, objet rangé comme Lens'
+);
+check(
+  kbU('SLO').verdict === 'unrecognized' &&
+    kbU('SLO').issues[0].label === 'panneau slo_overview' &&
+    kbU('Forgé').verdict === 'unrecognized',
+  'type de panneau sans traduction (ou forgé) : « non reconnu », sous le nom écrit dans le fichier'
+);
+// Visualisation par valeur bâtie sur une recherche enregistrée (savedSearchId)
+const kbOnSearch = kbRun(
+  kbSearch('s1', 'Recherche S1'),
+  kbDashOf([
+    {
+      type: 'legacy_vis',
+      panelIndex: 'g1',
+      gridData: { i: 'g1' },
+      embeddableConfig: {
+        savedVis: {
+          title: 'Depuis une recherche',
+          type: 'line',
+          params: {},
+          data: { aggs: [{ id: '1', type: 'count', schema: 'metric' }], searchSource: {}, savedSearchId: 's1' }
+        }
+      }
+    }
+  ])
+);
+const kbOnS = kbOnSearch.entries.find(x => x.title === 'Depuis une recherche');
+check(
+  kbOnS &&
+    /depuis une recherche/.test(kbOnS.kind) &&
+    !kbOnS.issues.some(i => /recherche enregistrée absente/.test(i.label)),
+  'visualisation par valeur : savedSearchId lu, requête de la recherche enregistrée reprise'
+);
+// Objets markdown et vega enregistrés sous leur propre type
+const kbTop = kbRun(
+  { type: 'markdown', id: 'm1', attributes: { title: 'Mode d’emploi' } },
+  { type: 'vega', id: 'v1', attributes: { title: 'Carte Vega' } },
+  kbDashOf(
+    [
+      { type: 'legacy_vis', panelIndex: 'pm', gridData: { i: 'pm' }, panelRefName: 'panel_pm', embeddableConfig: {} },
+      { type: 'legacy_vis', panelIndex: 'pv', gridData: { i: 'pv' }, panelRefName: 'panel_pv', embeddableConfig: {} }
+    ],
+    [
+      { name: 'pm:panel_pm', type: 'markdown', id: 'm1' },
+      { name: 'pv:panel_pv', type: 'vega', id: 'v1' }
+    ]
+  )
+);
+const kbMd = kbTop.entries.find(x => x.key === 'markdown:m1');
+const kbVg = kbTop.entries.find(x => x.key === 'vega:v1');
+const kbTopDash = kbTop.entries.find(x => x.type === 'dashboard');
+check(
+  kbMd &&
+    kbMd.type === 'visualization' &&
+    kbMd.verdict === 'ready' &&
+    kbVg &&
+    kbVg.type === 'visualization' &&
+    kbVg.verdict === 'todo',
+  'objets markdown et vega de premier niveau : lus comme des visualisations (Markdown prêt, Vega à reprendre)'
+);
+check(
+  kbTopDash.children.includes('markdown:m1') &&
+    kbTopDash.children.includes('vega:v1') &&
+    kbTopDash.verdict === 'todo' &&
+    !kbTop.entries.some(x => x.verdict === 'unrecognized'),
+  'tableau de bord qui cite ces objets : enfants reliés, verdict du plus mauvais panneau, rien de « non reconnu »'
+);
+
 /* ---------- Tableaux de bord Grafana ---------- */
 const gDash = JSON.stringify(grafanaOut.dashboard);
 const gPanel = title => grafanaOut.dashboard.panels.find(p => p.title === title) || { targets: [] };
