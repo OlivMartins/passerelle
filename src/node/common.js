@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const VERSION = '1.7.2';
+export const VERSION = '1.7.3';
 export function log(level, msg, extra) {
   const line = Object.assign({ ts: new Date().toISOString(), level, msg }, extra || {});
   (level === 'error' || level === 'warn' ? process.stderr : process.stdout).write(JSON.stringify(line) + '\n');

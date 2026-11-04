@@ -2,7 +2,14 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
-## [Non publié]
+## [1.7.3] - 2026-11-04
+
+### Ajouté
+
+- **Visualisations Kibana (agrégations de `legacy_vis` et de `visualization`)** : trois mesures et regroupements que le moteur ne lisait pas.
+  - **`filtered_metric`** (une moyenne, un comptage… calculés sur les documents d’un filtre) devient une agrégation `filter` qui porte la mesure : le moteur la calcule dans la même passe, par `avgIf`, `countIf`…, en une colonne `<nom>_<mesure>` (`<nom>_doc_count` pour un comptage). Le filtre est lu en KQL ou en Lucene, avec le rectangle géographique éventuel.
+  - **`single_percentile_rank`** : le rang d’une valeur dans la distribution du champ (la part des documents qui lui sont inférieurs), comme `percentile_ranks` avec une seule valeur.
+  - **Pipelines `avg_bucket`, `sum_bucket`, `min_bucket` et `max_bucket`** : Kibana les écrit comme un regroupement personnalisé (`customBucket`), sa mesure (`customMetric`) et le pipeline qui lit « regroupement>mesure ». Passerelle émettait seulement une remarque « à reprendre » ; elle écrit maintenant l’agrégation, que le moteur DSL savait déjà traduire en SQL sur les groupes (moyenne, somme, minimum ou maximum, avec la clé du groupe pour les deux derniers). Sous un autre regroupement, le moteur ne calcule pas le pipeline : le SQL des groupes est produit et le pipeline reste « à reprendre », sous le nom `pipeline … sous un regroupement`.
 
 ### Corrigé
 
@@ -11,7 +18,12 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
   - Un panneau `vis`, `legacy_vis` ou `discover_session` dont la configuration n’a pas le contenu d’un export d’objets sauvegardés (Lens « as code » aplati, par exemple) est « à reprendre », avec une remarque qui dit ce qui manque, et non plus « non reconnu ».
   - Une visualisation par valeur bâtie sur une recherche enregistrée (`savedSearchId`) reprend la requête de cette recherche.
   - Les objets `markdown` et `vega` enregistrés sous leur propre type sont lus comme des visualisations (Markdown prêt, Vega à reprendre) au lieu d’être « non reconnus », et un tableau de bord qui les cite les relie.
-  - Pas encore traités : les contrôles 9.4+ (`pinned_panels`), que Passerelle ne lit toujours pas, et les panneaux applicatifs (SLO, APM, ML, Synthetics…), qui restent « non reconnus » avec le message générique.
+  - **Contrôles 9.4+** : depuis la 9.4, Kibana range les contrôles d’un tableau de bord (listes d’options, curseurs, curseur de temps, contrôles ES|QL) dans `pinned_panels` et non plus dans `controlGroupInput` ; Passerelle ne lisait que `controlGroupInput`, et ces contrôles disparaissaient du tableau de bord sans la moindre remarque. Ils sont lus sous leurs deux formes, stockée (`{ panels: { <id>: { type, order, config } } }`) et servie par l’API (une liste `{ id, type, config }`), avec les nouveaux noms de type (`options_list_control`, `range_slider_control`, `time_slider_control`, `esql_control`) et une configuration en camelCase ou en snake_case (`field_name`, `data_view_id`). Un contrôle donne la même requête, le même verdict et le même effort sous les deux époques ; la vue de données se retrouve par `data_view_id`, par le nom de référence de la configuration (`dataViewRefName`), par le suffixe que Kibana donne à la référence (`optionsListDataView`, `optionsListControlDataView`, `rangeSliderDataView`) ou, à défaut, par une référence préfixée de l’identifiant du contrôle. Les contrôles sont lus dans l’ordre de `order`.
+  - Un contrôle que Passerelle ne sait pas traduire est désormais toujours signalé : contrôle ES|QL (avec sa variable et sa requête), liste d’options dont les valeurs viennent d’ES|QL (`values_source: esql`), type de contrôle inconnu (sous le nom écrit dans le fichier), contrôle sans champ lisible.
+  - Pas encore traités : les panneaux applicatifs (SLO, APM, ML, Synthetics…), qui restent « non reconnus » avec le message générique.
+- **Regroupements d’une visualisation Kibana pris pour des mesures** : `filter`, `sampler`, `diversified_sampler`, `ip_prefix` et `time_series` étaient lus comme des mesures, et une visualisation qui en portait un finissait « à reprendre » avec le message trompeur « la mesure filter n’a pas de traduction automatique », sans SQL fiable. Ce sont des regroupements.
+  - `filter` devient une condition du SQL (la requête du regroupement s’ajoute à la clause `WHERE`) ; `sampler` et `diversified_sampler` sont traduits sans l’échantillonnage, que ClickHouse ne reproduit pas, et restent « à vérifier » ; `ip_prefix` et `time_series`, que le moteur DSL ne traduit pas, sont « à reprendre » sous leur nom exact (« regroupement ip_prefix », « regroupement time_series »), avec la fonction ClickHouse à employer ou la colonne à regrouper.
+  - Un regroupement trié sur une mesure filtrée, ou sur le rang d’un centile non entier, est trié par nombre de documents et signalé « à vérifier » (« tri sur une mesure filtrée »), au lieu d’un `ORDER BY` sur une colonne qui n’existe pas : le moteur DSL lit mal le chemin `filtre>mesure` d’un tri. Une dérivée, un cumul ou une moyenne mobile posés sur une mesure filtrée sont « à reprendre ».
 
 ## [1.7.2] - 2026-11-04
 
@@ -434,6 +446,7 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
+[1.7.3]: https://github.com/OlivMartins/passerelle/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/OlivMartins/passerelle/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/OlivMartins/passerelle/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/OlivMartins/passerelle/compare/v1.6.0...v1.7.0
