@@ -2052,11 +2052,28 @@ function controlQueries(entry, controls, o, base, views, cfg) {
       entry.issues.push({
         kind: 'todo',
         label: `contrôle ES|QL « ${title} »`,
-        detail: 'Les valeurs d’un contrôle ES|QL viennent d’une requête ES|QL à réécrire en SQL.'
+        detail: `Les valeurs d’un contrôle ES|QL viennent d’une requête ES|QL à réécrire en SQL.${c.variable ? ` Variable : ${c.variable}.` : ''}${c.esqlQuery ? ` Requête : ${c.esqlQuery.slice(0, 300)}` : ''}`
       });
       continue;
     }
-    if (!field) continue;
+    // Un type de contrôle que Passerelle ne connaît pas reste visible : jamais perdu en silence
+    if (!['optionsListControl', 'rangeSliderControl', 'list', 'range'].includes(c.type)) {
+      entry.issues.push({
+        kind: 'todo',
+        label: `contrôle ${c.rawType || c.type || 'sans type'}`,
+        detail: `Type de contrôle sans traduction automatique${c.fieldName ? ` (champ ${c.fieldName})` : ''} : à recréer avec une variable de l’outil cible.`
+      });
+      continue;
+    }
+    if (!field) {
+      entry.issues.push({
+        kind: 'review',
+        label: `contrôle « ${title} » sans champ lisible`,
+        detail:
+          'Le contrôle ne dit pas quel champ il filtre (champ absent ou écrit dans un format que Passerelle ne lit pas) : sa liste de valeurs n’est pas traduite.'
+      });
+      continue;
+    }
     const ref = c.ref ? refOf(o, c.ref) : null;
     const viewId = (ref && ref.id) || c.dataViewId || null;
     const view = viewId ? views.get(viewId) : null;
@@ -2481,6 +2498,75 @@ function normalizePanel(p, o, i) {
   }
   return { type: type || (ref && ref.type), cfg, prefix, ref, title: cfg.title || p.title };
 }
+/*
+ * Contrôles d’un tableau de bord. Jusqu’à Kibana 9.3, ils sont dans controlGroupInput : panelsJSON, un objet
+ * { <id>: { type, order, explicitInput: { fieldName, dataViewId… } } }. Depuis la 9.4, ils sont des panneaux épinglés,
+ * dans pinned_panels : { panels: { <id>: { type, order, grow, width, config } } } à l’état stocké, ou une liste
+ * { id, type, config } dans la forme de l’API ; les types changent de nom (options_list_control…) et la configuration
+ * s’écrit en snake_case (field_name, data_view_id) dans la forme de l’API. Les deux époques donnent la même liste,
+ * avec les anciens noms de type, que controlQueries comprend.
+ */
+const snakeOf = k => k.replace(/[A-Z]/g, c => `_${c.toLowerCase()}`);
+// Valeur d’une clé écrite en camelCase (stockage) ou en snake_case (API) : la première qui existe
+const pickKey = (x, camel) => (x[camel] !== undefined ? x[camel] : x[snakeOf(camel)]);
+// Noms de référence que les versions de Kibana donnent à la vue de données d’un contrôle
+const CONTROL_REF_SUFFIXES = ['optionsListDataView', 'optionsListControlDataView', 'rangeSliderDataView'];
+function controlViewRef(o, id, x) {
+  const refs = o.references || [];
+  const has = n => refs.some(r => r.name === n);
+  const own = pickKey(x, 'dataViewRefName');
+  const prefixes = [`controlGroup_${id}`, String(id)];
+  const names = [].concat(
+    typeof own === 'string' && own ? [own, ...prefixes.map(p => `${p}:${own}`)] : [],
+    prefixes.flatMap(p => CONTROL_REF_SUFFIXES.map(s => `${p}:${s}`))
+  );
+  const found = names.find(has);
+  if (found) return found;
+  // Dernier recours : la vue de données que la référence rattache à ce contrôle, quel que soit le nom de sa clé
+  const bound = refs.find(
+    r =>
+      (r.type === 'index-pattern' || r.type === 'index_pattern') &&
+      prefixes.some(p => String(r.name).startsWith(`${p}:`))
+  );
+  return bound ? bound.name : null;
+}
+function readControls(o) {
+  const a = o.attributes || {};
+  // { panels: … } ou la liste directement ; un objet indexé par identifiant, ou une liste portant ses identifiants
+  const pairsOf = v => {
+    const j = jsonAttr(v);
+    const panels = isObj(j) && j.panels !== undefined ? jsonAttr(j.panels) : j;
+    if (Array.isArray(panels))
+      return panels.map((c, i) => [isObj(c) && c.id !== undefined ? String(c.id) : String(i), c]);
+    return isObj(panels) ? Object.entries(panels) : [];
+  };
+  const cg = isObj(a.controlGroupInput) ? a.controlGroupInput : null;
+  let pairs = pairsOf(a.pinned_panels !== undefined ? a.pinned_panels : a.pinnedPanels);
+  if (!pairs.length && cg) pairs = pairsOf(cg.panelsJSON !== undefined ? cg.panelsJSON : cg.panels);
+  pairs = pairs.filter(([, c]) => isObj(c));
+  // Kibana les affiche selon « order » ; le tri est stable, sans « order » l’ordre du fichier est gardé
+  if (pairs.every(([, c]) => typeof c.order === 'number')) pairs.sort((p, q) => p[1].order - q[1].order);
+  return pairs.map(([id, c]) => {
+    const x = Object.assign({}, isObj(c.explicitInput) ? c.explicitInput : {}, isObj(c.config) ? c.config : {}, c);
+    const esqlQuery = pickKey(x, 'esqlQuery');
+    const source = pickKey(x, 'valuesSource');
+    // Un contrôle dont les valeurs viennent d’ES|QL n’a pas de champ à interroger : il se réécrit à la main
+    const esql =
+      kbPanelType(c.type) === 'esqlControl' || /^esql$/i.test(String(source)) || typeof esqlQuery === 'string';
+    return {
+      type: esql ? 'esqlControl' : kbPanelType(c.type),
+      rawType: c.type,
+      fieldName: pickKey(x, 'fieldName'),
+      title: x.title,
+      selectedOptions: pickKey(x, 'selectedOptions'),
+      value: x.value,
+      dataViewId: pickKey(x, 'dataViewId'),
+      ref: esql ? null : controlViewRef(o, id, x),
+      esqlQuery: typeof esqlQuery === 'string' ? esqlQuery : null,
+      variable: pickKey(x, 'variableName') || null
+    };
+  });
+}
 function analyzeDashboard(o, ctx) {
   const a = o.attributes;
   const views = ctx.views;
@@ -2622,25 +2708,8 @@ function analyzeDashboard(o, ctx) {
       ctx.cfg
     );
   }
-  // Contrôles (8.x et suivantes) : listes d’options et curseurs
-  const cg = a.controlGroupInput || null;
-  const cpanels = cg ? jsonAttr(cg.panelsJSON) || cg.panels || {} : {};
-  const controls = Object.entries(isObj(cpanels) ? cpanels : {}).map(([id, c]) => {
-    const x = Object.assign({}, c.explicitInput || {}, c.config || {}, c);
-    const kindRef = { optionsListControl: 'optionsListDataView', rangeSliderControl: 'rangeSliderDataView' }[c.type];
-    const refName = kindRef
-      ? [`controlGroup_${id}:${kindRef}`, `${id}:${kindRef}`].find(n => (o.references || []).some(r => r.name === n))
-      : null;
-    return {
-      type: c.type,
-      fieldName: x.fieldName,
-      title: x.title,
-      selectedOptions: x.selectedOptions,
-      value: x.value,
-      dataViewId: x.dataViewId,
-      ref: refName || null
-    };
-  });
+  // Contrôles : listes d’options, curseurs, curseur de temps, contrôles ES|QL
+  const controls = readControls(o);
   if (controls.length) {
     controlQueries(e, controls, o, base, ctx.views, ctx.cfg);
     e.controls = controls.length;

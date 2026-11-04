@@ -1584,6 +1584,144 @@ check(
   'tableau de bord qui cite ces objets : enfants reliés, verdict du plus mauvais panneau, rien de « non reconnu »'
 );
 
+/* ---------- Contrôles des tableaux de bord Kibana 9.4+ (pinned_panels) ---------- */
+// Les deux contrôles de l’exemple (controlGroupInput, 8.x), rangés comme Kibana 9.4+ les stocke ou les sert par l’API
+const kbCtlOld = o => JSON.parse(o.attributes.controlGroupInput.panelsJSON);
+const kbCtlNewType = { optionsListControl: 'options_list_control', rangeSliderControl: 'range_slider_control' };
+const kbCtlConfig = c => {
+  const cfg = Object.assign({}, c.explicitInput);
+  delete cfg.id;
+  delete cfg.enhancements;
+  return cfg;
+};
+// Stocké : { pinned_panels: { panels: { <id>: { order, grow, width, type, config } } } }, références préfixées par l’id
+const kbPinnedStored = kbWebWith(o => {
+  const panels = {};
+  for (const [id, c] of Object.entries(kbCtlOld(o)))
+    panels[id] = { order: c.order, grow: c.grow, width: c.width, type: kbCtlNewType[c.type], config: kbCtlConfig(c) };
+  delete o.attributes.controlGroupInput;
+  o.attributes.pinned_panels = { panels };
+  o.references = o.references.map(r => Object.assign({}, r, { name: r.name.replace(/^controlGroup_/, '') }));
+  return o;
+});
+// API : une liste { id, type, config } en snake_case, la vue de données citée par son identifiant (data_view_id)
+const kbPinnedApi = kbWebWith(o => {
+  const viewOf = Object.fromEntries(
+    o.references.filter(r => /^controlGroup_/.test(r.name)).map(r => [r.name.split(':')[0].slice(13), r.id])
+  );
+  o.attributes.pinned_panels = Object.entries(kbCtlOld(o)).map(([id, c]) => ({
+    id,
+    type: kbCtlNewType[c.type],
+    config: Object.fromEntries(
+      Object.entries(Object.assign({ dataViewId: viewOf[id] }, kbCtlConfig(c))).map(([k, v]) => [
+        k.replace(/[A-Z]/g, ch => `_${ch.toLowerCase()}`),
+        v
+      ])
+    )
+  }));
+  delete o.attributes.controlGroupInput;
+  o.references = o.references.filter(r => !/^controlGroup_/.test(r.name));
+  return o;
+});
+const kbCtlOf = text => E.kibanaInventory(text, kibanaCfg, {}).entries.find(x => x.type === 'dashboard');
+check(
+  kbCtlOf(kbWeb).controls === 2 && kbCtlOf(kbWeb).queries.filter(q => /^Contrôle/.test(q.title)).length === 2,
+  'contrôles de l’exemple (controlGroupInput) : deux contrôles, deux requêtes'
+);
+check(
+  kbCtlOf(kbPinnedStored).controls === 2 && kbSig(kbPinnedStored) === kbRef,
+  'contrôles 9.4+ (pinned_panels stocké, options_list_control…) : mêmes requêtes et mêmes verdicts que controlGroupInput'
+);
+check(
+  kbCtlOf(kbPinnedApi).controls === 2 && kbSig(kbPinnedApi) === kbRef,
+  'contrôles 9.4+ (liste de l’API, snake_case, data_view_id) : mêmes requêtes et mêmes verdicts que controlGroupInput'
+);
+// Cas synthétiques : un tableau de bord réduit à ses contrôles
+const kbCtlView = {
+  type: 'index-pattern',
+  id: 'dv1',
+  attributes: { title: 'logs-web*', timeFieldName: '@timestamp', fields: '[]' }
+};
+const kbPinnedDash = (pinned, refs) => {
+  const d = kbDashOf([], refs);
+  d.attributes.pinned_panels = pinned;
+  return d;
+};
+const kbCtlRun = (pinned, refs) => {
+  const d = E.kibanaInventory(kbObjs(kbCtlView, kbPinnedDash(pinned, refs)), kibanaCfg, {}).entries.find(
+    x => x.type === 'dashboard'
+  );
+  return { d, queries: d.queries.map(q => q.title), labels: d.issues.map(i => `${i.kind}:${i.label}`) };
+};
+const kbCtlMixed = kbCtlRun({
+  panels: {
+    a: { order: 2, type: 'time_slider_control', config: {} },
+    b: {
+      order: 0,
+      type: 'esql_control',
+      config: { variable_name: 'hote', esql_query: 'FROM logs-* | STATS BY host.name', title: 'Hôte' }
+    },
+    c: {
+      order: 1,
+      type: 'options_list_control',
+      config: { data_view_id: 'dv1', field_name: 'service.name', title: 'Service' }
+    },
+    d: { order: 3, type: 'future_control', config: { field_name: 'x', title: 'Futur' } },
+    e: { order: 4, type: 'options_list_control', config: { data_view_id: 'dv1', title: 'Sans champ' } },
+    f: {
+      order: 5,
+      type: 'options_list_control',
+      config: { data_view_id: 'dv1', field_name: 'host.name', title: 'Source ES|QL', values_source: 'esql' }
+    }
+  }
+});
+check(
+  kbCtlMixed.d.controls === 6 && kbCtlMixed.queries.length === 1 && kbCtlMixed.queries[0] === 'Contrôle « Service »',
+  'contrôles 9.4+ : tous comptés, seule la liste d’options sur un champ donne une requête'
+);
+check(
+  kbCtlMixed.labels.includes('review:curseur de temps') &&
+    kbCtlMixed.labels.includes('todo:contrôle ES|QL « Hôte »') &&
+    kbCtlMixed.labels.includes('todo:contrôle ES|QL « Source ES|QL »'),
+  'contrôles 9.4+ : curseur de temps, contrôle ES|QL et liste dont les valeurs viennent d’ES|QL sont signalés'
+);
+const kbCtlEsql = kbCtlMixed.d.issues.find(i => i.label === 'contrôle ES|QL « Hôte »');
+check(
+  /Variable : hote\./.test(kbCtlEsql.detail) && /STATS BY host\.name/.test(kbCtlEsql.detail),
+  'contrôle ES|QL : la variable et la requête sont reprises dans la remarque'
+);
+check(
+  kbCtlMixed.labels.includes('todo:contrôle future_control') &&
+    kbCtlMixed.labels.includes('review:contrôle « Sans champ » sans champ lisible'),
+  'contrôle de type inconnu ou sans champ : signalé sous son nom, jamais perdu en silence'
+);
+check(
+  kbCtlMixed.d.issues.findIndex(i => /contrôle ES\|QL « Hôte »/.test(i.label)) <
+    kbCtlMixed.d.issues.findIndex(i => /curseur de temps/.test(i.label)),
+  'contrôles 9.4+ : lus dans l’ordre de « order », pas dans celui du fichier'
+);
+// Vue de données retrouvée par une référence : nom donné dans la configuration, suffixe connu, ou préfixe de l’identifiant
+const kbCtlViaRef = (config, refName) =>
+  kbCtlRun({ panels: { c1: { type: 'options_list_control', config: Object.assign({ title: 'Service' }, config) } } }, [
+    { name: refName, type: 'index-pattern', id: 'dv1' }
+  ]).d.queries[0].pattern;
+check(
+  kbCtlViaRef(
+    { field_name: 'service.name', data_view_ref_name: 'c1:optionsListDataView' },
+    'c1:optionsListDataView'
+  ) === 'logs-web*' &&
+    kbCtlViaRef({ fieldName: 'service.name', dataViewRefName: 'maVue' }, 'c1:maVue') === 'logs-web*' &&
+    kbCtlViaRef({ fieldName: 'service.name' }, 'c1:optionsListControlDataView') === 'logs-web*' &&
+    kbCtlViaRef({ fieldName: 'service.name' }, 'c1:nomInattendu') === 'logs-web*',
+  'contrôles 9.4+ : la vue de données se retrouve par son nom de référence (configuration, suffixe connu, préfixe de l’id)'
+);
+check(
+  kbCtlRun({}).d.controls === undefined &&
+    kbCtlRun({ panels: {} }).d.controls === undefined &&
+    kbCtlRun({ panels: { x: 'illisible' } }).d.controls === undefined,
+  'contrôles : un pinned_panels vide ou illisible ne crée aucun contrôle'
+);
+
 /* ---------- Tableaux de bord Grafana ---------- */
 const gDash = JSON.stringify(grafanaOut.dashboard);
 const gPanel = title => grafanaOut.dashboard.panels.find(p => p.title === title) || { targets: [] };
