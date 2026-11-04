@@ -250,17 +250,10 @@ export const CASES = [
     id: 'agg_terms_tri_mesure_value',
     dsl: triService({ 'lat.value': 'desc' }, { lat: LATENCE })
   },
-  // Elasticsearch ne lit _count sur un filtre que dans un pipeline ; la traduction le comprend et le signale
-  {
-    id: 'agg_terms_tri_filtre_chemin_count',
-    known: 'Elasticsearch refuse ce chemin dans un tri ; la traduction trie sur le nombre de documents du filtre',
-    dsl: triService({ 'f>_count': 'desc' }, sousErreurs({ m: LATENCE }))
-  },
-  {
-    id: 'agg_terms_tri_filtre_point_count',
-    known: 'Elasticsearch refuse ce chemin dans un tri ; la traduction trie sur le nombre de documents du filtre',
-    dsl: triService({ 'f._count': 'desc' }, sousErreurs({ m: LATENCE }))
-  },
+  // Elasticsearch ne lit _count sur un filtre que dans un pipeline (HTTP 400 dans un tri : f ou f.doc_count) ; la
+  // traduction refuse de même, avec l’écriture valide dans son message
+  { id: 'agg_terms_tri_filtre_chemin_count', dsl: triService({ 'f>_count': 'desc' }, sousErreurs({ m: LATENCE })) },
+  { id: 'agg_terms_tri_filtre_point_count', dsl: triService({ 'f._count': 'desc' }, sousErreurs({ m: LATENCE })) },
   // Groupe vide : NaN pour avg et les centiles, +∞ pour min, −∞ pour max, 0 pour sum. Elasticsearch 8 et 9 les classent
   // par Double.compare : NaN et +∞ en tête d’un tri décroissant, −∞ en tête d’un tri croissant
   { id: 'agg_terms_tri_vide_avg_desc', known: NAN_ES7, dsl: triService({ 'f>m': 'desc' }, sansApi({ m: LATENCE })) },

@@ -1389,6 +1389,34 @@ check(
   JSON.parse(kbRef).reduce((n, x) => n + x[3].length, 0) >= 19,
   'panneaux 9.4+ : la comparaison porte sur toutes les requêtes de l’exemple'
 );
+// Lens : un terms trié sur une colonne « comptage filtré » trie sur « filtre » (« filtre._count » est refusé dans un tri)
+{
+  const lensFiltre = kbWeb
+    .split('\n')
+    .filter(Boolean)
+    .map(l => {
+      const o = JSON.parse(l);
+      if (o.type === 'lens' && o.id.endsWith('l001')) {
+        const colonne = o.attributes.state.datasourceStates.formBased.layers.lay1.columns['c-count'];
+        delete colonne.timeScale;
+        colonne.filter = { query: 'http.response.status_code >= 500', language: 'kuery' };
+        colonne.label = 'Erreurs';
+      }
+      return JSON.stringify(o);
+    })
+    .join('\n');
+  const entree = E.kibanaInventory(lensFiltre, kibanaCfg, {}).entries.find(
+    x => x.title === 'Requêtes par seconde et par méthode'
+  );
+  const sql = entree ? entree.queries.map(q => q.sql).join('\n') : '';
+  check(
+    entree &&
+      entree.verdict !== 'todo' &&
+      /ORDER BY periode ASC, filtre_Erreurs_doc_count DESC, http_request_method ASC/.test(sql),
+    'Lens, tri des groupes sur un comptage filtré : trié sur le nombre de documents du filtre, pas « à reprendre »',
+    sql
+  );
+}
 // Forme stockée, panneaux sous leurs nouveaux noms (legacy_vis, vis, discover_session…)
 const kbStored = kbWebWith((o, panels) => {
   o.attributes.panelsJSON = JSON.stringify(
@@ -2152,17 +2180,32 @@ for (const [path, column] of [
     `chemin de tri ${path} → ${column}`
   );
 }
+// Elasticsearch refuse _count sur un filtre dans un tri (HTTP 400) : « à reprendre », avec l’écriture valide dans le message
 for (const path of ['f>_count', 'f._count']) {
   const r = chemin(chTri({ [path]: 'desc' }, chFiltre(chCols)));
   check(
-    r.sql.includes('ORDER BY f_doc_count DESC, svc ASC') &&
-      !r.stats.ko &&
+    r.stats.ko === 1 &&
+      !r.sql.includes('ORDER BY') &&
       r.notes.some(
-        n => n.level === 'warn' && n.title === `tri sur « ${path} »` && n.detail.includes('« f.doc_count »')
+        n =>
+          n.level === 'err' &&
+          n.detail.includes(`tri sur « ${path} »`) &&
+          n.detail.includes('« f » ou « f.doc_count »') &&
+          n.detail.includes('que dans un pipeline')
       ),
-    `chemin de tri ${path} → nombre de documents du filtre, avec la remarque qu’Elasticsearch le refuse`
+    `chemin de tri ${path} → à reprendre (Elasticsearch le refuse), le message donne f et f.doc_count`
   );
 }
+check(
+  ['histogram', 'date_histogram'].every(type => {
+    const body =
+      type === 'histogram'
+        ? { field: 'bytes', interval: 1000, order: { 'f>_count': 'asc' } }
+        : { field: '@timestamp', calendar_interval: 'day', order: { 'f>_count': 'asc' } };
+    return chemin({ size: 0, aggs: { h: { [type]: body, aggs: chFiltre({}) } } }).stats.ko === 1;
+  }),
+  'chemin de tri f>_count → à reprendre aussi sur histogram et date_histogram'
+);
 const chCentiles = chemin(
   chTri({ 'p.50': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [99, 50] } } })
 );

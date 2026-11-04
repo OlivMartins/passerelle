@@ -2861,14 +2861,15 @@ function buildLevel(ctx, name, def) {
     default:
       todo(ctx, `agrégation ${type}`, `« ${name} » (${type}) n’a pas d’équivalent automatique.`);
   }
-  // Elasticsearch ne lit _count sur un sous-filtre que dans un pipeline ; la traduction le comprend aussi dans un tri, et le dit
+  // Elasticsearch ne lit _count sur un sous-filtre que dans un pipeline (HTTP 400 dans un tri) : le nombre de documents
+  // d’un filtre s’y écrit f ou f.doc_count. La traduction refuse comme lui et indique l’écriture valide.
   for (const o of L.order)
-    if (!o.raw && /[>.]_count$/.test(o.by))
-      ctx.notes.add(
-        'warn',
-        `tri sur « ${o.by} »`,
-        `Elasticsearch refuse ce chemin dans un tri (HTTP 400) : il s’écrit « ${o.by.replace(/[>.]_count$/, '')} » ou « ${o.by.replace(/[>.]_count$/, '.doc_count')} ». La traduction trie sur le nombre de documents du regroupement.`
+    if (!o.raw && /[>.]_count$/.test(o.by)) {
+      const filter = o.by.replace(/[>.]_count$/, '');
+      throw new Error(
+        `tri sur « ${o.by} » : Elasticsearch le refuse dans un tri (HTTP 400). Le nombre de documents d’un filtre s’y écrit « ${filter} » ou « ${filter}.doc_count » ; « _count » ne s’écrit que dans un pipeline.`
       );
+    }
   // Enfants
   const kids = aggChildren(def);
   L.subAggs = kids;

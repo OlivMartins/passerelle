@@ -1523,7 +1523,8 @@ function lensLayers(attrs, obj, prefix, views, base, extra) {
         let order;
         if (ob.type === 'alphabetical') order = { _key: dir };
         else if (ob.type === 'column') {
-          const path = pathOf(ob.columnId);
+          // Dans un tri, le nombre de documents d’un filtre s’écrit « filtre » (« filtre._count » est réservé aux pipelines)
+          const path = pathOf(ob.columnId).replace(/\._count$/, '');
           order = { [path]: dir };
         } else if (ob.type === 'rare')
           def = { rare_terms: { field: c.sourceField, max_doc_count: ob.maxDocCount || 1 } };
