@@ -17,8 +17,7 @@
     </div>
     <div class="nav">
       <button class="nav-item" data-view="dsl"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8.5" cy="8.5" r="5"/><path d="M12.3 12.3 17 17"/></svg><div><b>Requêtes</b><small>DSL vers SQL ClickHouse</small></div></button>
-      <button class="nav-item" data-view="ls"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="10" r="2"/><circle cx="16" cy="4.5" r="2"/><circle cx="16" cy="15.5" r="2"/><path d="M6 10h3.5c2 0 2.5-5.5 4.5-5.5M9.5 10c2 0 2.5 5.5 4.5 5.5"/></svg><div><b>Pipelines</b><small>Logstash vers Vector</small></div></button>
-      <button class="nav-item" data-view="ingest"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h14l-5.2 6.2V16l-3.6-1.6v-4.2z"/></svg><div><b>Ingestion</b><small>Pipelines Elasticsearch vers Vector</small></div></button>
+      <button class="nav-item" data-view="ingest"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4h14l-5.2 6.2V16l-3.6-1.6v-4.2z"/></svg><div><b>Ingestion</b><small>Elasticsearch, Logstash vers Vector</small></div></button>
       <button class="nav-item" data-view="tools"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="6" rx="1"/><rect x="11" y="3" width="6" height="6" rx="1"/><rect x="3" y="11" width="6" height="6" rx="1"/><path d="M11 14h6M14 11v6"/></svg><div><b><span class="nav-long">Autres sources</span><span class="nav-short" aria-hidden="true">Autres</span></b><small>Kibana, Grafana, Watcher, schéma</small></div></button>
       <button class="nav-item" data-view="config"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 5.5h8M15 5.5h2M3 14.5h2M9 14.5h8"/><circle cx="13" cy="5.5" r="2"/><circle cx="7" cy="14.5" r="2"/></svg><div><b><span class="nav-long">Configuration</span><span class="nav-short" aria-hidden="true">Config.</span></b><small>Endpoints, topics, options</small></div></button>
     </div>
@@ -77,81 +76,74 @@
       </div>
     </section>
 
-    <!-- Pipelines Logstash -->
-    <section class="view" id="view-ls" data-kind="ls" hidden>
-      <header class="view-head">
-        <div>
-          <h1>Pipeline Logstash vers configuration Vector</h1>
-          <p>Déposez vos fichiers .conf. Chaque filtre devient une étape VRL nommée, les sorties conditionnelles deviennent un aiguillage, et Kafka reste la source comme la destination.</p>
-        </div>
-        <div class="head-actions">
-          <select class="btn" data-act="example" aria-label="Charger un exemple"></select>
-          <button class="btn" data-act="open" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10.5V2.5M5 5.5l3-3 3 3M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>Ouvrir des fichiers</button>
-          <input type="file" multiple accept=".conf,.cfg,.txt,.logstash" hidden>
-        </div>
-      </header>
-      <div class="files" data-role="files" hidden></div>
-      <div class="bench">
-        <section class="pane pane-in" aria-label="Pipeline source">
-          <div class="pane-bar">
-            <span class="pane-title">Pipeline Logstash <small data-role="fname"></small></span>
-            <div class="pane-tools">
-              <button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>
-            </div>
-          </div>
-          <div class="editor" data-role="editor"></div>
-          <div class="drop-veil"><div>Déposer pour traduire<small>Fichiers .conf : un onglet par pipeline</small></div></div>
-        </section>
-        <div class="seam" aria-hidden="true"><span class="seam-pulse"></span><span class="seam-knot"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></span></div>
-        <section class="pane pane-out" aria-label="Résultat">
-          <div class="verdict" data-role="verdict"></div>
-          <div class="tabs" role="tablist" data-role="tabs"></div>
-          <div class="out-body" data-role="out"></div>
-          <div class="out-foot">
-            <button class="btn primary" data-act="copy" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></svg>Copier la configuration</button>
-            <button class="btn dl" data-act="export" type="button" hidden>Télécharger (.zip)</button>
-            <span class="hint">Traduction locale : rien ne quitte votre navigateur.</span>
-          </div>
-        </section>
-      </div>
-    </section>
-
-    <!-- Pipelines d’ingestion Elasticsearch -->
+    <!-- Ingestion : pipelines Elasticsearch et Logstash vers Vector -->
     <section class="view" id="view-ingest" data-kind="ingest" hidden>
       <header class="view-head">
         <div>
-          <h1>Pipeline d’ingestion Elasticsearch vers Vector</h1>
-          <p>Déposez un pipeline d’ingestion (YAML ou JSON, ou la requête PUT _ingest/pipeline de la console Kibana). Chaque processeur devient du VRL, les pipelines appelés sont recopiés sur place, et Elastic Agent comme Beats restent la source.</p>
+          <h1>Pipelines Elasticsearch et Logstash vers Vector</h1>
+          <p>Déposez un pipeline d’ingestion Elasticsearch (YAML ou JSON, ou la requête PUT _ingest/pipeline de la console Kibana) ou un pipeline Logstash (fichiers .conf). Chaque processeur ou filtre devient une étape VRL nommée, les pipelines appelés sont recopiés sur place, les sorties conditionnelles deviennent un aiguillage, et Kafka, Elastic Agent ou Beats restent la source.</p>
         </div>
         <div class="head-actions">
+          <div class="seg" role="group" aria-label="Type de pipeline" data-role="ingest-seg"></div>
           <select class="btn" data-act="example" aria-label="Charger un exemple"></select>
           <button class="btn" data-act="open" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10.5V2.5M5 5.5l3-3 3 3M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>Ouvrir des fichiers</button>
-          <input type="file" multiple accept=".yml,.yaml,.json,.txt" hidden>
+          <input type="file" multiple hidden data-role="file">
         </div>
       </header>
-      <div class="files" data-role="files" hidden></div>
-      <div class="bench">
-        <section class="pane pane-in" aria-label="Pipeline d’ingestion source">
-          <div class="pane-bar">
-            <span class="pane-title">Pipeline d’ingestion <small data-role="fname"></small></span>
-            <div class="pane-tools">
-              <button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>
+      <!-- Pipelines d’ingestion Elasticsearch -->
+      <div class="bench-wrap" id="bench-ingest">
+        <div class="files" data-role="files" hidden></div>
+        <div class="bench">
+          <section class="pane pane-in" aria-label="Pipeline d’ingestion source">
+            <div class="pane-bar">
+              <span class="pane-title">Pipeline d’ingestion <small data-role="fname"></small></span>
+              <div class="pane-tools">
+                <button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>
+              </div>
             </div>
-          </div>
-          <div class="editor" data-role="editor"></div>
-          <div class="drop-veil"><div>Déposer pour traduire<small>Fichiers .yml ou .json : un onglet par pipeline</small></div></div>
-        </section>
-        <div class="seam" aria-hidden="true"><span class="seam-pulse"></span><span class="seam-knot"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></span></div>
-        <section class="pane pane-out" aria-label="Résultat">
-          <div class="verdict" data-role="verdict"></div>
-          <div class="tabs" role="tablist" data-role="tabs"></div>
-          <div class="out-body" data-role="out"></div>
-          <div class="out-foot">
-            <button class="btn primary" data-act="copy" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></svg>Copier la configuration</button>
-            <button class="btn dl" data-act="export" type="button" hidden>Télécharger (.zip)</button>
-            <span class="hint">Traduction locale : rien ne quitte votre navigateur.</span>
-          </div>
-        </section>
+            <div class="editor" data-role="editor"></div>
+            <div class="drop-veil"><div>Déposer pour traduire<small>Fichiers .yml ou .json : un onglet par pipeline</small></div></div>
+          </section>
+          <div class="seam" aria-hidden="true"><span class="seam-pulse"></span><span class="seam-knot"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></span></div>
+          <section class="pane pane-out" aria-label="Résultat">
+            <div class="verdict" data-role="verdict"></div>
+            <div class="tabs" role="tablist" data-role="tabs"></div>
+            <div class="out-body" data-role="out"></div>
+            <div class="out-foot">
+              <button class="btn primary" data-act="copy" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></svg>Copier la configuration</button>
+              <button class="btn dl" data-act="export" type="button" hidden>Télécharger (.zip)</button>
+              <span class="hint">Traduction locale : rien ne quitte votre navigateur.</span>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- Pipelines Logstash -->
+      <div class="bench-wrap" id="bench-ls" hidden>
+        <div class="files" data-role="files" hidden></div>
+        <div class="bench">
+          <section class="pane pane-in" aria-label="Pipeline source">
+            <div class="pane-bar">
+              <span class="pane-title">Pipeline Logstash <small data-role="fname"></small></span>
+              <div class="pane-tools">
+                <button class="btn quiet" data-act="clear" type="button" style="height:30px;padding:0 9px">Effacer</button>
+              </div>
+            </div>
+            <div class="editor" data-role="editor"></div>
+            <div class="drop-veil"><div>Déposer pour traduire<small>Fichiers .conf : un onglet par pipeline</small></div></div>
+          </section>
+          <div class="seam" aria-hidden="true"><span class="seam-pulse"></span><span class="seam-knot"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg></span></div>
+          <section class="pane pane-out" aria-label="Résultat">
+            <div class="verdict" data-role="verdict"></div>
+            <div class="tabs" role="tablist" data-role="tabs"></div>
+            <div class="out-body" data-role="out"></div>
+            <div class="out-foot">
+              <button class="btn primary" data-act="copy" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M11 5V3.5A1 1 0 0 0 10 2.5H3.5a1 1 0 0 0-1 1V10a1 1 0 0 0 1 1H5"/></svg>Copier la configuration</button>
+              <button class="btn dl" data-act="export" type="button" hidden>Télécharger (.zip)</button>
+              <span class="hint">Traduction locale : rien ne quitte votre navigateur.</span>
+            </div>
+          </section>
+        </div>
       </div>
     </section>
 
