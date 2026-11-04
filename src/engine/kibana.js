@@ -2403,10 +2403,88 @@ function analyzeSecurityRule(o, ctx) {
     });
   return [e];
 }
+/*
+ * Panneaux de tableau de bord. Depuis Kibana 9.4, 21 types de panneaux changent de nom (embeddable/common/bwc/
+ * transform_type.ts) : visualization devient legacy_vis, lens devient vis, search devient discover_session… Le moteur
+ * raisonne avec les anciens noms, qui sont aussi ceux des objets sauvegardés : un export 9.4 et un export 8.x du même
+ * tableau donnent la même analyse. Nouveau nom → ancien nom.
+ */
+export const KB_PANEL_ALIASES = Object.freeze({
+  vis: 'lens',
+  legacy_vis: 'visualization',
+  markdown: 'DASHBOARD_MARKDOWN',
+  time_slider_control: 'timeSlider',
+  range_slider_control: 'rangeSliderControl',
+  options_list_control: 'optionsListControl',
+  esql_control: 'esqlControl',
+  discover_session: 'search',
+  log_stream: 'LOG_STREAM_EMBEDDABLE',
+  aiops_change_point_chart: 'aiopsChangePointChart',
+  aiops_pattern_analysis: 'aiopsPatternAnalysisEmbeddable',
+  aiops_log_rate_analysis: 'aiopsLogRateAnalysisEmbeddable',
+  apm_alerting_latency_chart: 'APM_ALERTING_LATENCY_CHART_EMBEDDABLE',
+  apm_alerting_throughput_chart: 'APM_ALERTING_THROUGHPUT_CHART_EMBEDDABLE',
+  apm_alerting_failed_transactions_chart: 'APM_ALERTING_FAILED_TRANSACTIONS_CHART_EMBEDDABLE',
+  slo_overview: 'SLO_EMBEDDABLE',
+  slo_alerts: 'SLO_ALERTS_EMBEDDABLE',
+  slo_error_budget: 'SLO_ERROR_BUDGET_EMBEDDABLE',
+  slo_burn_rate: 'SLO_BURN_RATE_EMBEDDABLE',
+  synthetics_stats_overview: 'SYNTHETICS_STATS_OVERVIEW_EMBEDDABLE',
+  synthetics_monitors: 'SYNTHETICS_MONITORS_EMBEDDABLE'
+});
+const PANEL_TYPES = new Map(Object.entries(KB_PANEL_ALIASES));
+// Nom canonique (ancien nom) d’un type de panneau ; un type inconnu reste tel quel
+export const kbPanelType = t => (typeof t === 'string' && PANEL_TYPES.has(t) ? PANEL_TYPES.get(t) : t);
+// Panneaux dont Passerelle lit le contenu quand il est écrit dans le tableau de bord, et clé de configuration attendue
+const PANEL_CONTENT = new Map([
+  ['visualization', { kind: 'Visualisation', label: 'Visualize', expect: 'savedVis' }],
+  ['lens', { kind: 'Lens', label: 'Lens', expect: 'attributes' }],
+  ['search', { kind: 'Discover', label: 'Discover', expect: 'attributes' }]
+]);
+// Sections de l’API : { id, title, collapsed, grid, panels: […] } rangées au même niveau que les panneaux (un panneau,
+// lui, porte toujours un type). Les panneaux des sections sont remontés, dans l’ordre.
+function flattenPanels(list) {
+  const out = [];
+  for (const p of [].concat(list || [])) {
+    if (!isObj(p)) continue;
+    if (Array.isArray(p.panels) && !p.type) out.push(...flattenPanels(p.panels));
+    else out.push(p);
+  }
+  return out;
+}
+/*
+ * Un panneau, quelle que soit sa forme : stockée (panelsJSON : type, embeddableConfig, gridData, panelIndex, panelRefName)
+ * ou écrite par l’API (type, config, grid, id). Renvoie son type canonique, sa configuration, son identifiant dans le
+ * tableau de bord (préfixe des références « <panneau>:… »), son titre et l’objet enregistré qu’il cite, s’il en cite un.
+ */
+function normalizePanel(p, o, i) {
+  const grid = (isObj(p.gridData) && p.gridData) || (isObj(p.grid) && p.grid) || null;
+  // Forme de l’API : ni panelIndex ni gridData. Son « id » est celui du panneau, pas celui d’un objet enregistré.
+  const stored = !!(p.panelIndex || p.gridData);
+  const api = !stored && !!(p.grid || p.config !== undefined);
+  const raw = p.embeddableConfig || p.panelConfig || p.config;
+  const cfg = isObj(raw) ? raw : {};
+  const prefix = p.panelIndex || (api && p.id) || (grid && grid.i) || String(i);
+  const type = kbPanelType(p.type);
+  const refs = o.references || [];
+  let ref;
+  if (p.panelRefName) ref = refOf(o, p.panelRefName, prefix);
+  else {
+    // « <panneau>:savedObjectRef » (versions récentes) ; savedObjectId ou ref_id écrits dans la configuration d’un panneau
+    // qui ne porte pas son contenu ; id et type écrits dans le panneau (6.x)
+    const inline = isObj(cfg.savedVis) || isObj(cfg.attributes);
+    const cited = !inline && type && (cfg.savedObjectId || cfg.ref_id);
+    ref =
+      refs.find(r => r.name === `${prefix}:savedObjectRef`) ||
+      (typeof cited === 'string' && cited ? { id: cited, type } : null) ||
+      (!api && p.id && p.type ? { id: p.id, type } : null);
+  }
+  return { type: type || (ref && ref.type), cfg, prefix, ref, title: cfg.title || p.title };
+}
 function analyzeDashboard(o, ctx) {
   const a = o.attributes;
   const views = ctx.views;
-  const panels = [].concat(jsonAttr(a.panelsJSON) || a.panels || []).filter(isObj);
+  const panels = flattenPanels(jsonAttr(a.panelsJSON) || a.panels);
   const e = makeEntry('dashboard', o.id, a.title, { kind: `${panels.length} panneau${panels.length > 1 ? 'x' : ''}` });
   const range = a.timeRestore ? rangeSeconds(a.timeFrom, a.timeTo) : 900;
   if (a.timeRestore) e.kind += `, période ${a.timeFrom || '?'} → ${a.timeTo || 'now'}`;
@@ -2419,15 +2497,8 @@ function analyzeDashboard(o, ctx) {
   const out = [e];
   let byRef = 0;
   panels.forEach((p, i) => {
-    const cfgP = p.embeddableConfig || p.panelConfig || p.config || {};
-    const prefix = p.panelIndex || (p.gridData && p.gridData.i) || String(i);
-    // Référence : panelRefName (7.x et 8.x), « <panneau>:savedObjectRef » (versions récentes), id et type écrits dans le panneau (6.x)
-    const ref = p.panelRefName
-      ? refOf(o, p.panelRefName, prefix)
-      : (o.references || []).find(r => r.name === `${prefix}:savedObjectRef`) ||
-        (p.id && p.type ? { id: p.id, type: p.type } : null);
-    const type = p.type || (ref && ref.type);
-    const ptitle = cfgP.title || p.title;
+    // Référence : panelRefName (7.x et 8.x), « <panneau>:savedObjectRef », savedObjectId ou ref_id (9.x), id et type écrits dans le panneau (6.x)
+    const { type, cfg: cfgP, prefix, ref, title: ptitle } = normalizePanel(p, o, i);
     if (ref) {
       byRef++;
       const child = ctx.byKey.get(`${ref.type || type}:${ref.id}`);
@@ -2459,7 +2530,8 @@ function analyzeDashboard(o, ctx) {
         title: sv.title,
         visState: { type: sv.type, params: sv.params || {}, aggs: data.aggs || [] },
         kibanaSavedObjectMeta: { searchSourceJSON: data.searchSource || {} },
-        savedSearchRefName: data.savedSearchRefName || sv.savedSearchRefName
+        savedSearchRefName: data.savedSearchRefName || sv.savedSearchRefName,
+        savedSearchId: data.savedSearchId || sv.savedSearchId
       };
       entries = analyzeVisualization(
         synth('visualization', attrs),
@@ -2486,24 +2558,34 @@ function analyzeDashboard(o, ctx) {
       });
       m.issues.push(mapIssue());
       entries = [m];
-    } else if (type === 'links' || type === 'image' || type === 'DASHBOARD_MARKDOWN' || type === 'markdown') {
+    } else if (type === 'links' || type === 'image' || type === 'DASHBOARD_MARKDOWN') {
       e.issues.push({
         kind: 'review',
-        label: `panneau ${type}`,
+        label: `panneau ${p.type}`,
         detail: 'Contenu statique (texte, image, liens) à recréer.',
         hours: 0.1
       });
       return;
+    } else if (PANEL_CONTENT.has(type)) {
+      // Type connu, mais sans le contenu qu’un export d’objets sauvegardés y écrit : à reprendre, pas « non reconnu »
+      const spec = PANEL_CONTENT.get(type);
+      const m = makeEntry(type, key, ptitle || `Panneau ${i + 1}`, { kind: spec.kind, parent: e.key, byValue: true });
+      m.issues.push({
+        kind: 'todo',
+        label: `panneau ${spec.label} au format non lu`,
+        detail: `La configuration du panneau (${p.type}) n’a pas l’objet « ${spec.expect} » d’un export d’objets sauvegardés : elle est écrite dans le format aplati de l’API (« as code ») ou dans un format que Passerelle ne lit pas encore, et sa requête n’est pas lue. Le panneau est à recréer.`
+      });
+      entries = [m];
     } else {
       const m = makeEntry('other', key, ptitle || `Panneau ${i + 1}`, {
-        kind: type || 'panneau',
+        kind: p.type || 'panneau',
         parent: e.key,
         byValue: true
       });
       m.verdict = 'unrecognized';
       m.issues.push({
         kind: 'todo',
-        label: `panneau ${type || 'inconnu'}`,
+        label: `panneau ${p.type || 'inconnu'}`,
         detail: 'Type de panneau sans traduction automatique : à recréer.'
       });
       entries = [m];
@@ -2639,7 +2721,17 @@ export function kibanaInventory(text, cfg, opts) {
       else if (t === 'search') list = analyzeSearch(o, ctx, opt);
       else if (t === 'query') list = analyzeSavedQuery(o, ctx);
       else if (t === 'visualization') list = analyzeVisualization(o, ctx, opt);
-      else if (t === 'lens') list = analyzeLens(o, ctx, opt);
+      else if (t === 'markdown' || t === 'vega') {
+        // Visualisations enregistrées sous leur propre type (Kibana 9.x) : lues comme une visualisation de ce type
+        const attrs = { title: o.attributes.title || o.attributes.name, visState: { type: t } };
+        list = analyzeVisualization(
+          { type: 'visualization', id: o.id, attributes: attrs, references: o.references },
+          ctx,
+          opt
+        );
+        // Un tableau de bord cite l’objet par son type : la clé de l’entrée suit
+        for (const x of list) x.key = `${t}:${o.id}`;
+      } else if (t === 'lens') list = analyzeLens(o, ctx, opt);
       else if (t === 'dashboard') list = analyzeDashboard(o, ctx);
       else if (t === 'alert' || t === 'rule') list = analyzeRule(o, ctx);
       else if (t === 'security-rule') list = analyzeSecurityRule(o, ctx);

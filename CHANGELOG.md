@@ -2,6 +2,17 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Corrigé
+
+- **Kibana 9.4 et suivants** : un tableau de bord dont les panneaux portent les nouveaux noms (`legacy_vis`, `vis`, `discover_session`, `markdown`…) se lit comme celui de Kibana 8.x. Kibana 9.4 renomme 21 types de panneaux ; Passerelle ne connaissait que les anciens, et un panneau par valeur (la visualisation écrite dans le tableau de bord) tombait dans « type de panneau sans traduction », sans SQL. Le SQL, les verdicts et l’effort d’un même tableau sont désormais identiques sous les anciens et sous les nouveaux noms.
+  - **Forme de l’API** (`{ type, grid, id, config }`) : l’identifiant d’un panneau n’est plus pris pour celui d’un objet enregistré, qui le déclarait « absent de l’export » ; les panneaux rangés dans une section sont lus et comptés, la section n’est plus lue comme un panneau inconnu. Un objet cité par `savedObjectId` ou `ref_id` dans la configuration du panneau est retrouvé ; s’il manque dans le fichier, le panneau reste signalé « absent de l’export ».
+  - Un panneau `vis`, `legacy_vis` ou `discover_session` dont la configuration n’a pas le contenu d’un export d’objets sauvegardés (Lens « as code » aplati, par exemple) est « à reprendre », avec une remarque qui dit ce qui manque, et non plus « non reconnu ».
+  - Une visualisation par valeur bâtie sur une recherche enregistrée (`savedSearchId`) reprend la requête de cette recherche.
+  - Les objets `markdown` et `vega` enregistrés sous leur propre type sont lus comme des visualisations (Markdown prêt, Vega à reprendre) au lieu d’être « non reconnus », et un tableau de bord qui les cite les relie.
+  - Pas encore traités : les contrôles 9.4+ (`pinned_panels`), que Passerelle ne lit toujours pas, et les panneaux applicatifs (SLO, APM, ML, Synthetics…), qui restent « non reconnus » avec le message générique.
+
 ## [1.7.2] - 2026-11-04
 
 ### Modifié
