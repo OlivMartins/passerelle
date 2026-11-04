@@ -2,6 +2,22 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Corrigé
+
+- **Tri des groupes sur un chemin vers une sous-agrégation** : un `terms` ordonné par `"f>m"` (ou par `"f>_count"`, voir plus bas) produisait `ORDER BY f`, une colonne qui n’existe pas, et ClickHouse refusait la requête. Le moteur lit désormais les chemins comme Elasticsearch (`f>g>m`, `f>s.avg`, `f>p[99.9]`, `f`, `f.doc_count`), sur `terms`, `multi_terms`, `histogram`, `date_histogram`, dans `bucket_sort` et dans les `buckets_path` des pipelines (`bucket_script`, `bucket_selector`, `derivative`, `cumulative_sum`…), qui avaient le même défaut.
+  - **Cible sans colonne sur le niveau trié** (filtre qui porte aussi un regroupement, filtres imbriqués, `missing`) : la valeur est calculée pour le tri par un combinateur `-If`, et le top N qui restreint les niveaux inférieurs lit la même valeur.
+  - **Centiles** : `p.50` trie sur cet élément du tableau, et non plus sur le tableau entier (le premier centile décidait alors du classement) ; un centile ou un rang absent de la liste de la mesure est calculé pour le tri, comme le fait Elasticsearch.
+  - **Groupes sans valeur** : ils sont classés comme par Elasticsearch 8 et 9 (`Double.compare`) : NaN (`avg`, centiles) et +∞ (`min`) en tête d’un tri décroissant, −∞ (`max`) en tête d’un tri croissant, d’où un `NULLS FIRST` ; `sum` et les comptages valent 0. Elasticsearch 7.17 mettait NaN en dernier dans les deux sens : c’est un écart connu du banc. Avec `gap_policy: skip`, le défaut, `bucket_sort` écarte le groupe qui n’a aucune de ses valeurs de tri (`HAVING isNotNull(…)`).
+  - **Chemins invalides** : une agrégation inconnue, un chemin qui traverse un regroupement à plusieurs groupes, une mesure multiple sans clé sont « à reprendre » avec la raison, au lieu d’un SQL qui échoue sur une colonne absente.
+  - **`f>_count` et `f._count` dans un tri** : Elasticsearch les refuse (HTTP 400) et ne les accepte que dans un pipeline ou un `bucket_sort`. La traduction refuse de même : le regroupement est « à reprendre », et le message donne l’écriture valide d’un tri, `f` ou `f.doc_count`.
+- **Visualisations Kibana** : le contournement n’a plus lieu d’être.
+  - Un regroupement trié sur une mesure filtrée, ou sur le rang d’un centile non entier, est trié sur cette valeur ; la remarque « tri sur … » et le tri par nombre de documents disparaissent.
+  - Une dérivée, un cumul ou une moyenne mobile posés sur une mesure filtrée sont traduits au lieu d’être « à reprendre ».
+  - `single_percentile` trie sur son centile, et non sur un `.50` écrit en dur.
+  - Une mesure qui trie un regroupement parent est aussi calculée sur ce niveau, comme le fait Kibana : le top N lisait une colonne absente, et le SQL échouait.
+
 ## [1.7.3] - 2026-11-04
 
 ### Ajouté

@@ -9,6 +9,7 @@
  *                'raison'                       quel que soit le schéma et le fuseau
  *                { N: 'raison' }                seulement avec le schéma Nullable (D : valeurs par défaut)
  *                { '@Europe/Paris': 'raison' }  seulement quand le serveur ClickHouse est dans ce fuseau
+ *                { es7: 'raison' }              seulement sur cette version majeure d’Elasticsearch
  *   unsupported  construction valide pour Elasticsearch mais hors de portée de la traduction : le cas
  *              réussit si elle est déclarée « à reprendre » et si le SQL s’arrête au lieu de répondre
  *   tz         fuseaux du serveur ClickHouse à essayer (défaut : UTC seul)
@@ -26,6 +27,20 @@ const STRICT = { clickhouse: { text_match: 'strict' } };
 const total = query => ({ size: 0, track_total_hits: true, query });
 const perDay = aggs => ({ size: 0, aggs: { d: { date_histogram: { field: TS, calendar_interval: 'day' }, aggs } } });
 const EPOCH = k => Date.parse(dataset()[k]['@timestamp']); // horodatage exact du document k
+// Tri des groupes sur un chemin vers une sous-agrégation
+const LATENCE = { avg: { field: 'latency_ms' } };
+const ERREURS = { range: { status: { gte: 500 } } };
+// Filtre vide pour un seul service (api) : sa place dans le tri ne dépend pas d’un départage
+const SAUF_API = { bool: { must_not: [{ term: { service: 'api' } }] } };
+const triService = (order, aggs, size) => ({
+  size: 0,
+  aggs: { svc: { terms: { field: 'service', order, ...(size ? { size } : {}) }, aggs } }
+});
+const sousErreurs = aggs => ({ f: { filter: ERREURS, aggs } });
+const sansApi = aggs => ({ f: { filter: SAUF_API, aggs } });
+const NAN_ES7 = {
+  es7: 'Elasticsearch 7.17 met NaN en dernier dans les deux sens ; 8 et 9 le mettent en tête d’un tri décroissant'
+};
 const CLASSE =
   "if (doc['latency_ms'].value < 100) { emit('rapide'); } else if (doc['latency_ms'].value < 1000) { emit('normal'); } else { emit('lent'); }";
 
@@ -223,6 +238,178 @@ export const CASES = [
     id: 'agg_terms_tri_cle',
     dsl: { size: 0, aggs: { h: { terms: { field: 'host', size: 20, order: { _key: 'asc' } } } } }
   },
+  // Tri sur un chemin : mesure sous un filtre, valeur d’une mesure multiple, nombre de documents du filtre
+  { id: 'agg_terms_tri_filtre_mesure', dsl: triService({ 'f>m': 'desc' }, sousErreurs({ m: LATENCE })) },
+  {
+    id: 'agg_terms_tri_filtre_stats',
+    dsl: triService({ 'f>s.avg': 'asc' }, sousErreurs({ s: { stats: { field: 'latency_ms' } } }))
+  },
+  { id: 'agg_terms_tri_filtre_seul', dsl: triService({ f: 'desc' }, sousErreurs({})) },
+  { id: 'agg_terms_tri_filtre_doc_count', dsl: triService({ 'f.doc_count': 'asc' }, sousErreurs({ m: LATENCE })) },
+  {
+    id: 'agg_terms_tri_mesure_value',
+    dsl: triService({ 'lat.value': 'desc' }, { lat: LATENCE })
+  },
+  // Elasticsearch ne lit _count sur un filtre que dans un pipeline (HTTP 400 dans un tri : f ou f.doc_count) ; la
+  // traduction refuse de même, avec l’écriture valide dans son message
+  { id: 'agg_terms_tri_filtre_chemin_count', dsl: triService({ 'f>_count': 'desc' }, sousErreurs({ m: LATENCE })) },
+  { id: 'agg_terms_tri_filtre_point_count', dsl: triService({ 'f._count': 'desc' }, sousErreurs({ m: LATENCE })) },
+  // Groupe vide : NaN pour avg et les centiles, +∞ pour min, −∞ pour max, 0 pour sum. Elasticsearch 8 et 9 les classent
+  // par Double.compare : NaN et +∞ en tête d’un tri décroissant, −∞ en tête d’un tri croissant
+  { id: 'agg_terms_tri_vide_avg_desc', known: NAN_ES7, dsl: triService({ 'f>m': 'desc' }, sansApi({ m: LATENCE })) },
+  {
+    id: 'agg_terms_tri_vide_stats_avg_desc',
+    known: NAN_ES7,
+    dsl: triService({ 'f>s.avg': 'desc' }, sansApi({ s: { stats: { field: 'bytes' } } }))
+  },
+  {
+    id: 'agg_terms_tri_vide_centile_desc',
+    known: NAN_ES7,
+    tol: 0.05,
+    dsl: triService({ 'f>p.50': 'desc' }, sansApi({ p: { percentiles: { field: 'latency_ms', percents: [50] } } }), 1)
+  },
+  { id: 'agg_terms_tri_vide_avg_asc', dsl: triService({ 'f>m': 'asc' }, sansApi({ m: LATENCE })) },
+  { id: 'agg_terms_tri_vide_sum_asc', dsl: triService({ 'f>m': 'asc' }, sansApi({ m: { sum: { field: 'bytes' } } })) },
+  {
+    id: 'agg_terms_tri_vide_min_desc',
+    dsl: triService({ 'f>m': 'desc' }, sansApi({ m: { min: { field: 'bytes' } } }))
+  },
+  { id: 'agg_terms_tri_vide_min_asc', dsl: triService({ 'f>m': 'asc' }, sansApi({ m: { min: { field: 'bytes' } } })) },
+  { id: 'agg_terms_tri_vide_max_asc', dsl: triService({ 'f>m': 'asc' }, sansApi({ m: { max: { field: 'bytes' } } })) },
+  {
+    id: 'agg_terms_tri_vide_max_desc',
+    dsl: triService({ 'f>m': 'desc' }, sansApi({ m: { max: { field: 'bytes' } } }))
+  },
+  {
+    id: 'agg_terms_tri_vide_stats_min_desc',
+    dsl: triService({ 'f>s.min': 'desc' }, sansApi({ s: { stats: { field: 'bytes' } } }))
+  },
+  {
+    id: 'agg_terms_tri_vide_stats_max_asc',
+    dsl: triService({ 'f>s.max': 'asc' }, sansApi({ s: { stats: { field: 'bytes' } } }))
+  },
+  // Plusieurs groupes vides : départagés par clé croissante, en tête
+  {
+    id: 'agg_terms_tri_vides_departages',
+    dsl: triService(
+      { 'f>m': 'desc' },
+      { f: { filter: { term: { service: 'Search' } }, aggs: { m: { min: { field: 'bytes' } } } } }
+    )
+  },
+  // Le top N choisi par le chemin restreint les requêtes des niveaux inférieurs. Les parents y sortent par clé, pas par
+  // la mesure : ces cas retiennent des groupes dont les deux ordres coïncident
+  {
+    id: 'agg_terms_tri_filtre_avec_enfant',
+    dsl: triService({ 'f>m': 'desc' }, { ...sousErreurs({ m: LATENCE }), h: { terms: { field: 'host', size: 2 } } }, 2)
+  },
+  // Filtre qui porte aussi un regroupement, filtres imbriqués, missing : la cible n’a pas de colonne sur le niveau trié
+  {
+    id: 'agg_terms_tri_filtre_mixte',
+    dsl: triService(
+      { 'f>m': 'desc' },
+      { f: { filter: { term: { level: 'ERROR' } }, aggs: { m: LATENCE, h: { terms: { field: 'host', size: 2 } } } } },
+      2
+    )
+  },
+  {
+    id: 'agg_terms_tri_filtre_mixte_seul',
+    dsl: triService({ f: 'desc' }, { f: { filter: ERREURS, aggs: { h: { terms: { field: 'host', size: 2 } } } } }, 2)
+  },
+  {
+    id: 'agg_terms_tri_filtres_imbriques',
+    dsl: triService(
+      { 'f1>f2>m': 'asc' },
+      {
+        f1: {
+          filter: { term: { level: 'ERROR' } },
+          aggs: { f2: { filter: ERREURS, aggs: { m: LATENCE } } }
+        }
+      },
+      2
+    )
+  },
+  {
+    id: 'agg_terms_tri_missing',
+    dsl: triService({ 'absent>m': 'asc' }, { absent: { missing: { field: 'env' }, aggs: { m: LATENCE } } }, 1)
+  },
+  // Centiles et rangs : la clé désigne un élément, pas le tableau, dont le premier centile déciderait du classement.
+  // size: 1 retient un écart net entre les deux moteurs ; les centiles sont en ordre croissant, comme Elasticsearch les rend
+  {
+    id: 'agg_terms_tri_centile_cle',
+    tol: 0.05,
+    dsl: triService({ 'p.99': 'asc' }, { p: { percentiles: { field: 'latency_ms', percents: [50, 99] } } }, 1)
+  },
+  {
+    id: 'agg_terms_tri_centile_crochets',
+    tol: 0.05,
+    dsl: triService({ 'p[37.5]': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [37.5, 99] } } }, 1)
+  },
+  {
+    id: 'agg_terms_tri_centile_hors_liste',
+    tol: 0.05,
+    dsl: triService({ 'p.70': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [99] } } }, 1)
+  },
+  {
+    id: 'agg_terms_tri_filtre_centile',
+    tol: 0.1,
+    dsl: triService(
+      { 'f>p.99': 'asc' },
+      sousErreurs({ p: { percentiles: { field: 'latency_ms', percents: [50, 99] } } }),
+      1
+    )
+  },
+  {
+    id: 'agg_terms_tri_rang_cle',
+    tol: 0.05,
+    dsl: triService({ 'r.1500': 'asc' }, { r: { percentile_ranks: { field: 'latency_ms', values: [1500] } } }, 1)
+  },
+  {
+    id: 'agg_terms_tri_rang_crochets',
+    tol: 0.05,
+    dsl: triService({ 'r[1500.5]': 'asc' }, { r: { percentile_ranks: { field: 'latency_ms', values: [1500.5] } } }, 1)
+  },
+  // Le même chemin sur les autres regroupements triables
+  {
+    id: 'agg_histogram_tri_filtre',
+    dsl: {
+      size: 0,
+      aggs: {
+        s: {
+          histogram: { field: 'status', interval: 100, order: { 'f>m': 'desc' } },
+          aggs: { f: { filter: { term: { level: 'ERROR' } }, aggs: { m: LATENCE } } }
+        }
+      }
+    }
+  },
+  {
+    id: 'agg_date_histogram_tri_filtre',
+    dsl: {
+      size: 0,
+      aggs: {
+        d: {
+          date_histogram: { field: TS, calendar_interval: 'day', order: { 'f>m': 'asc' } },
+          aggs: sousErreurs({ m: LATENCE })
+        }
+      }
+    }
+  },
+  // Chemins qu’Elasticsearch refuse dans un tri : la traduction les déclare « à reprendre »
+  { id: 'agg_terms_tri_inconnu', dsl: triService({ absent: 'desc' }, { lat: LATENCE }) },
+  { id: 'agg_terms_tri_chemin_inconnu', dsl: triService({ 'f>absent': 'desc' }, sousErreurs({ m: LATENCE })) },
+  {
+    id: 'agg_terms_tri_sous_terms',
+    dsl: triService({ 'h>m': 'desc' }, { h: { terms: { field: 'host' }, aggs: { m: LATENCE } } })
+  },
+  { id: 'agg_terms_tri_stats_sans_cle', dsl: triService({ s: 'desc' }, { s: { stats: { field: 'bytes' } } }) },
+  {
+    id: 'agg_terms_tri_stats_cle_inconnue',
+    dsl: triService({ 's.absente': 'desc' }, { s: { stats: { field: 'bytes' } } })
+  },
+  {
+    id: 'agg_terms_tri_centiles_sans_cle',
+    dsl: triService({ p: 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [50] } } })
+  },
+  { id: 'agg_terms_tri_filtre_cle', dsl: triService({ 'f.avg': 'desc' }, sousErreurs({ m: LATENCE })) },
   {
     id: 'agg_terms_include',
     dsl: { size: 0, aggs: { h: { terms: { field: 'host', include: ['web-1', 'web-2', 'Web-A'] } } } }
@@ -897,6 +1084,76 @@ export const CASES = [
         }
       }
     }
+  },
+  // Chemins vers une mesure ou un nombre de documents sous un filtre
+  {
+    id: 'pipeline_bucket_script_filtre_chemin',
+    dsl: triService(
+      { _key: 'asc' },
+      {
+        ...sousErreurs({ m: LATENCE }),
+        part: {
+          bucket_script: {
+            buckets_path: { e: 'f>_count', l: 'f>m', t: '_count' },
+            script: 'params.e * params.l / params.t'
+          }
+        }
+      }
+    )
+  },
+  {
+    id: 'pipeline_bucket_selector_filtre_chemin',
+    dsl: triService(
+      { _key: 'asc' },
+      {
+        ...sousErreurs({ m: LATENCE }),
+        garde: { bucket_selector: { buckets_path: { v: 'f>m' }, script: 'params.v > 1500' } }
+      }
+    )
+  },
+  {
+    id: 'pipeline_bucket_sort_filtre_mesure',
+    dsl: triService(
+      { _key: 'asc' },
+      { ...sousErreurs({ m: LATENCE }), top: { bucket_sort: { sort: [{ 'f>m': { order: 'desc' } }], size: 3 } } }
+    )
+  },
+  {
+    id: 'pipeline_bucket_sort_filtre_count',
+    dsl: triService(
+      { _key: 'asc' },
+      { ...sousErreurs({ m: LATENCE }), top: { bucket_sort: { sort: [{ 'f>_count': { order: 'asc' } }], size: 3 } } }
+    )
+  },
+  // bucket_sort lit NaN et les infinis d’un groupe vide comme des trous : le groupe est écarté (gap_policy skip) ; sum vaut 0
+  {
+    id: 'pipeline_bucket_sort_vide_min_desc',
+    dsl: triService(
+      { _key: 'asc' },
+      { ...sansApi({ m: { min: { field: 'bytes' } } }), top: { bucket_sort: { sort: [{ 'f>m': { order: 'desc' } }] } } }
+    )
+  },
+  {
+    id: 'pipeline_bucket_sort_vide_avg_desc',
+    dsl: triService(
+      { _key: 'asc' },
+      { ...sansApi({ m: LATENCE }), top: { bucket_sort: { sort: [{ 'f>m': { order: 'desc' } }] } } }
+    )
+  },
+  {
+    id: 'pipeline_bucket_sort_vide_sum_desc',
+    dsl: triService(
+      { _key: 'asc' },
+      { ...sansApi({ m: { sum: { field: 'bytes' } } }), top: { bucket_sort: { sort: [{ 'f>m': { order: 'desc' } }] } } }
+    )
+  },
+  {
+    id: 'pipeline_derivative_filtre_chemin',
+    dsl: perDay({ ...sousErreurs({ m: LATENCE }), dv: { derivative: { buckets_path: 'f>m' } } })
+  },
+  {
+    id: 'pipeline_cumulative_sum_filtre_count',
+    dsl: perDay({ ...sousErreurs({}), cs: { cumulative_sum: { buckets_path: 'f>_count' } } })
   },
   {
     id: 'pipeline_bucket_sort',

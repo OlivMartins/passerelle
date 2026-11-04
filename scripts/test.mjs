@@ -1389,6 +1389,34 @@ check(
   JSON.parse(kbRef).reduce((n, x) => n + x[3].length, 0) >= 19,
   'panneaux 9.4+ : la comparaison porte sur toutes les requêtes de l’exemple'
 );
+// Lens : un terms trié sur une colonne « comptage filtré » trie sur « filtre » (« filtre._count » est refusé dans un tri)
+{
+  const lensFiltre = kbWeb
+    .split('\n')
+    .filter(Boolean)
+    .map(l => {
+      const o = JSON.parse(l);
+      if (o.type === 'lens' && o.id.endsWith('l001')) {
+        const colonne = o.attributes.state.datasourceStates.formBased.layers.lay1.columns['c-count'];
+        delete colonne.timeScale;
+        colonne.filter = { query: 'http.response.status_code >= 500', language: 'kuery' };
+        colonne.label = 'Erreurs';
+      }
+      return JSON.stringify(o);
+    })
+    .join('\n');
+  const entree = E.kibanaInventory(lensFiltre, kibanaCfg, {}).entries.find(
+    x => x.title === 'Requêtes par seconde et par méthode'
+  );
+  const sql = entree ? entree.queries.map(q => q.sql).join('\n') : '';
+  check(
+    entree &&
+      entree.verdict !== 'todo' &&
+      /ORDER BY periode ASC, filtre_Erreurs_doc_count DESC, http_request_method ASC/.test(sql),
+    'Lens, tri des groupes sur un comptage filtré : trié sur le nombre de documents du filtre, pas « à reprendre »',
+    sql
+  );
+}
 // Forme stockée, panneaux sous leurs nouveaux noms (legacy_vis, vis, discover_session…)
 const kbStored = kbWebWith((o, panels) => {
   o.attributes.panelsJSON = JSON.stringify(
@@ -1903,10 +1931,98 @@ const kbVOrdered = kbVOne(
   ])
 );
 check(
-  kbVLabels(kbVOrdered).includes('review:tri sur une mesure filtrée') &&
-    /ORDER BY doc_count DESC, service_name ASC/.test(kbVSql(kbVOrdered)) &&
-    !/ORDER BY filtre\b/.test(kbVSql(kbVOrdered)),
-  'visualisation : tri sur une mesure filtrée → par nombre de documents, signalé (jamais « ORDER BY » sur une colonne absente)'
+  kbVOrdered.verdict === 'ready' &&
+    kbVLabels(kbVOrdered).length === 0 &&
+    /ORDER BY filtre_avg_event_duration DESC NULLS FIRST, service_name ASC/.test(kbVSql(kbVOrdered)),
+  'visualisation : tri sur une mesure filtrée → sur la colonne de la mesure, sans remarque'
+);
+const kbVOrderedCount = kbVOne(
+  kbVis('Tri sur un comptage filtré', 'table', [
+    kbVFiltered('1', 'event.outcome:failure', { type: 'count', params: {} }),
+    kbVTerms('3', 'service.name', '1')
+  ])
+);
+check(
+  kbVLabels(kbVOrderedCount).length === 0 &&
+    /ORDER BY filtre_doc_count DESC, service_name ASC/.test(kbVSql(kbVOrderedCount)),
+  'visualisation : tri sur un comptage filtré → sur le nombre de documents du filtre'
+);
+const kbVOrderedCustom = kbVOne(
+  kbVis('Tri personnalisé', 'table', [
+    kbVCount,
+    {
+      id: '3',
+      enabled: true,
+      type: 'terms',
+      schema: 'bucket',
+      params: {
+        field: 'service.name',
+        size: 3,
+        order: 'asc',
+        orderBy: 'custom',
+        orderAgg: kbVFiltered('3-orderAgg', 'event.outcome:failure', {
+          type: 'max',
+          params: { field: 'event.duration' }
+        })
+      }
+    }
+  ])
+);
+check(
+  kbVLabels(kbVOrderedCustom).length === 0 &&
+    /ORDER BY filtre_max_event_duration ASC NULLS FIRST, service_name ASC/.test(kbVSql(kbVOrderedCustom)),
+  'visualisation : tri personnalisé sur une mesure filtrée → la mesure est calculée, un groupe vide suit Elasticsearch'
+);
+const kbVOrderedParent = kbVOne(
+  kbVis('Tri du niveau parent', 'table', [
+    kbVFiltered('1', 'http.response.status_code >= 500', kbVAvgDuration),
+    kbVTerms('3', 'service.name', '1'),
+    kbVTerms('4', 'host.name', '_key')
+  ])
+);
+check(
+  kbVOrderedParent.verdict === 'ready' &&
+    /ORDER BY filtre_avg_event_duration DESC NULLS FIRST, service_name ASC/.test(kbVSql(kbVOrderedParent)) &&
+    /ORDER BY avgIfOrNull\(event\.duration, http\.response\.status_code >= 500\) DESC NULLS FIRST, service_name ASC\n\s+LIMIT 3/.test(
+      kbVSql(kbVOrderedParent)
+    ),
+  'visualisation : mesure qui trie un niveau parent → calculée aussi sur ce niveau, et le top N la lit (jamais de colonne absente)'
+);
+const kbVOrderedPlainParent = kbVOne(
+  kbVis('Tri du niveau parent, mesure simple', 'table', [
+    { id: '1', enabled: true, type: 'avg', schema: 'metric', params: { field: 'event.duration' } },
+    { id: '2', enabled: true, type: 'max', schema: 'metric', params: { field: 'event.duration' } },
+    kbVTerms('3', 'service.name', '2'),
+    kbVTerms('4', 'host.name', '2')
+  ])
+);
+check(
+  kbVOrderedPlainParent.verdict === 'ready' &&
+    /ORDER BY max\(event\.duration\) DESC, service_name ASC\n\s+LIMIT 3/.test(kbVSql(kbVOrderedPlainParent)) &&
+    /avg\(event\.duration\) AS avg_event_duration,\n\s+max\(event\.duration\) AS max_event_duration\nFROM[^;]*GROUP BY service_name, host_name/.test(
+      kbVSql(kbVOrderedPlainParent)
+    ),
+  'visualisation : mesure simple qui trie un niveau parent → même chose, et les mesures du dernier niveau gardent leur rang'
+);
+const kbVPercentile = (type, params) =>
+  kbVOne(
+    kbVis('Centile', 'table', [
+      { id: '2', enabled: true, type, schema: 'metric', params: { field: 'event.duration', ...params } },
+      kbVTerms('3', 'service.name', '2')
+    ])
+  );
+check(
+  /ORDER BY median_event_duration\[1\] DESC/.test(kbVSql(kbVPercentile('median', {}))) &&
+    /ORDER BY single_percentile_event_duration\[1\] DESC/.test(
+      kbVSql(kbVPercentile('single_percentile', { percentile: 95 }))
+    ) &&
+    /ORDER BY single_percentile_event_duration\[1\] DESC/.test(
+      kbVSql(kbVPercentile('single_percentile', { percentile: 99.9 }))
+    ) &&
+    /ORDER BY percentiles_event_duration\[2\] DESC/.test(
+      kbVSql(kbVPercentile('percentiles', { percents: [25, 50, 75] }))
+    ),
+  'visualisation : tri sur un centile → l’élément du tableau qui porte ce centile'
 );
 const kbVRank = (value, orderBy) =>
   kbVOne(
@@ -1935,11 +2051,11 @@ check(
   'visualisation : tri sur un rang de centile entier → colonne du rang'
 );
 check(
-  kbVLabels(kbVRank(99.5, '2')).includes('review:tri sur un rang de centile non entier') &&
-    /ORDER BY doc_count DESC/.test(kbVSql(kbVRank(99.5, '2'))) &&
+  /ORDER BY single_percentile_rank_event_duration_99_5 DESC, service_name ASC/.test(kbVSql(kbVRank(99.5, '2'))) &&
+    kbVLabels(kbVRank(99.5, '2')).length === 0 &&
     kbVLabels(kbVRank('', '_key')).includes('todo:mesure single_percentile_rank sans valeur') &&
     kbVRank('', '_key').verdict === 'todo',
-  'visualisation : rang de centile non entier trié → signalé ; sans valeur → à reprendre'
+  'visualisation : tri sur un rang de centile non entier → colonne du rang ; sans valeur → à reprendre'
 );
 
 // Pipelines frères : moyenne, somme, minimum, maximum des groupes d’un regroupement personnalisé
@@ -2006,9 +2122,281 @@ const kbVParent = kbVOne(
   ])
 );
 check(
-  kbVLabels(kbVParent).includes('todo:pipeline derivative') && kbVParent.verdict === 'todo',
-  'visualisation : dérivée d’une mesure filtrée → à reprendre (le moteur ne désigne pas une mesure sous un filtre)'
+  !kbVLabels(kbVParent).some(l => l.startsWith('todo:')) &&
+    /filtre_avg_event_duration - lagInFrame\(toNullable\(filtre_avg_event_duration\), 1\) OVER/.test(kbVSql(kbVParent)),
+  'visualisation : dérivée d’une mesure filtrée → sur la colonne de la mesure'
 );
+const kbVParentCount = kbVOne(
+  kbVis('Cumul d’un comptage filtré', 'line', [
+    kbVFiltered('1', 'a:b', { type: 'count', params: {} }),
+    { id: '2', enabled: true, type: 'cumulative_sum', schema: 'metric', params: { metricAgg: '1' } },
+    {
+      id: '3',
+      enabled: true,
+      type: 'date_histogram',
+      schema: 'segment',
+      params: { field: '@timestamp', interval: '1h' }
+    }
+  ])
+);
+check(
+  !kbVLabels(kbVParentCount).some(l => l.startsWith('todo:')) &&
+    /sum\(filtre_doc_count\) OVER/.test(kbVSql(kbVParentCount)),
+  'visualisation : cumul d’un comptage filtré → sur le nombre de documents du filtre'
+);
+
+/* ---------- Chemins vers une sous-agrégation (tri et pipelines) ---------- */
+const chemin = (dsl, cfg) => E.translateDSL(JSON.stringify(dsl), cfg || E.DEFAULT_CONFIG, { index: 'logs' });
+const chAvg = { avg: { field: 'latency_ms' } };
+const chErr = { range: { status: { gte: 500 } } };
+const chTri = (order, aggs, terms) => ({
+  size: 0,
+  aggs: { svc: { terms: { field: 'service', order, ...terms }, aggs } }
+});
+const chFiltre = aggs => ({ f: { filter: chErr, aggs } });
+const chCols = {
+  m: chAvg,
+  s: { stats: { field: 'bytes' } },
+  p: { percentiles: { field: 'latency_ms', percents: [50, 99.9] } },
+  r: { percentile_ranks: { field: 'latency_ms', values: [500, 99.5] } }
+};
+for (const [path, column] of [
+  ['f>m', 'f_m DESC NULLS FIRST'],
+  ['f>s.avg', 'f_s_avg DESC NULLS FIRST'],
+  ['f>s.count', 'f_s_count DESC'],
+  ['f>m.value', 'f_m DESC NULLS FIRST'],
+  ['f', 'f_doc_count DESC'],
+  ['f.doc_count', 'f_doc_count DESC'],
+  ['f>p.50', 'f_p[1] DESC NULLS FIRST'],
+  ['f>p[99.9]', 'f_p[2] DESC NULLS FIRST'],
+  ['f>p[50.0]', 'f_p[1] DESC NULLS FIRST'],
+  ['f>r.500', 'f_r_500 DESC NULLS FIRST'],
+  ['f>r[500.0]', 'f_r_500 DESC NULLS FIRST'],
+  ['f>r[99.5]', 'f_r_99_5 DESC NULLS FIRST']
+]) {
+  const r = chemin(chTri({ [path]: 'desc' }, chFiltre(chCols)));
+  check(
+    r.sql.includes(`ORDER BY ${column}, svc ASC`) && !r.stats.ko && !r.notes.some(n => n.title.startsWith('tri sur')),
+    `chemin de tri ${path} → ${column}`
+  );
+}
+// Elasticsearch refuse _count sur un filtre dans un tri (HTTP 400) : « à reprendre », avec l’écriture valide dans le message
+for (const path of ['f>_count', 'f._count']) {
+  const r = chemin(chTri({ [path]: 'desc' }, chFiltre(chCols)));
+  check(
+    r.stats.ko === 1 &&
+      !r.sql.includes('ORDER BY') &&
+      r.notes.some(
+        n =>
+          n.level === 'err' &&
+          n.detail.includes(`tri sur « ${path} »`) &&
+          n.detail.includes('« f » ou « f.doc_count »') &&
+          n.detail.includes('que dans un pipeline')
+      ),
+    `chemin de tri ${path} → à reprendre (Elasticsearch le refuse), le message donne f et f.doc_count`
+  );
+}
+check(
+  ['histogram', 'date_histogram'].every(type => {
+    const body =
+      type === 'histogram'
+        ? { field: 'bytes', interval: 1000, order: { 'f>_count': 'asc' } }
+        : { field: '@timestamp', calendar_interval: 'day', order: { 'f>_count': 'asc' } };
+    return chemin({ size: 0, aggs: { h: { [type]: body, aggs: chFiltre({}) } } }).stats.ko === 1;
+  }),
+  'chemin de tri f>_count → à reprendre aussi sur histogram et date_histogram'
+);
+const chCentiles = chemin(
+  chTri({ 'p.50': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [99, 50] } } })
+);
+check(
+  chCentiles.sql.includes('ORDER BY p[2] DESC'),
+  'chemin de tri : un centile est un élément du tableau, pas le tableau'
+);
+const chHorsListe = chemin(chTri({ 'p.70': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [99] } } }));
+check(
+  chHorsListe.sql.includes('quantilesTDigest(0.7)(latency_ms))[1] DESC, svc ASC'),
+  'chemin de tri : un centile absent de la liste est calculé pour le tri, comme le fait Elasticsearch'
+);
+const chRangHorsListe = chemin(
+  chTri({ 'r.700': 'desc' }, { r: { percentile_ranks: { field: 'latency_ms', values: [500] } } })
+);
+check(
+  /ORDER BY round\(100 \* countIf\(latency_ms <= 700\)/.test(chRangHorsListe.sql),
+  'chemin de tri : un rang absent de la liste est calculé pour le tri'
+);
+const chTop = chemin(
+  chTri({ 'f>p.50': 'desc' }, { ...chFiltre({ p: chCols.p }), h: { terms: { field: 'host' } } }, { size: 2 })
+);
+check(
+  /top_svc AS \([^;]*ORDER BY arrayMap\(v -> if\(isNaN\(v\), NULL, v\), quantilesTDigestIf\(0\.5, 0\.999\)\(latency_ms, status >= 500\)\)\[1\] DESC NULLS FIRST, svc ASC/.test(
+    chTop.sql
+  ),
+  'chemin de tri : le top N d’un niveau parent calcule la même valeur que le niveau'
+);
+const chSansTri = chemin(
+  chTri({ _count: 'desc' }, { f: { filter: chErr, aggs: { m: chAvg, h: { terms: { field: 'host' } } } } })
+);
+const chMixte = chemin(
+  chTri({ 'f>m': 'desc' }, { f: { filter: chErr, aggs: { m: chAvg, h: { terms: { field: 'host' } } } } })
+);
+check(
+  chMixte.sql.includes('ORDER BY avgIfOrNull(latency_ms, status >= 500) DESC NULLS FIRST, svc ASC') &&
+    JSON.stringify(chMixte.stats) === JSON.stringify(chSansTri.stats),
+  'chemin de tri : filtre qui porte un regroupement → calculé pour le tri, sans fausser la couverture'
+);
+const chSeul = chemin(chTri({ f: 'desc' }, { f: { filter: chErr, aggs: { h: { terms: { field: 'host' } } } } }));
+check(
+  chSeul.sql.includes('ORDER BY countIf(status >= 500) DESC, svc ASC'),
+  'chemin de tri : filtre seul qui porte un regroupement → son nombre de documents'
+);
+const chImbriques = chemin(
+  chTri(
+    { 'f1>f2>m': 'desc' },
+    { f1: { filter: chErr, aggs: { f2: { filter: { term: { level: 'ERROR' } }, aggs: { m: chAvg } } } } }
+  )
+);
+check(
+  chImbriques.sql.includes("ORDER BY avgIfOrNull(latency_ms, (status >= 500) AND (level = 'ERROR')) DESC") ||
+    chImbriques.sql.includes("ORDER BY avgIfOrNull(latency_ms, status >= 500 AND level = 'ERROR') DESC"),
+  'chemin de tri : filtres imbriqués → conditions réunies'
+);
+const chMissing = chemin(chTri({ 'a>m': 'desc' }, { a: { missing: { field: 'env' }, aggs: { m: chAvg } } }));
+check(
+  chMissing.sql.includes('ORDER BY avgIfOrNull(latency_ms, isNull(env)) DESC'),
+  'chemin de tri : missing se traverse comme un filtre'
+);
+const chVide = (path, dir, aggs) => chemin(chTri({ [path]: dir }, chFiltre(aggs))).sql;
+check(
+  chVide('f>m', 'desc', { m: { min: { field: 'bytes' } } }).includes('ORDER BY f_m DESC NULLS FIRST, svc ASC') &&
+    chVide('f>m', 'asc', { m: { min: { field: 'bytes' } } }).includes('ORDER BY f_m ASC, svc ASC') &&
+    chVide('f>m', 'asc', { m: { max: { field: 'bytes' } } }).includes('ORDER BY f_m ASC NULLS FIRST, svc ASC') &&
+    chVide('f>m', 'desc', { m: { max: { field: 'bytes' } } }).includes('ORDER BY f_m DESC, svc ASC') &&
+    chVide('f>s.min', 'desc', { s: chCols.s }).includes('ORDER BY f_s_min DESC NULLS FIRST, svc ASC') &&
+    chVide('f>s.avg', 'desc', { s: chCols.s }).includes('ORDER BY f_s_avg DESC NULLS FIRST, svc ASC') &&
+    chVide('f>s.avg', 'asc', { s: chCols.s }).includes('ORDER BY f_s_avg ASC, svc ASC') &&
+    chVide('f>s.max', 'asc', { s: chCols.s }).includes('ORDER BY f_s_max ASC NULLS FIRST, svc ASC') &&
+    chVide('f>m', 'desc', { m: chAvg }).includes('ORDER BY f_m DESC NULLS FIRST, svc ASC') &&
+    chVide('f>m', 'asc', { m: chAvg }).includes('ORDER BY f_m ASC, svc ASC') &&
+    chVide('f>m', 'desc', { m: { sum: { field: 'bytes' } } }).includes('ORDER BY f_m DESC, svc ASC') &&
+    chVide('f>m', 'desc', { m: { value_count: { field: 'bytes' } } }).includes('ORDER BY f_m DESC, svc ASC'),
+  'chemin de tri : un groupe sans valeur suit Double.compare (NaN et +∞ en tête du décroissant, −∞ du croissant), sum et comptages valent 0'
+);
+const chMin = chTri({ mn: 'desc' }, { mn: { min: { field: 'retries' } } });
+check(
+  chemin(chMin).sql.includes('ORDER BY mn DESC, svc ASC') &&
+    chemin(chMin, E.mergeConfig(E.DEFAULT_CONFIG, configOverride('N'))).sql.includes(
+      'ORDER BY mn DESC NULLS FIRST, svc ASC'
+    ),
+  'chemin de tri : min d’une colonne qui peut être NULL → même règle ; colonne sans NULL → rien à préciser'
+);
+const chEcarte = (aggs, sort, extra) =>
+  chemin(chTri({ _key: 'asc' }, { ...chFiltre(aggs), top: { bucket_sort: { sort, ...extra } } })).sql;
+const chSortDesc = [{ 'f>m': { order: 'desc' } }];
+check(
+  chEcarte({ m: { min: { field: 'bytes' } } }, chSortDesc).includes('HAVING isNotNull(f_m)\nORDER BY f_m DESC\n') &&
+    chEcarte({ m: chAvg }, chSortDesc).includes('HAVING isNotNull(f_m)') &&
+    !chEcarte({ m: { sum: { field: 'bytes' } } }, chSortDesc).includes('HAVING') &&
+    !chEcarte({ m: chAvg }, chSortDesc, { gap_policy: 'insert_zeros' }).includes('HAVING') &&
+    !chEcarte({ m: chAvg }, [...chSortDesc, { _key: { order: 'asc' } }]).includes('HAVING') &&
+    !chEcarte({ m: chAvg }, [...chSortDesc, { _count: { order: 'asc' } }]).includes('HAVING') &&
+    chEcarte({ m: chAvg, n: { min: { field: 'bytes' } } }, [...chSortDesc, { 'f>n': { order: 'asc' } }]).includes(
+      'HAVING (isNotNull(f_m) OR isNotNull(f_n))'
+    ),
+  'bucket_sort : gap_policy skip écarte le groupe qui n’a aucune de ses valeurs de tri ; sum, _key et _count en ont toujours une'
+);
+for (const [title, dsl] of [
+  ['agrégation inconnue', chTri({ absent: 'desc' }, { lat: chAvg })],
+  ['sous-agrégation inconnue', chTri({ 'f>absent': 'desc' }, chFiltre({ m: chAvg }))],
+  ['chemin qui traverse un terms', chTri({ 'h>m': 'desc' }, { h: { terms: { field: 'host' }, aggs: { m: chAvg } } })],
+  ['mesure multiple sans clé', chTri({ s: 'desc' }, { s: chCols.s })],
+  ['clé inconnue d’une mesure multiple', chTri({ 's.absente': 'desc' }, { s: chCols.s })],
+  ['centiles sans clé', chTri({ p: 'desc' }, { p: chCols.p })],
+  ['clé d’un filtre', chTri({ 'f.avg': 'desc' }, chFiltre({ m: chAvg }))],
+  ['filtre traversé par sa clé', chTri({ "f['a']>m": 'desc' }, chFiltre({ m: chAvg }))]
+]) {
+  const r = chemin(dsl);
+  check(
+    !r.error &&
+      r.stats.ko > 0 &&
+      !/ORDER BY (absent|f|h|s|p)\b(?!_)/.test(r.sql) &&
+      r.notes.some(n => /chemin/.test(n.detail)),
+    `chemin de tri refusé : ${title} → à reprendre, jamais de colonne absente`
+  );
+}
+const chTopHits = chemin(
+  chTri({ 'h>m': 'desc' }, { h: { terms: { field: 'host' }, aggs: { m: chAvg } }, d: { top_hits: { size: 1 } } })
+);
+check(
+  !chTopHits.error && chTopHits.stats.ko > 0,
+  'chemin de tri refusé avec un top_hits : à reprendre, la traduction des autres requêtes continue'
+);
+const chScript = chemin(
+  chTri(
+    { _key: 'asc' },
+    {
+      ...chFiltre({ m: chAvg }),
+      part: {
+        bucket_script: {
+          buckets_path: { e: 'f>_count', l: 'f>m', t: '_count' },
+          script: 'params.e * params.l / params.t'
+        }
+      }
+    }
+  )
+);
+check(
+  chScript.sql.includes('(f_doc_count * f_m) / doc_count AS part') &&
+    !chScript.notes.some(n => n.title.startsWith('tri sur')),
+  'pipeline : f>_count et f>m → colonnes du filtre, sans la remarque réservée aux tris'
+);
+const chSort = chemin(
+  chTri(
+    { _key: 'asc' },
+    { ...chFiltre({ m: chAvg }), top: { bucket_sort: { sort: [{ 'f>_count': { order: 'desc' } }], size: 2 } } }
+  )
+);
+check(
+  chSort.sql.includes('ORDER BY f_doc_count DESC'),
+  'bucket_sort : chemin f>_count → nombre de documents du filtre'
+);
+const chSortScript = chemin(
+  chTri(
+    { _key: 'asc' },
+    {
+      lat: chAvg,
+      double: { bucket_script: { buckets_path: { l: 'lat' }, script: 'params.l * 2' } },
+      top: { bucket_sort: { sort: [{ double: { order: 'desc' } }], size: 2 } }
+    }
+  )
+);
+check(
+  chSortScript.sql.includes('ORDER BY double DESC') && !chSortScript.stats.ko,
+  'bucket_sort : le nom d’un pipeline reste une colonne'
+);
+const chDerivee = chemin({
+  size: 0,
+  aggs: {
+    d: {
+      date_histogram: { field: '@timestamp', calendar_interval: 'day' },
+      aggs: { ...chFiltre({ m: chAvg }), dv: { derivative: { buckets_path: 'f>m' } } }
+    }
+  }
+});
+check(
+  chDerivee.sql.includes('f_m - lagInFrame(toNullable(f_m), 1) OVER'),
+  'pipeline : dérivée sur le chemin d’une mesure filtrée → colonne de la mesure'
+);
+const chMulti = chemin({
+  size: 0,
+  aggs: {
+    mt: {
+      multi_terms: { terms: [{ field: 'service' }, { field: 'host' }], order: { 'f>m': 'desc' } },
+      aggs: chFiltre({ m: chAvg })
+    }
+  }
+});
+check(chMulti.sql.includes('ORDER BY f_m DESC'), 'chemin de tri sur multi_terms → colonne de la mesure');
 
 /* ---------- Tableaux de bord Grafana ---------- */
 const gDash = JSON.stringify(grafanaOut.dashboard);

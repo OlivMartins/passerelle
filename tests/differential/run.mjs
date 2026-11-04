@@ -150,7 +150,7 @@ function knownFor(c, variant, tz) {
   const k = c.known;
   if (!k) return null;
   if (typeof k === 'string') return k;
-  return k[`${variant}@${tz}`] || k[`@${tz}`] || k[variant] || null;
+  return k[`${variant}@${tz}`] || k[`@${tz}`] || k[variant] || k[`es${esMajor}`] || null;
 }
 
 /* ---------- Principal ---------- */
@@ -171,6 +171,7 @@ if (chMajor < 26 || (chMajor === 26 && chMinor < 9)) {
   );
   process.exit(1);
 }
+const esMajor = info.body.version.number.split('.')[0];
 console.log(`Elasticsearch ${info.body.version.number} / ClickHouse ${chVersion} / Node.js ${process.versions.node}\n`);
 
 const docs = dataset();

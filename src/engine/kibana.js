@@ -510,7 +510,14 @@ const aggName = (used, base) => {
   used.add(x);
   return x;
 };
-// Mesure de Kibana → { def, name, count } ; count : la mesure est le nombre de documents (doc_count)
+// Valeur d’une mesure à plusieurs valeurs : « nom.clé », ou entre crochets quand la clé contient un point
+const metricKeyPath = (name, key) => (Number.isInteger(Number(key)) ? `${name}.${key}` : `${name}[${key}]`);
+/*
+ * Mesure de Kibana → { def, name, count, order, bucketsPath }
+ *   count        la mesure est le nombre de documents (doc_count)
+ *   order        chemin qu’un tri lit, quand ce n’est pas le nom de la mesure
+ *   bucketsPath  chemin qu’un pipeline lit, quand ce n’est pas celui du tri
+ */
 function visMetric(a, env, used) {
   const p = a.params || {};
   const label = p.customLabel || `${a.type}${p.field ? `_${p.field}` : ''}`;
@@ -525,18 +532,23 @@ function visMetric(a, env, used) {
     case 'cardinality':
     case 'value_count':
       return { name: aggName(used, label), def: { [a.type]: { field } } };
-    case 'median':
-      return { name: aggName(used, label), def: { percentiles: { field, percents: [50] } } };
-    case 'single_percentile':
+    case 'median': {
+      const name = aggName(used, label);
+      return { name, def: { percentiles: { field, percents: [50] } }, order: metricKeyPath(name, 50) };
+    }
+    case 'single_percentile': {
+      const name = aggName(used, label);
+      const percent = p.percentile === undefined ? 50 : p.percentile;
+      return { name, def: { percentiles: { field, percents: [percent] } }, order: metricKeyPath(name, percent) };
+    }
+    case 'percentiles': {
+      const name = aggName(used, label);
       return {
-        name: aggName(used, label),
-        def: { percentiles: { field, percents: [p.percentile === undefined ? 50 : p.percentile] } }
+        name,
+        def: { percentiles: { field, percents: p.percents || [1, 5, 25, 50, 75, 95, 99] } },
+        order: metricKeyPath(name, 50)
       };
-    case 'percentiles':
-      return {
-        name: aggName(used, label),
-        def: { percentiles: { field, percents: p.percents || [1, 5, 25, 50, 75, 95, 99] } }
-      };
+    }
     case 'percentile_ranks':
       return { name: aggName(used, label), def: { percentile_ranks: { field, values: p.values || [] } } };
     case 'single_percentile_rank': {
@@ -550,12 +562,7 @@ function visMetric(a, env, used) {
         return null;
       }
       const name = aggName(used, label);
-      // Pour trier un regroupement sur ce rang, Elasticsearch lit « nom.valeur » (un rang entier seulement s’écrit ainsi)
-      return {
-        name,
-        def: { percentile_ranks: { field, values: [v] } },
-        order: Number.isInteger(v) ? { path: `${name}.${v}` } : { path: null, why: 'un rang de centile non entier' }
-      };
+      return { name, def: { percentile_ranks: { field, values: [v] } }, order: metricKeyPath(name, v) };
     }
     case 'filtered_metric': {
       // Une mesure calculée sur les documents d’un filtre : une agrégation filter qui porte la mesure
@@ -573,13 +580,10 @@ function visMetric(a, env, used) {
       if (!inner) return null;
       const def = { filter: visFilterDef(isObj(cb.params) ? cb.params : {}, env) };
       if (!inner.count) def.aggs = { [inner.name]: inner.def };
-      // Le moteur calcule la mesure en colonne <filtre>_<mesure> ; il ne sait pas trier sur le chemin « filtre>mesure »
-      return {
-        name: aggName(used, p.customLabel || 'filtre'),
-        def,
-        filtered: true,
-        order: { path: null, why: 'une mesure filtrée' }
-      };
+      const name = aggName(used, p.customLabel || 'filtre');
+      const inside = inner.count ? null : `${name}>${inner.order || inner.name}`;
+      // Un tri lit le nombre de documents d’un filtre sous le nom du filtre, un pipeline sous filtre>_count
+      return { name, def, order: inside || name, bucketsPath: inside || `${name}>_count` };
     }
     case 'std_dev':
       return { name: aggName(used, label), def: { extended_stats: { field } } };
@@ -635,19 +639,8 @@ function visMetric(a, env, used) {
       return null;
   }
 }
-// Tri d’un regroupement sur une mesure : Elasticsearch lit le nom de la mesure, ou le chemin qu’elle déclare (rang de
-// centile : « nom.valeur »). Quand la traduction ne sait pas reproduire ce tri, les groupes restent triés par nombre de
-// documents, et la remarque le dit.
-function metricOrder(m, dir, env) {
-  if (!m.order) return { [m.name]: dir };
-  if (m.order.path) return { [m.order.path]: dir };
-  env.issues.push({
-    kind: 'review',
-    label: `tri sur ${m.order.why}`,
-    detail: `Kibana trie les groupes sur ${m.order.why} ; la traduction ne sait pas reproduire ce tri : les groupes sont triés par nombre de documents. Vérifiez l’ordre des groupes.`
-  });
-  return { _count: dir };
-}
+// Tri d’un regroupement sur une mesure : Elasticsearch lit le nom de la mesure, ou le chemin qu’elle déclare
+const metricOrder = (m, dir) => ({ [m.order || m.name]: dir });
 function visBucket(a, env, used, metricsById) {
   const p = a.params || {};
   const field = p.field;
@@ -667,16 +660,17 @@ function visBucket(a, env, used, metricsById) {
           const m = visMetric(Object.assign({ id: 'orderAgg' }, p.orderAgg), env, used);
           if (m && m.count) body.order = { _count: dir };
           else if (m) {
-            body.order = metricOrder(m, dir, env);
-            if (!m.order || m.order.path) body.__orderAgg = m;
+            body.order = metricOrder(m, dir);
+            body.__orderAgg = m;
           }
         } else {
           const m = metricsById.get(ob);
-          if (!m || m.count) body.order = { _count: dir };
-          else if (m.order) body.order = metricOrder(m, dir, env);
-          else if (m.def && Object.keys(m.def)[0] === 'percentiles') body.order = { [`${m.name}.50`]: dir };
-          else if (m.def) body.order = { [m.name]: dir };
-          else body.order = { _count: dir };
+          if (!m || m.count || !m.def) body.order = { _count: dir };
+          else {
+            body.order = metricOrder(m, dir);
+            // Comme Kibana : la mesure existe aussi sur le niveau qu’elle trie, même si elle est calculée plus bas
+            body.__orderAgg = m;
+          }
         }
         if (p.missingBucket) body.missing = p.missingBucketLabel || '__missing__';
         if (p.otherBucket)
@@ -806,7 +800,12 @@ function visAggsDSL(aggs, env) {
     last = cur[x.name];
     cur = cur[x.name].aggs;
   }
-  for (const m of metricsById.values()) if (!m.count) cur[m.name] = m.def;
+  for (const m of metricsById.values())
+    if (!m.count) {
+      // Déjà posée ici pour le tri, elle reprend son rang parmi les mesures
+      delete cur[m.name];
+      cur[m.name] = m.def;
+    }
   for (const pa of parentPipes) {
     const p = pa.params || {};
     const target =
@@ -815,17 +814,8 @@ function visAggsDSL(aggs, env) {
           ? visMetric(p.customMetric, env, used)
           : null
         : metricsById.get(String(p.metricAgg));
-    if (target && target.filtered) {
-      env.issues.push({
-        kind: 'todo',
-        label: `pipeline ${pa.type}`,
-        detail:
-          'Le calcul porte sur une mesure filtrée (filtered_metric) : le moteur ne sait pas désigner une mesure placée sous un filtre. À réécrire en SQL, par une fonction de fenêtre sur la colonne de la mesure.'
-      });
-      continue;
-    }
     if (target && !target.count && p.metricAgg === 'custom') cur[target.name] = target.def;
-    const path = !target || target.count ? '_count' : target.name;
+    const path = !target || target.count ? '_count' : target.bucketsPath || target.order || target.name;
     const name = aggName(used, p.customLabel || pa.type);
     if (!last || (!last.date_histogram && !last.histogram)) {
       env.issues.push({
@@ -1533,7 +1523,8 @@ function lensLayers(attrs, obj, prefix, views, base, extra) {
         let order;
         if (ob.type === 'alphabetical') order = { _key: dir };
         else if (ob.type === 'column') {
-          const path = pathOf(ob.columnId);
+          // Dans un tri, le nombre de documents d’un filtre s’écrit « filtre » (« filtre._count » est réservé aux pipelines)
+          const path = pathOf(ob.columnId).replace(/\._count$/, '');
           order = { [path]: dir };
         } else if (ob.type === 'rare')
           def = { rare_terms: { field: c.sourceField, max_doc_count: ob.maxDocCount || 1 } };
