@@ -276,6 +276,15 @@ const S = {
     lang: 'yaml'
   }
 };
+// « Ingestion » réunit les deux traducteurs de pipelines vers Vector (Elasticsearch, Logstash), sur le modèle d’« Autres sources »
+const INGEST_TOOLS = [
+  ['ingest', 'Elasticsearch'],
+  ['ls', 'Logstash']
+];
+S.ingestTool = store.get('ingest-tool', 'ingest');
+if (!INGEST_TOOLS.some(([k]) => k === S.ingestTool)) S.ingestTool = 'ingest';
+// La racine d’un banc : Requêtes a sa vue, les deux bancs d’Ingestion se partagent la leur
+const benchRoot = kind => $(kind === 'dsl' ? '#view-dsl' : `#bench-${kind}`);
 // Libellés propres à chaque banc de traduction
 const BENCH = {
   dsl: {
@@ -405,7 +414,7 @@ function runSoon(kind) {
 }
 function pulseSeam(kind) {
   // Le banc Kibana n’est plus une vue : il vit dans « Autres sources », sous #kb
-  const seam = $(`${kind === 'kibana' ? '#kb' : `#view-${kind}`} .seam`);
+  const seam = $('.seam', kind === 'kibana' ? $('#kb') : benchRoot(kind));
   seam.classList.remove('run');
   void seam.offsetWidth;
   seam.classList.add('run');
@@ -433,7 +442,7 @@ const TABS = {
   ]
 };
 function render(kind) {
-  const view = $(`#view-${kind}`);
+  const view = benchRoot(kind);
   const st = S[kind];
   const r = st.res || { empty: true };
   // fichiers
@@ -751,7 +760,7 @@ function handleFiles(files) {
     if (/^\s*[{\[]?\s*"?(?:processors|description)"?\s*:/m.test(f.text) && /"?processors"?\s*:/.test(f.text))
       return 'ingest';
     if (/\.ya?ml$/i.test(f.name)) return 'ingest';
-    if (S.view === 'ls' && !/\.json$/i.test(f.name)) return 'ls';
+    if (S.view === 'ingest' && S.ingestTool === 'ls' && !/\.json$/i.test(f.name)) return 'ls';
     return 'dsl';
   };
   const groups = {};
@@ -774,8 +783,13 @@ function handleFiles(files) {
       runTool();
       last = 'tools';
     } else {
+      // Les deux traducteurs de pipelines vivent dans « Ingestion » : le dépôt ouvre celui que désigne le contenu
+      if (k === 'ls' || k === 'ingest') {
+        S.ingestTool = k;
+        store.set('ingest-tool', k);
+      }
       addFiles(k, list);
-      last = k;
+      last = k === 'ls' ? 'ingest' : k;
     }
   }
   if (last) show(last);
@@ -2243,11 +2257,23 @@ function show(view) {
   );
   if (view === 'api') renderAPI();
   if (view === 'arch') renderArch();
-  if ((view === 'ls' || view === 'ingest') && S[view].tab === 'flow') render(view);
+  if (view === 'ingest') renderIngest();
   if (view === 'tools') renderTools();
 }
+// Charge un exemple dans le banc : il remplace le fichier d’exemple ou vide, sinon s’ajoute aux fichiers ouverts
+function loadBenchExample(kind, i) {
+  const st = S[kind];
+  const e = EXAMPLES[kind][i];
+  if (!e) return;
+  const f = { name: e.file, text: e.text, example: true };
+  if (st.files.length === 1 && (st.files[0].example || !st.files[0].text.trim())) st.files = [f];
+  else st.files.push(f);
+  st.active = st.files.indexOf(f);
+  st.ed.value = f.text;
+  run(kind, true);
+}
 function setupBench(kind) {
-  const view = $(`#view-${kind}`);
+  const view = benchRoot(kind);
   const st = S[kind];
   st.ed = makeEditor($('[data-role="editor"]', view), st.lang, BENCH[kind].label, BENCH[kind].placeholder, text => {
     const f = st.files[st.active];
@@ -2258,29 +2284,22 @@ function setupBench(kind) {
     runSoon(kind);
   });
   st.ed.value = st.files[st.active].text;
-  const sel = $('[data-act="example"]', view);
-  sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES[kind].map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`;
-  const loadExample = i => {
-    const e = EXAMPLES[kind][i];
-    if (!e) return;
-    const f = { name: e.file, text: e.text, example: true };
-    if (st.files.length === 1 && (st.files[0].example || !st.files[0].text.trim())) st.files = [f];
-    else st.files.push(f);
-    st.active = st.files.indexOf(f);
-    st.ed.value = f.text;
-    run(kind, true);
-  };
-  sel.addEventListener('change', () => {
-    loadExample(+sel.value);
-    sel.value = '';
-  });
-  const fileInput = $('input[type="file"]', view);
-  $('[data-act="open"]', view).addEventListener('click', () => fileInput.click());
-  fileInput.addEventListener('change', async () => {
-    const files = await readFiles(fileInput.files);
-    if (files.length) addFiles(kind, files);
-    fileInput.value = '';
-  });
+  // L’en-tête de Requêtes sert ce banc ; celui d’Ingestion sert les deux (setupIngest)
+  if (kind === 'dsl') {
+    const sel = $('[data-act="example"]', view);
+    sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES[kind].map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`;
+    sel.addEventListener('change', () => {
+      loadBenchExample(kind, +sel.value);
+      sel.value = '';
+    });
+    const fileInput = $('input[type="file"]', view);
+    $('[data-act="open"]', view).addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async () => {
+      const files = await readFiles(fileInput.files);
+      if (files.length) addFiles(kind, files);
+      fileInput.value = '';
+    });
+  }
   $('[data-act="clear"]', view).addEventListener('click', () => {
     const f = st.files[st.active];
     if (f) f.text = '';
@@ -2340,7 +2359,7 @@ function setupBench(kind) {
       copyText(s.sql + ';', 'Requête');
       return;
     }
-    if (t.dataset.loadExample !== undefined) loadExample(+t.dataset.loadExample);
+    if (t.dataset.loadExample !== undefined) loadBenchExample(kind, +t.dataset.loadExample);
   });
   $('[data-role="tabs"]', view).addEventListener('keydown', e => {
     if (!['ArrowRight', 'ArrowLeft'].includes(e.key)) return;
@@ -2351,6 +2370,51 @@ function setupBench(kind) {
     const b = $(`[data-tab="${st.tab}"]`, view);
     if (b) b.focus();
   });
+}
+/* ---------- Ingestion : pipelines Elasticsearch et Logstash, un en-tête, deux bancs ---------- */
+function renderIngest() {
+  const view = $('#view-ingest');
+  const k = S.ingestTool;
+  $$('[data-ingest]', view).forEach(b => b.setAttribute('aria-pressed', b.dataset.ingest === k));
+  INGEST_TOOLS.forEach(([t]) => {
+    benchRoot(t).hidden = t !== k;
+  });
+  $('[data-role="file"]', view).accept = k === 'ls' ? '.conf,.cfg,.txt,.logstash' : '.yml,.yaml,.json,.txt';
+  // Les exemples proposés suivent le banc affiché, qu’on l’ait choisi ou qu’un fichier déposé l’ait ouvert
+  const sel = $('[data-act="example"]', view);
+  if (sel.dataset.examplesFor !== k) {
+    sel.dataset.examplesFor = k;
+    sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES[k].map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`;
+  }
+  // La topologie se dessine une fois le banc visible
+  if (S[k].tab === 'flow') render(k);
+}
+function setupIngest() {
+  const view = $('#view-ingest');
+  const seg = $('[data-role="ingest-seg"]', view);
+  seg.innerHTML = INGEST_TOOLS.map(
+    ([k, label]) => `<button type="button" data-ingest="${k}" aria-pressed="false">${esc(label)}</button>`
+  ).join('');
+  seg.addEventListener('click', e => {
+    const b = e.target.closest('[data-ingest]');
+    if (!b) return;
+    S.ingestTool = b.dataset.ingest;
+    store.set('ingest-tool', S.ingestTool);
+    renderIngest();
+  });
+  const sel = $('[data-act="example"]', view);
+  sel.addEventListener('change', () => {
+    loadBenchExample(S.ingestTool, +sel.value);
+    sel.value = '';
+  });
+  const fi = $('[data-role="file"]', view);
+  $('[data-act="open"]', view).addEventListener('click', () => fi.click());
+  fi.addEventListener('change', async () => {
+    const files = await readFiles(fi.files);
+    if (files.length) addFiles(S.ingestTool, files);
+    fi.value = '';
+  });
+  renderIngest();
 }
 function setupConfig() {
   renderConfigForm();
@@ -2438,15 +2502,16 @@ document.addEventListener('click', e => {
 });
 $$('.nav-item').forEach(b => b.addEventListener('click', () => show(b.getAttribute('data-view'))));
 window.addEventListener('resize', () => {
-  const k = S.view;
+  const k = S.view === 'ingest' ? S.ingestTool : S.view;
   if ((k === 'ls' || k === 'ingest') && S[k].tab === 'flow' && S[k].res && S[k].res.graph)
-    drawEdges($(`#view-${k} [data-role="out"]`), S[k].res.graph);
+    drawEdges($('[data-role="out"]', benchRoot(k)), S[k].res.graph);
 });
 
 setupTheme();
 setupBench('dsl');
 setupBench('ls');
 setupBench('ingest');
+setupIngest();
 setupKibana();
 setupTools();
 setupConfig();
@@ -2459,7 +2524,14 @@ if (S.view === 'kibana') {
   S.tools.tool = 'kibana';
   store.set('tool', 'kibana');
 }
-show(['dsl', 'ls', 'ingest', 'tools', 'config', 'api', 'arch'].includes(S.view) ? S.view : 'dsl');
+// La section « Pipelines » est devenue l’outil Logstash d’« Ingestion » : une vue mémorisée par une version précédente y mène
+if (S.view === 'ls') {
+  S.view = 'ingest';
+  S.ingestTool = 'ls';
+  store.set('ingest-tool', 'ls');
+  renderIngest();
+}
+show(['dsl', 'ingest', 'tools', 'config', 'api', 'arch'].includes(S.view) ? S.view : 'dsl');
 // Téléchargement classique par le navigateur (page servie par le binaire ou ouverte en local)
 downloads = {
   save: async ({ filename, data }) => {

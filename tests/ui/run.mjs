@@ -45,35 +45,100 @@ await p.goto(`file://${page_}`);
 const text = async sel => (await p.locator(sel).first().innerText()).replace(/\s+/g, ' ');
 const VERDICT = /(Prête|À vérifier|À reprendre|Non reconnue)/;
 
-for (const [view, must] of [
-  ['dsl', /Sur les 24 dernières heures/],
-  ['ls', /Lit nginx-raw/],
-  ['ingest', /pipeline traduit en VRL/]
-]) {
-  await p.click(`[data-view="${view}"]`);
-  await p.waitForTimeout(400);
-  const v = await text(`#view-${view} [data-role="verdict"]`);
-  check(VERDICT.test(v) && must.test(v), `section ${view} : verdict et phrase de synthèse`, v.slice(0, 160));
+await p.click('[data-view="dsl"]');
+await p.waitForTimeout(400);
+{
+  const v = await text('#view-dsl [data-role="verdict"]');
+  check(
+    VERDICT.test(v) && /Sur les 24 dernières heures/.test(v),
+    'section dsl : verdict et phrase de synthèse',
+    v.slice(0, 160)
+  );
+}
+// Ingestion : deux traducteurs de pipelines (Elasticsearch, Logstash) derrière un sélecteur, comme « Autres sources »
+await p.click('[data-view="ingest"]');
+await p.waitForTimeout(400);
+{
+  const seg = (await p.locator('#view-ingest [data-role="ingest-seg"] button').allInnerTexts()).map(s => s.trim());
+  check(
+    seg.join('|') === 'Elasticsearch|Logstash',
+    'ingestion : le sélecteur propose Elasticsearch puis Logstash',
+    seg.join(' | ')
+  );
+  const pressed = await p.locator('#view-ingest [data-ingest="ingest"]').getAttribute('aria-pressed');
+  const esShown = await p.locator('#bench-ingest').isVisible();
+  const lsShown = await p.locator('#bench-ls').isVisible();
+  check(
+    pressed === 'true' && esShown && !lsShown,
+    'ingestion : Elasticsearch ouvert par défaut, le banc Logstash caché',
+    `${pressed} ${esShown} ${lsShown}`
+  );
+  const v = await text('#bench-ingest [data-role="verdict"]');
+  check(
+    VERDICT.test(v) && /pipeline traduit en VRL/.test(v),
+    'ingestion, Elasticsearch : verdict et phrase de synthèse',
+    v.slice(0, 160)
+  );
 }
 for (const [tab, must] of [
   ['flow', /Source logstash/],
   ['notes', /uri_parts/],
   ['validate', /vector validate/]
 ]) {
-  await p.click(`#view-ingest [data-tab="${tab}"]`);
+  await p.click(`#bench-ingest [data-tab="${tab}"]`);
   await p.waitForTimeout(150);
-  const t = await text('#view-ingest [data-role="out"]');
+  const t = await text('#bench-ingest [data-role="out"]');
   check(must.test(t), `ingestion, onglet ${tab}`, t.slice(0, 160));
 }
+// Logstash : l'ancienne section « Pipelines », son banc, ses exemples et sa topologie
+await p.click('#view-ingest [data-ingest="ls"]');
+await p.waitForTimeout(500);
+{
+  const pressed = await p.locator('#view-ingest [data-ingest="ls"]').getAttribute('aria-pressed');
+  const lsShown = await p.locator('#bench-ls').isVisible();
+  const esShown = await p.locator('#bench-ingest').isVisible();
+  check(
+    pressed === 'true' && lsShown && !esShown,
+    'ingestion, Logstash : son banc remplace celui d’Elasticsearch',
+    `${pressed} ${lsShown} ${esShown}`
+  );
+  const v = await text('#bench-ls [data-role="verdict"]');
+  check(
+    VERDICT.test(v) && /Lit nginx-raw/.test(v),
+    'ingestion, Logstash : verdict et phrase de synthèse',
+    v.slice(0, 160)
+  );
+  const ex = (await p.locator('#view-ingest [data-act="example"] option').allInnerTexts()).join(' | ');
+  const exEs = await p.locator('#view-ingest [data-act="example"] option').count();
+  check(
+    exEs >= 2 && !/^Charger un exemple$/.test(ex),
+    'ingestion, Logstash : le menu d’exemples propose des pipelines Logstash',
+    ex
+  );
+  await p.click('#bench-ls [data-tab="flow"]');
+  await p.waitForTimeout(300);
+  const edges = await p.locator('#bench-ls .flow svg.edges path').count();
+  const nodes = await p.locator('#bench-ls .flow .node').count();
+  check(nodes >= 3 && edges >= 2, 'ingestion, Logstash : la topologie se dessine', `${nodes} nœuds, ${edges} liens`);
+  const accept = await p.locator('#view-ingest [data-role="file"]').getAttribute('accept');
+  check(/\.conf/.test(accept), 'ingestion, Logstash : le sélecteur de fichiers attend des .conf', accept);
+}
 
-// Navigation : Kibana n’a plus de section à part, il ouvre « Autres sources » (7 sections)
+// Navigation : Kibana n’a plus de section à part (il ouvre « Autres sources »), ni Logstash (il ouvre « Ingestion ») : 6 sections
 {
   const navItems = await p.locator('.nav-item').count();
   const kibanaNav = await p.locator('[data-view="kibana"]').count();
+  const lsNav = await p.locator('[data-view="ls"]').count();
   check(
-    navItems === 7 && kibanaNav === 0,
-    'navigation : 7 sections, plus d’entrée Kibana à part',
-    `${navItems} entrées, ${kibanaNav} Kibana`
+    navItems === 6 && kibanaNav === 0 && lsNav === 0,
+    'navigation : 6 sections, plus d’entrée Kibana ni Pipelines à part',
+    `${navItems} entrées, ${kibanaNav} Kibana, ${lsNav} Pipelines`
+  );
+  const subIngest = await text('[data-view="ingest"] small');
+  check(
+    /Elasticsearch, Logstash/.test(subIngest),
+    'navigation : « Ingestion » annonce Elasticsearch et Logstash',
+    subIngest
   );
   const sub = await text('[data-view="tools"] small');
   check(/^Kibana, Grafana/.test(sub), 'navigation : « Autres sources » annonce Kibana en premier', sub);
@@ -311,7 +376,65 @@ await p.waitForTimeout(600);
   );
   await p2.close();
 }
-// Mobile : 7 entrées dans la barre du bas, rien ne déborde, le banc Kibana s’affiche
+// Un pipeline Logstash déposé ailleurs ouvre l’outil Logstash d’« Ingestion », où qu’il tombe ; un pipeline d’ingestion, l’outil Elasticsearch
+{
+  const conf = readFileSync(join(ROOT, 'examples', 'logstash', 'routage.conf'), 'utf8');
+  const yml = readFileSync(join(ROOT, 'examples', 'ingest', 'navigateur.yml'), 'utf8');
+  await p.click('[data-view="dsl"]');
+  await p.waitForTimeout(300);
+  await drop('routage.conf', conf);
+  await p.waitForTimeout(600);
+  {
+    const visible = await p.locator('#view-ingest').isVisible();
+    const ls = await p.locator('#bench-ls').isVisible();
+    const pressed = await p.locator('#view-ingest [data-ingest="ls"]').getAttribute('aria-pressed');
+    const current = await p.locator('.nav-item[aria-current="page"]').getAttribute('data-view');
+    // Le fichier déposé remplace le pipeline d’exemple : l’éditeur et le nom du fichier le montrent
+    const fname = await text('#bench-ls [data-role="fname"]');
+    check(
+      visible && ls && pressed === 'true' && current === 'ingest' && fname === 'routage.conf',
+      'pipeline Logstash déposé sur Requêtes : aiguillé vers l’outil Logstash d’Ingestion',
+      `${visible} ${ls} ${pressed} ${current} ${fname}`
+    );
+  }
+  // Déposé pendant que Logstash est affiché : un pipeline d’ingestion bascule sur Elasticsearch, le menu d’exemples avec lui
+  await drop('navigateur.yml', yml);
+  await p.waitForTimeout(600);
+  {
+    const pressed = await p.locator('#view-ingest [data-ingest="ingest"]').getAttribute('aria-pressed');
+    const es = await p.locator('#bench-ingest').isVisible();
+    const ls = await p.locator('#bench-ls').isVisible();
+    const ex = (await p.locator('#view-ingest [data-act="example"] option').allInnerTexts()).join(' | ');
+    const accept = await p.locator('#view-ingest [data-role="file"]').getAttribute('accept');
+    check(
+      pressed === 'true' && es && !ls && /yml/.test(accept),
+      'pipeline d’ingestion déposé sur Logstash : bascule sur Elasticsearch, exemples et fichiers acceptés à jour',
+      `${pressed} ${es} ${ls} ${accept} || ${ex}`
+    );
+  }
+}
+// Une vue « ls » (l’ancienne section Pipelines) mémorisée par une version précédente mène à l’outil Logstash d’Ingestion
+{
+  const p2 = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  await p2.addInitScript(() => {
+    localStorage.setItem('passerelle:view', JSON.stringify('ls'));
+    localStorage.setItem('passerelle:ingest-tool', JSON.stringify('ingest'));
+  });
+  p2.on('pageerror', e => errs.push(`pageerror ${e.message}`));
+  await p2.goto(`file://${page_}`);
+  await p2.waitForTimeout(500);
+  const visible = await p2.locator('#view-ingest').isVisible();
+  const lsShown = await p2.locator('#bench-ls').isVisible();
+  const pressed = await p2.locator('#view-ingest [data-ingest="ls"]').getAttribute('aria-pressed');
+  const current = await p2.locator('.nav-item[aria-current="page"]').getAttribute('data-view');
+  check(
+    visible && lsShown && pressed === 'true' && current === 'ingest',
+    'ancienne vue « ls » mémorisée : ouvre l’outil Logstash d’Ingestion',
+    `${visible} ${lsShown} ${pressed} ${current}`
+  );
+  await p2.close();
+}
+// Mobile : 6 entrées dans la barre du bas, rien ne déborde, le banc Kibana s’affiche
 {
   const p3 = await browser.newPage({ viewport: { width: 390, height: 844 } });
   p3.on('pageerror', e => errs.push(`pageerror ${e.message}`));
@@ -324,9 +447,24 @@ await p.waitForTimeout(600);
     h: Math.round(document.querySelector('#kb .pane-in').getBoundingClientRect().height)
   }));
   check(
-    m.items === 7 && m.overflow <= 0 && (await p3.locator('#kb').isVisible()) && m.h >= 380,
-    'mobile : 7 entrées, pas de débordement, banc Kibana affiché',
+    m.items === 6 && m.overflow <= 0 && (await p3.locator('#kb').isVisible()) && m.h >= 380,
+    'mobile : 6 entrées, pas de débordement, banc Kibana affiché',
     JSON.stringify(m)
+  );
+  // Ingestion sur téléphone : le sélecteur Elasticsearch / Logstash tient dans l’écran et chaque banc s’affiche
+  await p3.click('[data-view="ingest"]');
+  await p3.waitForTimeout(400);
+  await p3.click('#view-ingest [data-ingest="ls"]');
+  await p3.waitForTimeout(400);
+  const mi = await p3.evaluate(() => ({
+    overflow: document.documentElement.scrollWidth - innerWidth,
+    h: Math.round(document.querySelector('#bench-ls .pane-in').getBoundingClientRect().height),
+    seg: Math.round(document.querySelector('#view-ingest [data-role="ingest-seg"]').getBoundingClientRect().right)
+  }));
+  check(
+    mi.overflow <= 0 && mi.h >= 300 && mi.seg <= 390 && (await p3.locator('#bench-ls').isVisible()),
+    'mobile : Ingestion, sélecteur et banc Logstash dans l’écran',
+    JSON.stringify(mi)
   );
   await p3.close();
 }
