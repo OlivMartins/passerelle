@@ -1903,10 +1903,98 @@ const kbVOrdered = kbVOne(
   ])
 );
 check(
-  kbVLabels(kbVOrdered).includes('review:tri sur une mesure filtrée') &&
-    /ORDER BY doc_count DESC, service_name ASC/.test(kbVSql(kbVOrdered)) &&
-    !/ORDER BY filtre\b/.test(kbVSql(kbVOrdered)),
-  'visualisation : tri sur une mesure filtrée → par nombre de documents, signalé (jamais « ORDER BY » sur une colonne absente)'
+  kbVOrdered.verdict === 'ready' &&
+    kbVLabels(kbVOrdered).length === 0 &&
+    /ORDER BY filtre_avg_event_duration DESC, service_name ASC/.test(kbVSql(kbVOrdered)),
+  'visualisation : tri sur une mesure filtrée → sur la colonne de la mesure, sans remarque'
+);
+const kbVOrderedCount = kbVOne(
+  kbVis('Tri sur un comptage filtré', 'table', [
+    kbVFiltered('1', 'event.outcome:failure', { type: 'count', params: {} }),
+    kbVTerms('3', 'service.name', '1')
+  ])
+);
+check(
+  kbVLabels(kbVOrderedCount).length === 0 &&
+    /ORDER BY filtre_doc_count DESC, service_name ASC/.test(kbVSql(kbVOrderedCount)),
+  'visualisation : tri sur un comptage filtré → sur le nombre de documents du filtre'
+);
+const kbVOrderedCustom = kbVOne(
+  kbVis('Tri personnalisé', 'table', [
+    kbVCount,
+    {
+      id: '3',
+      enabled: true,
+      type: 'terms',
+      schema: 'bucket',
+      params: {
+        field: 'service.name',
+        size: 3,
+        order: 'asc',
+        orderBy: 'custom',
+        orderAgg: kbVFiltered('3-orderAgg', 'event.outcome:failure', {
+          type: 'max',
+          params: { field: 'event.duration' }
+        })
+      }
+    }
+  ])
+);
+check(
+  kbVLabels(kbVOrderedCustom).length === 0 &&
+    /ORDER BY filtre_max_event_duration ASC NULLS FIRST, service_name ASC/.test(kbVSql(kbVOrderedCustom)),
+  'visualisation : tri personnalisé sur une mesure filtrée → la mesure est calculée, un groupe vide suit Elasticsearch'
+);
+const kbVOrderedParent = kbVOne(
+  kbVis('Tri du niveau parent', 'table', [
+    kbVFiltered('1', 'http.response.status_code >= 500', kbVAvgDuration),
+    kbVTerms('3', 'service.name', '1'),
+    kbVTerms('4', 'host.name', '_key')
+  ])
+);
+check(
+  kbVOrderedParent.verdict === 'ready' &&
+    /ORDER BY filtre_avg_event_duration DESC, service_name ASC/.test(kbVSql(kbVOrderedParent)) &&
+    /ORDER BY avgIfOrNull\(event\.duration, http\.response\.status_code >= 500\) DESC, service_name ASC\n\s+LIMIT 3/.test(
+      kbVSql(kbVOrderedParent)
+    ),
+  'visualisation : mesure qui trie un niveau parent → calculée aussi sur ce niveau, et le top N la lit (jamais de colonne absente)'
+);
+const kbVOrderedPlainParent = kbVOne(
+  kbVis('Tri du niveau parent, mesure simple', 'table', [
+    { id: '1', enabled: true, type: 'avg', schema: 'metric', params: { field: 'event.duration' } },
+    { id: '2', enabled: true, type: 'max', schema: 'metric', params: { field: 'event.duration' } },
+    kbVTerms('3', 'service.name', '2'),
+    kbVTerms('4', 'host.name', '2')
+  ])
+);
+check(
+  kbVOrderedPlainParent.verdict === 'ready' &&
+    /ORDER BY max\(event\.duration\) DESC, service_name ASC\n\s+LIMIT 3/.test(kbVSql(kbVOrderedPlainParent)) &&
+    /avg\(event\.duration\) AS avg_event_duration,\n\s+max\(event\.duration\) AS max_event_duration\nFROM[^;]*GROUP BY service_name, host_name/.test(
+      kbVSql(kbVOrderedPlainParent)
+    ),
+  'visualisation : mesure simple qui trie un niveau parent → même chose, et les mesures du dernier niveau gardent leur rang'
+);
+const kbVPercentile = (type, params) =>
+  kbVOne(
+    kbVis('Centile', 'table', [
+      { id: '2', enabled: true, type, schema: 'metric', params: { field: 'event.duration', ...params } },
+      kbVTerms('3', 'service.name', '2')
+    ])
+  );
+check(
+  /ORDER BY median_event_duration\[1\] DESC/.test(kbVSql(kbVPercentile('median', {}))) &&
+    /ORDER BY single_percentile_event_duration\[1\] DESC/.test(
+      kbVSql(kbVPercentile('single_percentile', { percentile: 95 }))
+    ) &&
+    /ORDER BY single_percentile_event_duration\[1\] DESC/.test(
+      kbVSql(kbVPercentile('single_percentile', { percentile: 99.9 }))
+    ) &&
+    /ORDER BY percentiles_event_duration\[2\] DESC/.test(
+      kbVSql(kbVPercentile('percentiles', { percents: [25, 50, 75] }))
+    ),
+  'visualisation : tri sur un centile → l’élément du tableau qui porte ce centile'
 );
 const kbVRank = (value, orderBy) =>
   kbVOne(
@@ -1935,11 +2023,11 @@ check(
   'visualisation : tri sur un rang de centile entier → colonne du rang'
 );
 check(
-  kbVLabels(kbVRank(99.5, '2')).includes('review:tri sur un rang de centile non entier') &&
-    /ORDER BY doc_count DESC/.test(kbVSql(kbVRank(99.5, '2'))) &&
+  /ORDER BY single_percentile_rank_event_duration_99_5 DESC, service_name ASC/.test(kbVSql(kbVRank(99.5, '2'))) &&
+    kbVLabels(kbVRank(99.5, '2')).length === 0 &&
     kbVLabels(kbVRank('', '_key')).includes('todo:mesure single_percentile_rank sans valeur') &&
     kbVRank('', '_key').verdict === 'todo',
-  'visualisation : rang de centile non entier trié → signalé ; sans valeur → à reprendre'
+  'visualisation : tri sur un rang de centile non entier → colonne du rang ; sans valeur → à reprendre'
 );
 
 // Pipelines frères : moyenne, somme, minimum, maximum des groupes d’un regroupement personnalisé
@@ -2006,8 +2094,27 @@ const kbVParent = kbVOne(
   ])
 );
 check(
-  kbVLabels(kbVParent).includes('todo:pipeline derivative') && kbVParent.verdict === 'todo',
-  'visualisation : dérivée d’une mesure filtrée → à reprendre (le moteur ne désigne pas une mesure sous un filtre)'
+  !kbVLabels(kbVParent).some(l => l.startsWith('todo:')) &&
+    /filtre_avg_event_duration - lagInFrame\(toNullable\(filtre_avg_event_duration\), 1\) OVER/.test(kbVSql(kbVParent)),
+  'visualisation : dérivée d’une mesure filtrée → sur la colonne de la mesure'
+);
+const kbVParentCount = kbVOne(
+  kbVis('Cumul d’un comptage filtré', 'line', [
+    kbVFiltered('1', 'a:b', { type: 'count', params: {} }),
+    { id: '2', enabled: true, type: 'cumulative_sum', schema: 'metric', params: { metricAgg: '1' } },
+    {
+      id: '3',
+      enabled: true,
+      type: 'date_histogram',
+      schema: 'segment',
+      params: { field: '@timestamp', interval: '1h' }
+    }
+  ])
+);
+check(
+  !kbVLabels(kbVParentCount).some(l => l.startsWith('todo:')) &&
+    /sum\(filtre_doc_count\) OVER/.test(kbVSql(kbVParentCount)),
+  'visualisation : cumul d’un comptage filtré → sur le nombre de documents du filtre'
 );
 
 /* ---------- Chemins vers une sous-agrégation (tri et pipelines) ---------- */

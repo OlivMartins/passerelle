@@ -12,6 +12,11 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
   - **Groupes sans valeur** : ils suivent la règle d’Elasticsearch, en dernier (NaN), sauf `min` en ordre décroissant et `max` en ordre croissant, en tête (+∞ et −∞), d’où un `NULLS FIRST`. `bucket_sort` les place en dernier dans tous les cas.
   - **Chemins invalides** : une agrégation inconnue, un chemin qui traverse un regroupement à plusieurs groupes, une mesure multiple sans clé sont « à reprendre » avec la raison, au lieu d’un SQL qui échoue sur une colonne absente.
   - Elasticsearch refuse `f>_count` et `f._count` dans un tri (HTTP 400), il les accepte dans un pipeline. La traduction les comprend partout et le signale dans un tri (« tri sur … », à vérifier), avec l’écriture attendue.
+- **Visualisations Kibana** : le contournement n’a plus lieu d’être.
+  - Un regroupement trié sur une mesure filtrée, ou sur le rang d’un centile non entier, est trié sur cette valeur ; la remarque « tri sur … » et le tri par nombre de documents disparaissent.
+  - Une dérivée, un cumul ou une moyenne mobile posés sur une mesure filtrée sont traduits au lieu d’être « à reprendre ».
+  - `single_percentile` trie sur son centile, et non sur un `.50` écrit en dur.
+  - Une mesure qui trie un regroupement parent est aussi calculée sur ce niveau, comme le fait Kibana : le top N lisait une colonne absente, et le SQL échouait.
 
 ## [1.7.3] - 2026-11-04
 
