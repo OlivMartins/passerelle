@@ -349,7 +349,7 @@ export const CASES = [
   {
     id: 'agg_terms_tri_centile_crochets',
     tol: 0.05,
-    dsl: triService({ 'p[37.5]': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [5, 37.5] } } }, 1)
+    dsl: triService({ 'p[37.5]': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [37.5, 99] } } }, 1)
   },
   {
     id: 'agg_terms_tri_centile_hors_liste',
