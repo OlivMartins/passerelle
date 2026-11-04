@@ -8,5 +8,6 @@ SELECT
     avgIfOrNull(latency_ms, status >= 500) AS f_m
 FROM logs.events
 GROUP BY svc
+HAVING isNotNull(f_m)
 ORDER BY f_m DESC
 LIMIT 3;

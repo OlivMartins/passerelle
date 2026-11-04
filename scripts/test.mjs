@@ -1905,7 +1905,7 @@ const kbVOrdered = kbVOne(
 check(
   kbVOrdered.verdict === 'ready' &&
     kbVLabels(kbVOrdered).length === 0 &&
-    /ORDER BY filtre_avg_event_duration DESC, service_name ASC/.test(kbVSql(kbVOrdered)),
+    /ORDER BY filtre_avg_event_duration DESC NULLS FIRST, service_name ASC/.test(kbVSql(kbVOrdered)),
   'visualisation : tri sur une mesure filtrée → sur la colonne de la mesure, sans remarque'
 );
 const kbVOrderedCount = kbVOne(
@@ -1954,8 +1954,8 @@ const kbVOrderedParent = kbVOne(
 );
 check(
   kbVOrderedParent.verdict === 'ready' &&
-    /ORDER BY filtre_avg_event_duration DESC, service_name ASC/.test(kbVSql(kbVOrderedParent)) &&
-    /ORDER BY avgIfOrNull\(event\.duration, http\.response\.status_code >= 500\) DESC, service_name ASC\n\s+LIMIT 3/.test(
+    /ORDER BY filtre_avg_event_duration DESC NULLS FIRST, service_name ASC/.test(kbVSql(kbVOrderedParent)) &&
+    /ORDER BY avgIfOrNull\(event\.duration, http\.response\.status_code >= 500\) DESC NULLS FIRST, service_name ASC\n\s+LIMIT 3/.test(
       kbVSql(kbVOrderedParent)
     ),
   'visualisation : mesure qui trie un niveau parent → calculée aussi sur ce niveau, et le top N la lit (jamais de colonne absente)'
@@ -2133,24 +2133,22 @@ const chCols = {
   r: { percentile_ranks: { field: 'latency_ms', values: [500, 99.5] } }
 };
 for (const [path, column] of [
-  ['f>m', 'f_m'],
-  ['f>s.avg', 'f_s_avg'],
-  ['f>s.count', 'f_s_count'],
-  ['f>m.value', 'f_m'],
-  ['f', 'f_doc_count'],
-  ['f.doc_count', 'f_doc_count'],
-  ['f>p.50', 'f_p[1]'],
-  ['f>p[99.9]', 'f_p[2]'],
-  ['f>p[50.0]', 'f_p[1]'],
-  ['f>r.500', 'f_r_500'],
-  ['f>r[500.0]', 'f_r_500'],
-  ['f>r[99.5]', 'f_r_99_5']
+  ['f>m', 'f_m DESC NULLS FIRST'],
+  ['f>s.avg', 'f_s_avg DESC NULLS FIRST'],
+  ['f>s.count', 'f_s_count DESC'],
+  ['f>m.value', 'f_m DESC NULLS FIRST'],
+  ['f', 'f_doc_count DESC'],
+  ['f.doc_count', 'f_doc_count DESC'],
+  ['f>p.50', 'f_p[1] DESC NULLS FIRST'],
+  ['f>p[99.9]', 'f_p[2] DESC NULLS FIRST'],
+  ['f>p[50.0]', 'f_p[1] DESC NULLS FIRST'],
+  ['f>r.500', 'f_r_500 DESC NULLS FIRST'],
+  ['f>r[500.0]', 'f_r_500 DESC NULLS FIRST'],
+  ['f>r[99.5]', 'f_r_99_5 DESC NULLS FIRST']
 ]) {
   const r = chemin(chTri({ [path]: 'desc' }, chFiltre(chCols)));
   check(
-    r.sql.includes(`ORDER BY ${column} DESC, svc ASC`) &&
-      !r.stats.ko &&
-      !r.notes.some(n => n.title.startsWith('tri sur')),
+    r.sql.includes(`ORDER BY ${column}, svc ASC`) && !r.stats.ko && !r.notes.some(n => n.title.startsWith('tri sur')),
     `chemin de tri ${path} → ${column}`
   );
 }
@@ -2188,7 +2186,7 @@ const chTop = chemin(
   chTri({ 'f>p.50': 'desc' }, { ...chFiltre({ p: chCols.p }), h: { terms: { field: 'host' } } }, { size: 2 })
 );
 check(
-  /top_svc AS \([^;]*ORDER BY arrayMap\(v -> if\(isNaN\(v\), NULL, v\), quantilesTDigestIf\(0\.5, 0\.999\)\(latency_ms, status >= 500\)\)\[1\] DESC, svc ASC/.test(
+  /top_svc AS \([^;]*ORDER BY arrayMap\(v -> if\(isNaN\(v\), NULL, v\), quantilesTDigestIf\(0\.5, 0\.999\)\(latency_ms, status >= 500\)\)\[1\] DESC NULLS FIRST, svc ASC/.test(
     chTop.sql
   ),
   'chemin de tri : le top N d’un niveau parent calcule la même valeur que le niveau'
@@ -2200,7 +2198,7 @@ const chMixte = chemin(
   chTri({ 'f>m': 'desc' }, { f: { filter: chErr, aggs: { m: chAvg, h: { terms: { field: 'host' } } } } })
 );
 check(
-  chMixte.sql.includes('ORDER BY avgIfOrNull(latency_ms, status >= 500) DESC, svc ASC') &&
+  chMixte.sql.includes('ORDER BY avgIfOrNull(latency_ms, status >= 500) DESC NULLS FIRST, svc ASC') &&
     JSON.stringify(chMixte.stats) === JSON.stringify(chSansTri.stats),
   'chemin de tri : filtre qui porte un regroupement → calculé pour le tri, sans fausser la couverture'
 );
@@ -2232,9 +2230,14 @@ check(
     chVide('f>m', 'asc', { m: { max: { field: 'bytes' } } }).includes('ORDER BY f_m ASC NULLS FIRST, svc ASC') &&
     chVide('f>m', 'desc', { m: { max: { field: 'bytes' } } }).includes('ORDER BY f_m DESC, svc ASC') &&
     chVide('f>s.min', 'desc', { s: chCols.s }).includes('ORDER BY f_s_min DESC NULLS FIRST, svc ASC') &&
-    chVide('f>s.avg', 'desc', { s: chCols.s }).includes('ORDER BY f_s_avg DESC, svc ASC') &&
-    chVide('f>m', 'desc', { m: chAvg }).includes('ORDER BY f_m DESC, svc ASC'),
-  'chemin de tri : un groupe sans valeur vaut +∞ pour min et −∞ pour max, NaN (en dernier) pour le reste'
+    chVide('f>s.avg', 'desc', { s: chCols.s }).includes('ORDER BY f_s_avg DESC NULLS FIRST, svc ASC') &&
+    chVide('f>s.avg', 'asc', { s: chCols.s }).includes('ORDER BY f_s_avg ASC, svc ASC') &&
+    chVide('f>s.max', 'asc', { s: chCols.s }).includes('ORDER BY f_s_max ASC NULLS FIRST, svc ASC') &&
+    chVide('f>m', 'desc', { m: chAvg }).includes('ORDER BY f_m DESC NULLS FIRST, svc ASC') &&
+    chVide('f>m', 'asc', { m: chAvg }).includes('ORDER BY f_m ASC, svc ASC') &&
+    chVide('f>m', 'desc', { m: { sum: { field: 'bytes' } } }).includes('ORDER BY f_m DESC, svc ASC') &&
+    chVide('f>m', 'desc', { m: { value_count: { field: 'bytes' } } }).includes('ORDER BY f_m DESC, svc ASC'),
+  'chemin de tri : un groupe sans valeur suit Double.compare (NaN et +∞ en tête du décroissant, −∞ du croissant), sum et comptages valent 0'
 );
 const chMin = chTri({ mn: 'desc' }, { mn: { min: { field: 'retries' } } });
 check(
@@ -2244,17 +2247,20 @@ check(
     ),
   'chemin de tri : min d’une colonne qui peut être NULL → même règle ; colonne sans NULL → rien à préciser'
 );
+const chEcarte = (aggs, sort, extra) =>
+  chemin(chTri({ _key: 'asc' }, { ...chFiltre(aggs), top: { bucket_sort: { sort, ...extra } } })).sql;
+const chSortDesc = [{ 'f>m': { order: 'desc' } }];
 check(
-  chemin(
-    chTri(
-      { _key: 'asc' },
-      {
-        ...chFiltre({ m: { min: { field: 'bytes' } } }),
-        top: { bucket_sort: { sort: [{ 'f>m': { order: 'desc' } }] } }
-      }
-    )
-  ).sql.includes('ORDER BY f_m DESC'),
-  'bucket_sort : le min d’un groupe vide est un trou, en dernier dans tous les cas'
+  chEcarte({ m: { min: { field: 'bytes' } } }, chSortDesc).includes('HAVING isNotNull(f_m)\nORDER BY f_m DESC\n') &&
+    chEcarte({ m: chAvg }, chSortDesc).includes('HAVING isNotNull(f_m)') &&
+    !chEcarte({ m: { sum: { field: 'bytes' } } }, chSortDesc).includes('HAVING') &&
+    !chEcarte({ m: chAvg }, chSortDesc, { gap_policy: 'insert_zeros' }).includes('HAVING') &&
+    !chEcarte({ m: chAvg }, [...chSortDesc, { _key: { order: 'asc' } }]).includes('HAVING') &&
+    !chEcarte({ m: chAvg }, [...chSortDesc, { _count: { order: 'asc' } }]).includes('HAVING') &&
+    chEcarte({ m: chAvg, n: { min: { field: 'bytes' } } }, [...chSortDesc, { 'f>n': { order: 'asc' } }]).includes(
+      'HAVING (isNotNull(f_m) OR isNotNull(f_n))'
+    ),
+  'bucket_sort : gap_policy skip écarte le groupe qui n’a aucune de ses valeurs de tri ; sum, _key et _count en ont toujours une'
 );
 for (const [title, dsl] of [
   ['agrégation inconnue', chTri({ absent: 'desc' }, { lat: chAvg })],

@@ -8,4 +8,4 @@ SELECT
     avgIfOrNull(latency_ms, level = 'ERROR') AS f_m
 FROM logs.events
 GROUP BY s
-ORDER BY f_m DESC;
+ORDER BY f_m DESC NULLS FIRST;

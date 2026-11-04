@@ -4,8 +4,8 @@
 SELECT
     service AS svc,
     count() AS doc_count,
-    quantilesTDigest(0.99, 0.5)(latency_ms) AS p
+    quantilesTDigest(0.5, 0.99)(latency_ms) AS p
 FROM logs.events
 GROUP BY svc
-ORDER BY p[2] DESC, svc ASC
+ORDER BY p[2] ASC, svc ASC
 LIMIT 1;

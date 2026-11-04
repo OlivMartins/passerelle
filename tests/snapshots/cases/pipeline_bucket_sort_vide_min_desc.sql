@@ -8,5 +8,6 @@ SELECT
     minIfOrNull(bytes, service != 'api') AS f_m
 FROM logs.events
 GROUP BY svc
+HAVING isNotNull(f_m)
 ORDER BY f_m DESC
 LIMIT 10;

@@ -7,7 +7,7 @@ WITH
             service AS svc
         FROM logs.events
         GROUP BY svc
-        ORDER BY avgIfOrNull(latency_ms, level = 'ERROR') DESC, svc ASC
+        ORDER BY avgIfOrNull(latency_ms, level = 'ERROR') DESC NULLS FIRST, svc ASC
         LIMIT 2
     )
 SELECT
@@ -27,7 +27,7 @@ WITH
             service AS svc
         FROM logs.events
         GROUP BY svc
-        ORDER BY avgIfOrNull(latency_ms, level = 'ERROR') DESC, svc ASC
+        ORDER BY avgIfOrNull(latency_ms, level = 'ERROR') DESC NULLS FIRST, svc ASC
         LIMIT 2
     )
 SELECT

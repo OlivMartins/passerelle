@@ -1976,6 +1976,7 @@ const HM = {
  * null pour min, max, avg… là où ClickHouse répond 0 ou nan. Le combinateur -OrNull rétablit le null.
  */
 const NULL_WHEN_EMPTY = new Set(['min', 'max', 'avg', 'varPop', 'stddevPop', 'avgWeighted']);
+const EMPTY_SORT = { min: 'high', avg: 'high', varPop: 'high', stddevPop: 'high', quantile: 'high', max: 'low' };
 function aggCall(fn, args, cond, mayBeEmpty) {
   const orNull = mayBeEmpty && NULL_WHEN_EMPTY.has(fn.replace(/Array$/, '')) ? 'OrNull' : '';
   return cond ? `${fn}If${orNull}(${args}, ${cond})` : `${fn}${orNull}(${args})`;
@@ -1985,13 +1986,13 @@ function metricDef(ctx, name, type, body, parent) {
   const A = aliasOf(name);
   const colType =
     typeof body.field === 'string' && !body.script && body.missing === undefined ? fieldType(ctx, body.field) : null;
-  // min et max d’un groupe qui peut rester sans valeur : voir pathOrder
-  const bound = (fn, x) => (fn === 'min' || fn === 'max' ? { infinite: fn, nullable: mayBeNull(ctx, x) } : {});
+  // Valeur de tri d’un groupe sans valeur : voir pathOrder. sum et les comptages valent 0 et ne sont jamais NULL
+  const emptySort = (fn, x) => (EMPTY_SORT[fn] ? { empty: EMPTY_SORT[fn], nullable: mayBeNull(ctx, x) } : {});
   // Sur un champ multivalué, avg, sum, min et max portent sur toutes les valeurs : combinateur -Array
   const simple = (fn, x) => [
     {
       alias: A,
-      ...bound(fn, x),
+      ...emptySort(fn, x),
       render: (c, e) => aggCall(colType && colType.array && /^(avg|sum|min|max)$/.test(fn) ? `${fn}Array` : fn, x, c, e)
     }
   ];
@@ -2053,7 +2054,7 @@ function metricDef(ctx, name, type, body, parent) {
       const sumArg = !arr && mayBeNull(ctx, x) ? `ifNull(${x}, 0)` : x;
       const out = cols.map(([fn, suf]) => ({
         alias: aliasOf(`${name}_${suf}`),
-        ...bound(fn, x),
+        ...emptySort(fn, x),
         render: (c, e) =>
           arr && fn === 'count'
             ? aggCall('sum', `length(${x})`, c)
@@ -2083,6 +2084,7 @@ function metricDef(ctx, name, type, body, parent) {
         {
           alias: A,
           percents: ps,
+          ...emptySort('quantile', x),
           render: (c, e) => {
             const q = c ? `${fnq}If(${ps.join(', ')})(${x}, ${c})` : `${fnq}(${ps.join(', ')})(${x})`;
             return e ? `arrayMap(v -> if(isNaN(v), NULL, v), ${q})` : q;
@@ -2097,6 +2099,7 @@ function metricDef(ctx, name, type, body, parent) {
         .map(v => chNum(v, 'percentile_ranks.values'))
         .map(v => ({
           alias: aliasOf(`${name}_${String(v).replace(/\W/g, '_')}`),
+          ...emptySort('quantile', x),
           render: c =>
             c
               ? `round(100 * countIf(${pArg(x)} <= ${v} AND ${c}) / countIf(${x}, ${c}), 3)`
@@ -2107,7 +2110,9 @@ function metricDef(ctx, name, type, body, parent) {
       ctx.stats.ok++;
       const v = valueExpr(ctx, body.value || {}, 'num');
       const w = valueExpr(ctx, body.weight || {}, 'num');
-      return [{ alias: A, render: (c, e) => aggCall('avgWeighted', `${v}, ${w}`, c, e) }];
+      return [
+        { alias: A, ...emptySort('avg', `${v}, ${w}`), render: (c, e) => aggCall('avgWeighted', `${v}, ${w}`, c, e) }
+      ];
     }
     case 'top_metrics': {
       ctx.stats.ok++;
@@ -2262,7 +2267,7 @@ const SINGLE_BUCKET_TYPES = new Set([
  * Ce que désigne un chemin sur un niveau :
  *   sql       l’expression à écrire dans la requête du niveau, qui voit ses alias
  *   inline    la même sans alias, pour la sous-requête qui choisit les premiers groupes
- *   infinite  min ou max sur un groupe qui peut rester sans valeur (voir pathOrder)
+ *   empty     valeur de tri d’un groupe qui peut rester sans valeur : high ou low (voir pathOrder)
  */
 function pathTarget(ctx, L, path) {
   const { steps, key, count } = parseAggPath(path);
@@ -2270,7 +2275,7 @@ function pathTarget(ctx, L, path) {
   const fromColumn = (m, element = '') => ({
     sql: `${m.alias}${element}`,
     inline: `${m.render(null)}${element}`,
-    infinite: m.nullable ? m.infinite : undefined
+    empty: m.nullable ? m.empty : undefined
   });
   if (count) {
     const c = column('doc_count');
@@ -2338,7 +2343,7 @@ function metricTarget(ctx, L, path, name, type, body, key, cond) {
     : metrics.find(x => key !== null && x.alias === aliasOf(`${name}_${pathKeySuffix(key)}`));
   if (!m) throw new Error(`chemin « ${path} » : la mesure ${type} se lit par l’une de ses valeurs (nom.clé)`);
   const sql = `${m.render(cond, true)}${type === 'percentiles' ? '[1]' : ''}`;
-  return { sql, inline: sql, infinite: m.infinite };
+  return { sql, inline: sql, empty: cond || m.nullable ? m.empty : undefined };
 }
 function resolveBucketsPath(ctx, L, path) {
   const p = String(path);
@@ -2347,14 +2352,19 @@ function resolveBucketsPath(ctx, L, path) {
   return pathTarget(ctx, L, p).sql;
 }
 /*
- * Sens d’un tri sur un chemin. Pour Elasticsearch, un groupe sans valeur vaut NaN (toujours en dernier), sauf min et max :
- * +∞ et −∞, en tête de min décroissant et de max croissant. ClickHouse place NULL en dernier, sauf avec NULLS FIRST.
- * bucket_sort lit ces infinis comme des trous : le groupe vient en dernier dans tous les cas.
+ * Sens d’un tri sur un chemin. Elasticsearch 8 et suivants classent les groupes par Double.compare : un groupe sans valeur
+ * vaut NaN ou +∞ (avg, min, centile : high), en tête d’un tri décroissant, ou −∞ (max : low), en tête d’un tri croissant.
+ * ClickHouse place NULL et NaN en dernier, sauf avec NULLS FIRST. Elasticsearch 7.17 mettait NaN en dernier dans les deux sens.
+ * bucket_sort lit ces valeurs comme des trous : voir bucketSortKeeps.
  */
 function pathOrder(L, target, dir, sql) {
-  const first =
-    !L.sorted && ((target.infinite === 'min' && dir === 'desc') || (target.infinite === 'max' && dir === 'asc'));
+  const first = !L.sorted && ((target.empty === 'high' && dir === 'desc') || (target.empty === 'low' && dir === 'asc'));
   return `${sql} ${dir.toUpperCase()}${first ? ' NULLS FIRST' : ''}`;
+}
+// bucket_sort avec gap_policy skip, le défaut : le groupe qui n’a aucune de ses valeurs de tri est écarté
+function bucketSortKeeps(ctx, L) {
+  const targets = L.order.map(o => (o.raw || o.by === '_key' || o.by === '_count' ? null : pathTarget(ctx, L, o.by)));
+  return targets.length && targets.every(t => t && t.empty) ? orJoin(targets.map(t => `isNotNull(${t.sql})`)) : null;
 }
 // Accepte les trois écritures d’Elasticsearch : "champ", { champ: "desc" } et { champ: { order: "desc" } }
 function parseOrder(order, def) {
@@ -3180,6 +3190,8 @@ function aggQuery(ctx, env, path) {
         if (b.sort) {
           L.order = parseOrder(b.sort, L.order);
           L.sorted = true;
+          const keeps = String(b.gap_policy || 'skip').toLowerCase() === 'skip' ? bucketSortKeeps(ctx, L) : null;
+          if (keeps) having.push(keeps);
         }
         limitOverride = {
           n: b.size === undefined ? undefined : chInt(b.size, 'bucket_sort.size'),

@@ -7,8 +7,8 @@ WITH
             service AS svc
         FROM logs.events
         GROUP BY svc
-        ORDER BY avgIfOrNull(latency_ms, isNull(env)) DESC, svc ASC
-        LIMIT 2
+        ORDER BY avgIfOrNull(latency_ms, isNull(env)) ASC, svc ASC
+        LIMIT 1
     )
 SELECT
     service AS svc,

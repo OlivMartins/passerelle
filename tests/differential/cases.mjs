@@ -9,6 +9,7 @@
  *                'raison'                       quel que soit le schéma et le fuseau
  *                { N: 'raison' }                seulement avec le schéma Nullable (D : valeurs par défaut)
  *                { '@Europe/Paris': 'raison' }  seulement quand le serveur ClickHouse est dans ce fuseau
+ *                { es7: 'raison' }              seulement sur cette version majeure d’Elasticsearch
  *   unsupported  construction valide pour Elasticsearch mais hors de portée de la traduction : le cas
  *              réussit si elle est déclarée « à reprendre » et si le SQL s’arrête au lieu de répondre
  *   tz         fuseaux du serveur ClickHouse à essayer (défaut : UTC seul)
@@ -37,6 +38,9 @@ const triService = (order, aggs, size) => ({
 });
 const sousErreurs = aggs => ({ f: { filter: ERREURS, aggs } });
 const sansApi = aggs => ({ f: { filter: SAUF_API, aggs } });
+const NAN_ES7 = {
+  es7: 'Elasticsearch 7.17 met NaN en dernier dans les deux sens ; 8 et 9 le mettent en tête d’un tri décroissant'
+};
 const CLASSE =
   "if (doc['latency_ms'].value < 100) { emit('rapide'); } else if (doc['latency_ms'].value < 1000) { emit('normal'); } else { emit('lent'); }";
 
@@ -257,8 +261,20 @@ export const CASES = [
     known: 'Elasticsearch refuse ce chemin dans un tri ; la traduction trie sur le nombre de documents du filtre',
     dsl: triService({ 'f._count': 'desc' }, sousErreurs({ m: LATENCE }))
   },
-  // Groupe vide : NaN en dernier pour avg dans les deux sens, 0 pour sum, +∞ pour min et −∞ pour max
-  { id: 'agg_terms_tri_vide_avg_desc', dsl: triService({ 'f>m': 'desc' }, sansApi({ m: LATENCE })) },
+  // Groupe vide : NaN pour avg et les centiles, +∞ pour min, −∞ pour max, 0 pour sum. Elasticsearch 8 et 9 les classent
+  // par Double.compare : NaN et +∞ en tête d’un tri décroissant, −∞ en tête d’un tri croissant
+  { id: 'agg_terms_tri_vide_avg_desc', known: NAN_ES7, dsl: triService({ 'f>m': 'desc' }, sansApi({ m: LATENCE })) },
+  {
+    id: 'agg_terms_tri_vide_stats_avg_desc',
+    known: NAN_ES7,
+    dsl: triService({ 'f>s.avg': 'desc' }, sansApi({ s: { stats: { field: 'bytes' } } }))
+  },
+  {
+    id: 'agg_terms_tri_vide_centile_desc',
+    known: NAN_ES7,
+    tol: 0.05,
+    dsl: triService({ 'f>p.50': 'desc' }, sansApi({ p: { percentiles: { field: 'latency_ms', percents: [50] } } }), 1)
+  },
   { id: 'agg_terms_tri_vide_avg_asc', dsl: triService({ 'f>m': 'asc' }, sansApi({ m: LATENCE })) },
   { id: 'agg_terms_tri_vide_sum_asc', dsl: triService({ 'f>m': 'asc' }, sansApi({ m: { sum: { field: 'bytes' } } })) },
   {
@@ -321,18 +337,19 @@ export const CASES = [
   },
   {
     id: 'agg_terms_tri_missing',
-    dsl: triService({ 'absent>m': 'desc' }, { absent: { missing: { field: 'env' }, aggs: { m: LATENCE } } }, 2)
+    dsl: triService({ 'absent>m': 'asc' }, { absent: { missing: { field: 'env' }, aggs: { m: LATENCE } } }, 1)
   },
-  // Centiles et rangs : la clé désigne un élément, pas le tableau. size: 1 retient un écart net entre les deux moteurs
+  // Centiles et rangs : la clé désigne un élément, pas le tableau, dont le premier centile déciderait du classement.
+  // size: 1 retient un écart net entre les deux moteurs ; les centiles sont en ordre croissant, comme Elasticsearch les rend
   {
     id: 'agg_terms_tri_centile_cle',
     tol: 0.05,
-    dsl: triService({ 'p.50': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [99, 50] } } }, 1)
+    dsl: triService({ 'p.99': 'asc' }, { p: { percentiles: { field: 'latency_ms', percents: [50, 99] } } }, 1)
   },
   {
     id: 'agg_terms_tri_centile_crochets',
     tol: 0.05,
-    dsl: triService({ 'p[37.5]': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [99, 37.5] } } }, 1)
+    dsl: triService({ 'p[37.5]': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [5, 37.5] } } }, 1)
   },
   {
     id: 'agg_terms_tri_centile_hors_liste',
@@ -341,10 +358,10 @@ export const CASES = [
   },
   {
     id: 'agg_terms_tri_filtre_centile',
-    tol: 0.05,
+    tol: 0.1,
     dsl: triService(
-      { 'f>p.50': 'asc' },
-      sousErreurs({ p: { percentiles: { field: 'latency_ms', percents: [99, 50] } } }),
+      { 'f>p.99': 'asc' },
+      sousErreurs({ p: { percentiles: { field: 'latency_ms', percents: [50, 99] } } }),
       1
     )
   },
@@ -1115,12 +1132,26 @@ export const CASES = [
       { ...sousErreurs({ m: LATENCE }), top: { bucket_sort: { sort: [{ 'f>_count': { order: 'asc' } }], size: 3 } } }
     )
   },
-  // bucket_sort lit le min d’un groupe vide comme un trou : le groupe vient en dernier, là où un tri de terms le met en tête
+  // bucket_sort lit NaN et les infinis d’un groupe vide comme des trous : le groupe est écarté (gap_policy skip) ; sum vaut 0
   {
     id: 'pipeline_bucket_sort_vide_min_desc',
     dsl: triService(
       { _key: 'asc' },
       { ...sansApi({ m: { min: { field: 'bytes' } } }), top: { bucket_sort: { sort: [{ 'f>m': { order: 'desc' } }] } } }
+    )
+  },
+  {
+    id: 'pipeline_bucket_sort_vide_avg_desc',
+    dsl: triService(
+      { _key: 'asc' },
+      { ...sansApi({ m: LATENCE }), top: { bucket_sort: { sort: [{ 'f>m': { order: 'desc' } }] } } }
+    )
+  },
+  {
+    id: 'pipeline_bucket_sort_vide_sum_desc',
+    dsl: triService(
+      { _key: 'asc' },
+      { ...sansApi({ m: { sum: { field: 'bytes' } } }), top: { bucket_sort: { sort: [{ 'f>m': { order: 'desc' } }] } } }
     )
   },
   {

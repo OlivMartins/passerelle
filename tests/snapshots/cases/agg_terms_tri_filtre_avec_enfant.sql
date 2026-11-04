@@ -8,7 +8,7 @@ SELECT
     avgIfOrNull(latency_ms, status >= 500) AS f_m
 FROM logs.events
 GROUP BY svc
-ORDER BY f_m DESC, svc ASC
+ORDER BY f_m DESC NULLS FIRST, svc ASC
 LIMIT 2;
 
 -- Agrégation svc › h
@@ -18,7 +18,7 @@ WITH
             service AS svc
         FROM logs.events
         GROUP BY svc
-        ORDER BY avgIfOrNull(latency_ms, status >= 500) DESC, svc ASC
+        ORDER BY avgIfOrNull(latency_ms, status >= 500) DESC NULLS FIRST, svc ASC
         LIMIT 2
     )
 SELECT
