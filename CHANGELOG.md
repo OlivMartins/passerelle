@@ -2,10 +2,14 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
-## [Non publié]
+## [1.7.2] - 2026-11-04
 
 ### Modifié
 
+- **Interface** : la section « Pipelines » rejoint « Ingestion » et en devient le second outil, à côté d’Elasticsearch, avec le même sélecteur segmenté que « Autres sources ». La barre de navigation passe de sept à six sections, sur mobile comme sur ordinateur. Chaque outil garde son banc, ses onglets (Configuration, Topologie, Remarques, Valider), ses exemples et son archive ; le moteur, l’API et la CLI ne changent pas.
+  - Un pipeline Logstash (`.conf`) déposé n’importe où dans l’interface ouvre l’outil Logstash d’« Ingestion » ; un pipeline d’ingestion Elasticsearch ouvre l’outil Elasticsearch. Le menu d’exemples et les fichiers acceptés par « Ouvrir des fichiers » suivent l’outil affiché.
+  - Une vue « Pipelines » mémorisée par le navigateur lors d’une session avec une version précédente ouvre l’outil Logstash d’« Ingestion » au lieu de retomber sur « Requêtes ».
+- **README** : le GIF de démonstration et la capture « Pipelines » (en clair et en sombre) sont refaits avec l’interface de cette version : six entrées de navigation, et le sélecteur d’« Ingestion » qui passe d’Elasticsearch à Logstash.
 - **Code** : le moteur (`src/engine/`), `src/node/`, `src/server.js` et l'interface sont des modules ES : chaque fichier déclare ce qu'il importe et ce qu'il exporte, `src/engine/index.js` réunit le moteur, qui n'importe rien de Node.js ni du navigateur. `scripts/bundle.mjs` (esbuild 0.28.2) réunit les modules en un fichier pour la page, le binaire et l'image conteneur ; `scripts/engine.mjs` et la concaténation dans une portée commune disparaissent, et les tests importent le moteur au lieu de l'évaluer. Les traductions sont inchangées : les instantanés de `tests/snapshots` le sont, octet pour octet.
   - `src/node/common.js`, `config.js` et `vector.js` reprennent ce que `src/server.js` prêtait à `ops`, `verify` et `assist`.
   - Le seul cycle d'import du moteur qui reste est celui de `base` et du DSL (`dsl`, `dsl-params`, `dsl-strict`) ; `scripts/test.mjs` en refuse tout autre.
@@ -419,6 +423,7 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
+[1.7.2]: https://github.com/OlivMartins/passerelle/compare/v1.7.1...v1.7.2
 [1.7.1]: https://github.com/OlivMartins/passerelle/compare/v1.7.0...v1.7.1
 [1.7.0]: https://github.com/OlivMartins/passerelle/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/OlivMartins/passerelle/compare/v1.5.0...v1.6.0

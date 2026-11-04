@@ -1,6 +1,6 @@
 {
   "name": "passerelle",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "type": "module",
   "private": true,
   "description": "Traduction des requêtes DSL Elasticsearch en SQL ClickHouse et des pipelines Logstash en configurations Vector",
