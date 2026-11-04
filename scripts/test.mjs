@@ -1722,6 +1722,294 @@ check(
   'contrôles : un pinned_panels vide ou illisible ne crée aucun contrôle'
 );
 
+/* ---------- Agrégations des visualisations Kibana (visState) : regroupements, mesures, pipelines frères ---------- */
+// Une visualisation par agrégations sur la vue « logs-web-* » de l’exemple (table logs.web), traduite avec sa configuration
+const kbVView = {
+  type: 'index-pattern',
+  id: 'dv1',
+  attributes: { title: 'logs-web-*', timeFieldName: '@timestamp', fields: '[]' }
+};
+const kbVis = (title, type, aggs) => ({
+  type: 'visualization',
+  id: title,
+  attributes: {
+    title,
+    visState: JSON.stringify({ title, type, params: {}, aggs }),
+    kibanaSavedObjectMeta: {
+      searchSourceJSON: JSON.stringify({
+        indexRefName: 'kibanaSavedObjectMeta.searchSourceJSON.index',
+        query: { query: '', language: 'kuery' },
+        filter: []
+      })
+    }
+  },
+  references: [{ name: 'kibanaSavedObjectMeta.searchSourceJSON.index', type: 'index-pattern', id: 'dv1' }]
+});
+const kbVRun = (...list) =>
+  E.kibanaInventory(kbObjs(kbVView, ...list), kibanaCfg, {}).entries.filter(x => x.type === 'visualization');
+const kbVOne = vis => kbVRun(vis)[0];
+const kbVSql = e => e.queries.map(q => q.sql).join('\n');
+const kbVLabels = e => e.issues.map(i => `${i.kind}:${i.label}`);
+const kbVCount = { id: '1', enabled: true, type: 'count', schema: 'metric' };
+const kbVTerms = (id, field, orderBy) => ({
+  id,
+  enabled: true,
+  type: 'terms',
+  schema: 'bucket',
+  params: { field, size: 3, orderBy, order: 'desc' }
+});
+const kbVFiltered = (id, query, metric) => ({
+  id,
+  enabled: true,
+  type: 'filtered_metric',
+  schema: 'metric',
+  params: {
+    customBucket: {
+      id: `${id}-filter`,
+      enabled: true,
+      type: 'filter',
+      params: { filter: { query, language: 'kuery' } },
+      schema: 'bucket'
+    },
+    customMetric: Object.assign({ id: `${id}-metric`, enabled: true, schema: 'metric' }, metric)
+  }
+});
+const kbVSibling = (type, bucket, metric) => ({
+  id: '1',
+  enabled: true,
+  type,
+  schema: 'metric',
+  params: {
+    customBucket: Object.assign({ id: '1-bucket', enabled: true, schema: 'bucketAgg' }, bucket),
+    customMetric: Object.assign({ id: '1-metric', enabled: true, schema: 'metricAgg' }, metric)
+  }
+});
+const kbVAvgDuration = { type: 'avg', params: { field: 'event.duration' } };
+const kbVByService = { type: 'terms', params: { field: 'service.name', size: 5, orderBy: '_key', order: 'desc' } };
+const kbVByHour = { type: 'date_histogram', params: { field: '@timestamp', interval: '1h', min_doc_count: 1 } };
+
+// Regroupements : jamais lus comme des mesures
+const kbVFilter = kbVOne(
+  kbVis('Filtre', 'histogram', [
+    kbVCount,
+    {
+      id: '2',
+      enabled: true,
+      type: 'filter',
+      schema: 'segment',
+      params: { filter: { query: 'service.name:api', language: 'kuery' } }
+    },
+    kbVTerms('3', 'host.name', '_key')
+  ])
+);
+check(
+  kbVFilter.verdict === 'ready' &&
+    !kbVLabels(kbVFilter).some(l => /mesure/.test(l)) &&
+    /AND service\.name = 'api'\nGROUP BY host_name/.test(kbVSql(kbVFilter)),
+  'visualisation : un regroupement « filter » devient une condition du SQL, pas une « mesure sans traduction »'
+);
+const kbVSamplers = kbVRun(
+  kbVis('Echantillon', 'table', [
+    kbVCount,
+    { id: '2', enabled: true, type: 'sampler', schema: 'bucket', params: { shard_size: 500 } },
+    kbVTerms('3', 'host.name', '_key')
+  ]),
+  kbVis('Echantillon diversifié', 'table', [
+    kbVCount,
+    {
+      id: '2',
+      enabled: true,
+      type: 'diversified_sampler',
+      schema: 'bucket',
+      params: { shard_size: 500, field: 'host.name', max_docs_per_value: 2 }
+    },
+    kbVTerms('3', 'service.name', '_key')
+  ])
+);
+check(
+  kbVSamplers.every(
+    e =>
+      e.verdict === 'review' &&
+      !kbVLabels(e).some(l => /mesure/.test(l)) &&
+      /GROUP BY (host|service)_name/.test(kbVSql(e)) &&
+      e.queries[0].notes.some(n => /sampler ignoré/.test(n.title || n.label || ''))
+  ),
+  'visualisation : sampler et diversified_sampler sont des regroupements, traduits sans l’échantillonnage et à vérifier'
+);
+const kbVUnknownBuckets = kbVRun(
+  kbVis('IP', 'table', [
+    kbVCount,
+    {
+      id: '2',
+      enabled: true,
+      type: 'ip_prefix',
+      schema: 'bucket',
+      params: { field: 'source.ip', ipPrefix: { prefix_length: 16 } }
+    }
+  ]),
+  kbVis('Séries', 'table', [kbVCount, { id: '2', enabled: true, type: 'time_series', schema: 'bucket', params: {} }])
+);
+check(
+  kbVUnknownBuckets.every(e => e.verdict === 'todo') &&
+    kbVLabels(kbVUnknownBuckets.find(e => e.title === 'IP')).includes('todo:regroupement ip_prefix') &&
+    kbVLabels(kbVUnknownBuckets.find(e => e.title === 'Séries')).includes('todo:regroupement time_series') &&
+    kbVUnknownBuckets.every(e => !kbVLabels(e).some(l => /mesure/.test(l))),
+  'visualisation : ip_prefix et time_series sont reconnus comme regroupements, à reprendre sous leur nom exact'
+);
+
+// Mesures : filtered_metric et single_percentile_rank
+const kbVFiltAvg = kbVOne(
+  kbVis('Mesure filtrée', 'table', [
+    kbVFiltered('1', 'http.response.status_code >= 500', kbVAvgDuration),
+    kbVFiltered('2', 'event.outcome:failure', { type: 'count', params: {} }),
+    kbVTerms('3', 'service.name', '_key')
+  ])
+);
+check(
+  kbVFiltAvg.verdict === 'ready' &&
+    kbVLabels(kbVFiltAvg).length === 0 &&
+    kbVSql(kbVFiltAvg).includes(
+      'avgIfOrNull(event.duration, http.response.status_code >= 500) AS filtre_avg_event_duration'
+    ) &&
+    kbVSql(kbVFiltAvg).includes('countIf(http.response.status_code >= 500) AS filtre_doc_count') &&
+    kbVSql(kbVFiltAvg).includes("countIf(event.outcome = 'failure') AS filtre_2_doc_count"),
+  'visualisation : filtered_metric (moyenne et comptage) → avgIf et countIf dans la même passe, une colonne par mesure'
+);
+const kbVFiltBad = kbVRun(
+  kbVis('Sans filtre', 'table', [
+    {
+      id: '1',
+      enabled: true,
+      type: 'filtered_metric',
+      schema: 'metric',
+      params: { customMetric: { id: '1-metric', type: 'count' } }
+    }
+  ]),
+  kbVis('Mesure interne refusée', 'table', [kbVFiltered('1', 'a:b', { type: 'geo_bounds', params: { field: 'geo' } })])
+);
+// L’inventaire trie les objets par titre : on les retrouve par leur titre, pas par leur rang
+const kbVBad = title => kbVFiltBad.find(e => e.title === title);
+check(
+  kbVBad('Sans filtre').verdict === 'todo' &&
+    kbVLabels(kbVBad('Sans filtre')).includes('todo:mesure filtered_metric illisible') &&
+    kbVBad('Mesure interne refusée').verdict === 'todo' &&
+    kbVLabels(kbVBad('Mesure interne refusée')).includes('todo:mesure geo_bounds'),
+  'visualisation : filtered_metric sans filtre ou dont la mesure est refusée → à reprendre, avec la raison'
+);
+const kbVOrdered = kbVOne(
+  kbVis('Tri sur mesure filtrée', 'table', [
+    kbVFiltered('1', 'http.response.status_code >= 500', kbVAvgDuration),
+    kbVTerms('3', 'service.name', '1')
+  ])
+);
+check(
+  kbVLabels(kbVOrdered).includes('review:tri sur une mesure filtrée') &&
+    /ORDER BY doc_count DESC, service_name ASC/.test(kbVSql(kbVOrdered)) &&
+    !/ORDER BY filtre\b/.test(kbVSql(kbVOrdered)),
+  'visualisation : tri sur une mesure filtrée → par nombre de documents, signalé (jamais « ORDER BY » sur une colonne absente)'
+);
+const kbVRank = (value, orderBy) =>
+  kbVOne(
+    kbVis('Rang', 'table', [
+      {
+        id: '2',
+        enabled: true,
+        type: 'single_percentile_rank',
+        schema: 'metric',
+        params: { field: 'event.duration', value }
+      },
+      kbVTerms('3', 'service.name', orderBy)
+    ])
+  );
+const kbVRankInt = kbVRank(500, '_key');
+check(
+  kbVRankInt.verdict === 'ready' &&
+    kbVSql(kbVRankInt).includes(
+      'round(100 * countIf(event.duration <= 500) / count(event.duration), 3) AS single_percentile_rank_event_duration_500'
+    ),
+  'visualisation : single_percentile_rank → rang du centile (part des documents sous la valeur)'
+);
+check(
+  /ORDER BY single_percentile_rank_event_duration_500 DESC, service_name ASC/.test(kbVSql(kbVRank(500, '2'))) &&
+    kbVLabels(kbVRank(500, '2')).length === 0,
+  'visualisation : tri sur un rang de centile entier → colonne du rang'
+);
+check(
+  kbVLabels(kbVRank(99.5, '2')).includes('review:tri sur un rang de centile non entier') &&
+    /ORDER BY doc_count DESC/.test(kbVSql(kbVRank(99.5, '2'))) &&
+    kbVLabels(kbVRank('', '_key')).includes('todo:mesure single_percentile_rank sans valeur') &&
+    kbVRank('', '_key').verdict === 'todo',
+  'visualisation : rang de centile non entier trié → signalé ; sans valeur → à reprendre'
+);
+
+// Pipelines frères : moyenne, somme, minimum, maximum des groupes d’un regroupement personnalisé
+const kbVSiblings = [
+  ['avg_bucket', kbVByHour, { type: 'count', params: {} }, /SELECT\n {4}avg\(doc_count\) AS avg_bucket\nFROM \(/],
+  ['sum_bucket', kbVByService, kbVAvgDuration, /sum\(avg_event_duration\) AS sum_bucket/],
+  [
+    'min_bucket',
+    kbVByService,
+    kbVAvgDuration,
+    /min\(avg_event_duration\) AS min_bucket,\n {4}argMin\(service_name, avg_event_duration\) AS min_bucket_key/
+  ],
+  [
+    'max_bucket',
+    kbVByHour,
+    { type: 'count', params: {} },
+    /max\(doc_count\) AS max_bucket,\n {4}argMax\(periode, doc_count\) AS max_bucket_key/
+  ]
+].map(([type, bucket, metric, re]) => [type, re, kbVOne(kbVis(type, 'metric', [kbVSibling(type, bucket, metric)]))]);
+check(
+  kbVSiblings.every(
+    ([, re, e]) => e.verdict === 'ready' && kbVLabels(e).length === 0 && e.queries.length === 1 && re.test(kbVSql(e))
+  ),
+  'visualisation : avg_bucket, sum_bucket, min_bucket et max_bucket → SQL du pipeline sur les groupes, sans « à reprendre »'
+);
+const kbVNested = kbVOne(
+  kbVis('Pipeline sous un regroupement', 'table', [
+    kbVSibling('sum_bucket', kbVByHour, { type: 'count', params: {} }),
+    kbVTerms('2', 'host.name', '_key')
+  ])
+);
+check(
+  kbVNested.verdict === 'todo' &&
+    kbVLabels(kbVNested).includes('todo:pipeline sum_bucket sous un regroupement') &&
+    /GROUP BY host_name, periode/.test(kbVSql(kbVNested)),
+  'visualisation : pipeline frère sous un autre regroupement → à reprendre, le SQL des groupes est produit'
+);
+const kbVSiblingBad = kbVOne(
+  kbVis('Pipeline sans regroupement', 'metric', [
+    {
+      id: '1',
+      enabled: true,
+      type: 'avg_bucket',
+      schema: 'metric',
+      params: { customMetric: { id: '1-metric', type: 'count' } }
+    }
+  ])
+);
+check(
+  kbVSiblingBad.verdict === 'todo' && kbVLabels(kbVSiblingBad).includes('todo:pipeline avg_bucket'),
+  'visualisation : pipeline frère sans regroupement lisible → à reprendre'
+);
+const kbVParent = kbVOne(
+  kbVis('Dérivée d’une mesure filtrée', 'line', [
+    kbVFiltered('1', 'a:b', kbVAvgDuration),
+    { id: '2', enabled: true, type: 'derivative', schema: 'metric', params: { metricAgg: '1' } },
+    {
+      id: '3',
+      enabled: true,
+      type: 'date_histogram',
+      schema: 'segment',
+      params: { field: '@timestamp', interval: '1h' }
+    }
+  ])
+);
+check(
+  kbVLabels(kbVParent).includes('todo:pipeline derivative') && kbVParent.verdict === 'todo',
+  'visualisation : dérivée d’une mesure filtrée → à reprendre (le moteur ne désigne pas une mesure sous un filtre)'
+);
+
 /* ---------- Tableaux de bord Grafana ---------- */
 const gDash = JSON.stringify(grafanaOut.dashboard);
 const gPanel = title => grafanaOut.dashboard.panels.find(p => p.title === title) || { targets: [] };

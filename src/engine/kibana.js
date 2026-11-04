@@ -463,8 +463,36 @@ const VIS_BUCKETS = new Set([
   'significant_terms',
   'significant_text',
   'geohash_grid',
-  'geotile_grid'
+  'geotile_grid',
+  // Regroupements que Kibana 8.x et 9.x proposent aussi : sans eux, une visualisation les lirait comme des mesures
+  'filter',
+  'sampler',
+  'diversified_sampler',
+  'ip_prefix',
+  'time_series'
 ]);
+// Nom de colonne d’un regroupement qui n’a pas de champ (ou dont le champ ne le nomme pas)
+const VIS_BUCKET_NAMES = {
+  date_histogram: 'periode',
+  filters: 'filtres',
+  filter: 'filtre',
+  sampler: 'echantillon',
+  diversified_sampler: 'echantillon'
+};
+// Corps d’une agrégation filter : la requête de Kibana ({ query, language }) et le rectangle géographique, ou tous les documents
+function visFilterDef(p, env) {
+  const geo = isObj(p.geo_bounding_box) ? { geo_bounding_box: p.geo_bounding_box } : null;
+  if (geo)
+    env.issues.push({
+      kind: 'review',
+      label: 'filtre géographique',
+      detail:
+        'Un rectangle de carte suppose une colonne géographique : vérifiez la traduction de la condition sur les coordonnées.'
+    });
+  const parts = [queryDSL(p.filter, env, env.issues), geo].filter(Boolean);
+  if (!parts.length) return { match_all: {} };
+  return parts.length === 1 ? parts[0] : { bool: { filter: parts } };
+}
 // Nom d’agrégation, donc de colonne SQL : lisible, sans accents ni espaces
 const aggName = (used, base) => {
   let n =
@@ -511,6 +539,48 @@ function visMetric(a, env, used) {
       };
     case 'percentile_ranks':
       return { name: aggName(used, label), def: { percentile_ranks: { field, values: p.values || [] } } };
+    case 'single_percentile_rank': {
+      const v = p.value === '' || p.value === null ? NaN : Number(p.value);
+      if (!Number.isFinite(v)) {
+        env.issues.push({
+          kind: 'todo',
+          label: 'mesure single_percentile_rank sans valeur',
+          detail: `Le rang de centile de ${field || 'la mesure'} n’a pas de valeur lisible : la mesure est à recréer.`
+        });
+        return null;
+      }
+      const name = aggName(used, label);
+      // Pour trier un regroupement sur ce rang, Elasticsearch lit « nom.valeur » (un rang entier seulement s’écrit ainsi)
+      return {
+        name,
+        def: { percentile_ranks: { field, values: [v] } },
+        order: Number.isInteger(v) ? { path: `${name}.${v}` } : { path: null, why: 'un rang de centile non entier' }
+      };
+    }
+    case 'filtered_metric': {
+      // Une mesure calculée sur les documents d’un filtre : une agrégation filter qui porte la mesure
+      const cb = isObj(p.customBucket) && p.customBucket.type === 'filter' ? p.customBucket : null;
+      if (!cb || !isObj(p.customMetric)) {
+        env.issues.push({
+          kind: 'todo',
+          label: 'mesure filtered_metric illisible',
+          detail:
+            'La mesure filtrée n’a pas son filtre ou sa mesure (customBucket, customMetric) : elle est à recréer avec une agrégation conditionnelle (avgIf, countIf…).'
+        });
+        return null;
+      }
+      const inner = visMetric(p.customMetric, env, new Set());
+      if (!inner) return null;
+      const def = { filter: visFilterDef(isObj(cb.params) ? cb.params : {}, env) };
+      if (!inner.count) def.aggs = { [inner.name]: inner.def };
+      // Le moteur calcule la mesure en colonne <filtre>_<mesure> ; il ne sait pas trier sur le chemin « filtre>mesure »
+      return {
+        name: aggName(used, p.customLabel || 'filtre'),
+        def,
+        filtered: true,
+        order: { path: null, why: 'une mesure filtrée' }
+      };
+    }
     case 'std_dev':
       return { name: aggName(used, label), def: { extended_stats: { field } } };
     case 'top_hits': {
@@ -565,19 +635,23 @@ function visMetric(a, env, used) {
       return null;
   }
 }
+// Tri d’un regroupement sur une mesure : Elasticsearch lit le nom de la mesure, ou le chemin qu’elle déclare (rang de
+// centile : « nom.valeur »). Quand la traduction ne sait pas reproduire ce tri, les groupes restent triés par nombre de
+// documents, et la remarque le dit.
+function metricOrder(m, dir, env) {
+  if (!m.order) return { [m.name]: dir };
+  if (m.order.path) return { [m.order.path]: dir };
+  env.issues.push({
+    kind: 'review',
+    label: `tri sur ${m.order.why}`,
+    detail: `Kibana trie les groupes sur ${m.order.why} ; la traduction ne sait pas reproduire ce tri : les groupes sont triés par nombre de documents. Vérifiez l’ordre des groupes.`
+  });
+  return { _count: dir };
+}
 function visBucket(a, env, used, metricsById) {
   const p = a.params || {};
   const field = p.field;
-  const name = aggName(
-    used,
-    a.type === 'date_histogram'
-      ? 'periode'
-      : a.type === 'filters'
-        ? 'filtres'
-        : field
-          ? String(field).replace(/\.keyword$/, '')
-          : a.type
-  );
+  const name = aggName(used, VIS_BUCKET_NAMES[a.type] || (field ? String(field).replace(/\.keyword$/, '') : a.type));
   switch (a.type) {
     case 'terms':
     case 'significant_terms':
@@ -593,12 +667,13 @@ function visBucket(a, env, used, metricsById) {
           const m = visMetric(Object.assign({ id: 'orderAgg' }, p.orderAgg), env, used);
           if (m && m.count) body.order = { _count: dir };
           else if (m) {
-            body.order = { [m.name]: dir };
-            body.__orderAgg = m;
+            body.order = metricOrder(m, dir, env);
+            if (!m.order || m.order.path) body.__orderAgg = m;
           }
         } else {
           const m = metricsById.get(ob);
           if (!m || m.count) body.order = { _count: dir };
+          else if (m.order) body.order = metricOrder(m, dir, env);
           else if (m.def && Object.keys(m.def)[0] === 'percentiles') body.order = { [`${m.name}.50`]: dir };
           else if (m.def) body.order = { [m.name]: dir };
           else body.order = { _count: dir };
@@ -666,6 +741,34 @@ function visBucket(a, env, used, metricsById) {
     case 'geohash_grid':
     case 'geotile_grid':
       return { name, def: { [a.type]: { field, precision: p.precision || 5 } } };
+    case 'filter':
+      return { name, def: { filter: visFilterDef(p, env) } };
+    case 'sampler':
+    case 'diversified_sampler': {
+      const n = v => (v === undefined || v === null || v === '' || !Number.isFinite(Number(v)) ? undefined : Number(v));
+      const body = {};
+      if (n(p.shard_size) !== undefined) body.shard_size = n(p.shard_size);
+      if (a.type === 'diversified_sampler') {
+        if (field) body.field = field;
+        if (n(p.max_docs_per_value) !== undefined) body.max_docs_per_value = n(p.max_docs_per_value);
+      }
+      return { name, def: { [a.type]: body } };
+    }
+    case 'ip_prefix':
+      env.issues.push({
+        kind: 'todo',
+        label: 'regroupement ip_prefix',
+        detail: `Le regroupement par préfixe d’adresse IP${field ? ` (${field})` : ''} n’a pas de traduction automatique : la clé se calcule avec IPv4CIDRToRange (ou IPv6CIDRToRange) et la longueur de préfixe. Le niveau est absent du SQL produit.`
+      });
+      return null;
+    case 'time_series':
+      env.issues.push({
+        kind: 'todo',
+        label: 'regroupement time_series',
+        detail:
+          'Le regroupement par série temporelle (identifiant _tsid d’un index en mode time series) n’a pas de traduction automatique : sur ClickHouse, regroupez par les colonnes qui identifient une série (les dimensions de la clé de tri). Le niveau est absent du SQL produit.'
+      });
+      return null;
   }
   return null;
 }
@@ -712,6 +815,15 @@ function visAggsDSL(aggs, env) {
           ? visMetric(p.customMetric, env, used)
           : null
         : metricsById.get(String(p.metricAgg));
+    if (target && target.filtered) {
+      env.issues.push({
+        kind: 'todo',
+        label: `pipeline ${pa.type}`,
+        detail:
+          'Le calcul porte sur une mesure filtrée (filtered_metric) : le moteur ne sait pas désigner une mesure placée sous un filtre. À réécrire en SQL, par une fonction de fenêtre sur la colonne de la mesure.'
+      });
+      continue;
+    }
     if (target && !target.count && p.metricAgg === 'custom') cur[target.name] = target.def;
     const path = !target || target.count ? '_count' : target.name;
     const name = aggName(used, p.customLabel || pa.type);
@@ -730,13 +842,42 @@ function visAggsDSL(aggs, env) {
           ? { serial_diff: { buckets_path: path, lag: p.lag || 1 } }
           : { [pa.type]: { buckets_path: path } };
   }
-  if (siblingPipes.length)
-    env.issues.push({
-      kind: 'todo',
-      label: `pipeline ${siblingPipes.map(a => a.type).join(', ')}`,
-      detail:
-        'Les mesures sur un regroupement personnalisé (moyenne, somme, minimum ou maximum des groupes) se réécrivent par une sous-requête.'
-    });
+  // Moyenne, somme, minimum ou maximum des groupes d’un regroupement personnalisé : Kibana les écrit comme un
+  // regroupement (customBucket) et sa mesure (customMetric), côte à côte avec le pipeline qui les lit par son chemin
+  // « regroupement>mesure ». Le moteur les calcule par une sous-requête quand ils sont à la racine.
+  for (const sp of siblingPipes) {
+    const p = sp.params || {};
+    const cb = isObj(p.customBucket) && VIS_BUCKETS.has(p.customBucket.type) ? p.customBucket : null;
+    const bucket = cb ? visBucket(cb, env, used, new Map()) : null;
+    const metric = isObj(p.customMetric) ? visMetric(p.customMetric, env, used) : null;
+    if (!bucket || !metric) {
+      // Une mesure refusée par visMetric s’est déjà signalée ; le reste n’a pas de regroupement ou de mesure lisible
+      if (!bucket || !isObj(p.customMetric))
+        env.issues.push({
+          kind: 'todo',
+          label: `pipeline ${sp.type}`,
+          detail: `Le ${sp.type} n’a pas de regroupement ou de mesure lisible (customBucket, customMetric) : à réécrire par une sous-requête sur les groupes.`
+        });
+      continue;
+    }
+    const kind = Object.keys(bucket.def)[0];
+    const orderAgg = bucket.def[kind].__orderAgg;
+    delete bucket.def[kind].__orderAgg;
+    const subs = {};
+    if (orderAgg) subs[orderAgg.name] = orderAgg.def;
+    if (!metric.count) subs[metric.name] = metric.def;
+    cur[bucket.name] = Object.assign({}, bucket.def, Object.keys(subs).length ? { aggs: subs } : {});
+    cur[aggName(used, p.customLabel || sp.type)] = {
+      [sp.type]: { buckets_path: `${bucket.name}>${metric.count ? '_count' : metric.name}` }
+    };
+    if (cur !== root)
+      env.issues.push({
+        kind: 'todo',
+        label: `pipeline ${sp.type} sous un regroupement`,
+        detail:
+          'Le moteur calcule la moyenne, la somme, le minimum ou le maximum des groupes à la racine seulement ; ici le pipeline est sous un autre regroupement. Le SQL des groupes est produit, le résultat du pipeline s’obtient par une sous-requête dessus.'
+      });
+  }
   const clean = o => {
     for (const v of Object.values(o))
       if (isObj(v) && isObj(v.aggs)) {
