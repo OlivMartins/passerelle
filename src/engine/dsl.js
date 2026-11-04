@@ -1985,10 +1985,13 @@ function metricDef(ctx, name, type, body, parent) {
   const A = aliasOf(name);
   const colType =
     typeof body.field === 'string' && !body.script && body.missing === undefined ? fieldType(ctx, body.field) : null;
+  // min et max d’un groupe qui peut rester sans valeur : voir pathOrder
+  const bound = (fn, x) => (fn === 'min' || fn === 'max' ? { infinite: fn, nullable: mayBeNull(ctx, x) } : {});
   // Sur un champ multivalué, avg, sum, min et max portent sur toutes les valeurs : combinateur -Array
   const simple = (fn, x) => [
     {
       alias: A,
+      ...bound(fn, x),
       render: (c, e) => aggCall(colType && colType.array && /^(avg|sum|min|max)$/.test(fn) ? `${fn}Array` : fn, x, c, e)
     }
   ];
@@ -2050,6 +2053,7 @@ function metricDef(ctx, name, type, body, parent) {
       const sumArg = !arr && mayBeNull(ctx, x) ? `ifNull(${x}, 0)` : x;
       const out = cols.map(([fn, suf]) => ({
         alias: aliasOf(`${name}_${suf}`),
+        ...bound(fn, x),
         render: (c, e) =>
           arr && fn === 'count'
             ? aggCall('sum', `length(${x})`, c)
@@ -2067,9 +2071,7 @@ function metricDef(ctx, name, type, body, parent) {
     case 'percentiles': {
       ctx.stats.ok++;
       const x = valueExpr(ctx, body, 'num');
-      const ps = (body.percents || [1, 5, 25, 50, 75, 95, 99]).map(
-        p => +(chNum(p, 'percentiles.percents') / 100).toFixed(4)
-      );
+      const ps = (body.percents || [1, 5, 25, 50, 75, 95, 99]).map(percentFraction);
       ctx.notes.add(
         'info',
         'percentiles → quantilesTDigest()',
@@ -2080,6 +2082,7 @@ function metricDef(ctx, name, type, body, parent) {
       return [
         {
           alias: A,
+          percents: ps,
           render: (c, e) => {
             const q = c ? `${fnq}If(${ps.join(', ')})(${x}, ${c})` : `${fnq}(${ps.join(', ')})(${x})`;
             return e ? `arrayMap(v -> if(isNaN(v), NULL, v), ${q})` : q;
@@ -2225,21 +2228,133 @@ function metricDef(ctx, name, type, body, parent) {
       return [{ alias: A, render: () => `NULL /* à traduire : ${chComment(type)} */` }];
   }
 }
-function resolveBucketsPath(level, path) {
+/*
+ * Chemin vers une sous-agrégation, pour trier des groupes ou nourrir un pipeline. Elasticsearch le lit ainsi (AggregationPath) :
+ *     f>g>m        les regroupements à un seul groupe traversés, puis la cible
+ *     f>s.avg      une valeur d’une mesure qui en a plusieurs
+ *     f>p[99.9]    la même chose entre crochets, quand la clé contient un point
+ * Le nombre de documents d’un filtre s’écrit f>_count ou f._count dans un pipeline, f ou f.doc_count dans un tri.
+ */
+function parseAggPath(path) {
+  const steps = String(path).split('>');
+  let last = steps.pop();
+  let key = null;
+  const bracket = /^([^[]+)\[([^\]]*)\]$/.exec(last);
+  const dot = last.lastIndexOf('.');
+  if (bracket) [, last, key] = bracket;
+  else if (dot > 0) [last, key] = [last.slice(0, dot), last.slice(dot + 1)];
+  if (last === '_count' && key === null && steps.length) key = '_count';
+  else steps.push(last);
+  return { steps, key, count: key === '_count' || key === 'doc_count' };
+}
+// Suffixe de colonne d’une clé : 500.0 et 500 désignent le même rang de centile
+const pathKeySuffix = key => String(Number.isFinite(Number(key)) ? Number(key) : key).replace(/\W/g, '_');
+const percentFraction = p => +(chNum(p, 'percentiles.percents') / 100).toFixed(4);
+const SINGLE_BUCKET_TYPES = new Set([
+  'filter',
+  'missing',
+  'nested',
+  'reverse_nested',
+  'sampler',
+  'diversified_sampler'
+]);
+/*
+ * Ce que désigne un chemin sur un niveau :
+ *   sql       l’expression à écrire dans la requête du niveau, qui voit ses alias
+ *   inline    la même sans alias, pour la sous-requête qui choisit les premiers groupes
+ *   infinite  min ou max sur un groupe qui peut rester sans valeur (voir pathOrder)
+ */
+function pathTarget(ctx, L, path) {
+  const { steps, key, count } = parseAggPath(path);
+  const column = suffix => L.metrics.find(m => m.alias === aliasOf([...steps, ...(suffix ? [suffix] : [])].join('_')));
+  const fromColumn = (m, element = '') => ({
+    sql: `${m.alias}${element}`,
+    inline: `${m.render(null)}${element}`,
+    infinite: m.nullable ? m.infinite : undefined
+  });
+  if (count) {
+    const c = column('doc_count');
+    return c ? fromColumn(c) : computedTarget(ctx, L, path, { steps, key, count });
+  }
+  const keyed = key !== null && column(pathKeySuffix(key));
+  if (keyed) return fromColumn(keyed);
+  const whole = column();
+  if (whole && !whole.percents) return fromColumn(whole);
+  if (whole && key !== null) {
+    const i = whole.percents.indexOf(percentFraction(key));
+    if (i >= 0) return fromColumn(whole, `[${i + 1}]`);
+  }
+  // Un filtre seul : Elasticsearch trie sur son nombre de documents
+  const filterCount = !whole && key === null && column('doc_count');
+  if (filterCount) return fromColumn(filterCount);
+  return computedTarget(ctx, L, path, { steps, key, count });
+}
+/*
+ * Cible sans colonne sur ce niveau, calculée pour le tri ou le pipeline : un filtre qui porte aussi un regroupement, ou
+ * un filtre dans un filtre, ont leur propre requête. Les conditions traversées deviennent celle d’un combinateur -If.
+ * Les niveaux et les mesures relus ici sont déjà comptés dans la couverture, là où ils sont vraiment traduits.
+ */
+function computedTarget(ctx, L, path, { steps, key, count }) {
+  if (steps.length === 1 && L.pipes.some(p => p.name === steps[0])) {
+    const alias = aliasOf(steps[0]);
+    return { sql: alias, inline: alias };
+  }
+  const stats = { ...ctx.stats };
+  ctx.humanOff++;
+  try {
+    const conds = [];
+    let aggs = L.subAggs;
+    for (const [i, name] of steps.entries()) {
+      const def = aggs[name];
+      const type = def && aggType(def);
+      if (!type) throw new Error(`chemin « ${path} » : « ${name} » n’est pas une sous-agrégation de « ${L.name} »`);
+      if (METRIC_TYPES.has(type) && i === steps.length - 1 && !count)
+        return metricTarget(ctx, L, path, steps.join('_'), type, def[type], key, andJoin(conds));
+      if (!SINGLE_BUCKET_TYPES.has(type))
+        throw new Error(
+          `chemin « ${path} » : « ${name} » (${type}) ne se traverse pas, seulement les regroupements à un seul groupe (filter, missing, nested…)`
+        );
+      conds.push(...buildLevel(ctx, name, { [type]: def[type] }).where);
+      aggs = aggChildren(def);
+    }
+    if (key !== null && !count)
+      throw new Error(`chemin « ${path} » : « ${steps.at(-1)} » ne se lit que par son nombre de documents`);
+    const c = andJoin(conds);
+    const sql = c ? `countIf(${c})` : 'count()';
+    return { sql, inline: sql };
+  } finally {
+    ctx.humanOff--;
+    Object.assign(ctx.stats, stats);
+  }
+}
+function metricTarget(ctx, L, path, name, type, body, key, cond) {
+  // Elasticsearch calcule le centile ou le rang demandé, même absent de la liste de la mesure
+  const list = { percentiles: 'percents', percentile_ranks: 'values' }[type];
+  const source = list && key !== null ? { ...body, [list]: [Number(key)] } : body;
+  const metrics = metricDef(ctx, name, type, source, L);
+  const single = metrics.length === 1 && (!list || key !== null);
+  const m = single
+    ? metrics[0]
+    : metrics.find(x => key !== null && x.alias === aliasOf(`${name}_${pathKeySuffix(key)}`));
+  if (!m) throw new Error(`chemin « ${path} » : la mesure ${type} se lit par l’une de ses valeurs (nom.clé)`);
+  const sql = `${m.render(cond, true)}${type === 'percentiles' ? '[1]' : ''}`;
+  return { sql, inline: sql, infinite: m.infinite };
+}
+function resolveBucketsPath(ctx, L, path) {
   const p = String(path);
   if (p === '_count') return 'doc_count';
-  if (p === '_key') return level.keys.length ? level.keys[level.keys.length - 1].alias : 'NULL';
-  const [head, sub] = p.split(/[.\[]/);
-  const clean = head.replace(/>.*/, '');
-  // filtre._count : le nombre de documents du sous-filtre (colonne <filtre>_doc_count)
-  if (sub === '_count') {
-    const c = level.metrics.find(x => x.alias === aliasOf(`${clean}_doc_count`));
-    if (c) return c.alias;
-  }
-  const m =
-    level.metrics.find(x => x.alias === aliasOf(`${clean}_${sub}`)) ||
-    level.metrics.find(x => x.alias === aliasOf(clean));
-  return m ? m.alias : aliasOf(clean);
+  if (p === '_key') return L.keys.length ? L.keys[L.keys.length - 1].alias : 'NULL';
+  return pathTarget(ctx, L, p).sql;
+}
+/*
+ * Sens d’un tri sur un chemin. Pour Elasticsearch, un groupe sans valeur vaut NaN (toujours en dernier), sauf min et max :
+ * +∞ et −∞, en tête de min décroissant et de max croissant. ClickHouse place NULL en dernier, sauf avec NULLS FIRST.
+ * bucket_sort lit ces infinis comme des trous : le groupe vient en dernier dans tous les cas.
+ */
+function pathOrder(L, target, dir, sql) {
+  const first =
+    !L.sorted && ((target.infinite === 'min' && dir === 'desc') || (target.infinite === 'max' && dir === 'asc'));
+  return `${sql} ${dir.toUpperCase()}${first ? ' NULLS FIRST' : ''}`;
 }
 // Accepte les trois écritures d’Elasticsearch : "champ", { champ: "desc" } et { champ: { order: "desc" } }
 function parseOrder(order, def) {
@@ -2736,8 +2851,17 @@ function buildLevel(ctx, name, def) {
     default:
       todo(ctx, `agrégation ${type}`, `« ${name} » (${type}) n’a pas d’équivalent automatique.`);
   }
+  // Elasticsearch ne lit _count sur un sous-filtre que dans un pipeline ; la traduction le comprend aussi dans un tri, et le dit
+  for (const o of L.order)
+    if (!o.raw && /[>.]_count$/.test(o.by))
+      ctx.notes.add(
+        'warn',
+        `tri sur « ${o.by} »`,
+        `Elasticsearch refuse ce chemin dans un tri (HTTP 400) : il s’écrit « ${o.by.replace(/[>.]_count$/, '')} » ou « ${o.by.replace(/[>.]_count$/, '.doc_count')} ». La traduction trie sur le nombre de documents du regroupement.`
+      );
   // Enfants
   const kids = aggChildren(def);
+  L.subAggs = kids;
   L.children = [];
   for (const [cn, cdef] of Object.entries(kids)) {
     const ct = aggType(cdef);
@@ -2756,7 +2880,7 @@ function buildLevel(ctx, name, def) {
       for (const [mn, md] of Object.entries(aggChildren(cdef))) {
         const mt = aggType(md);
         metricDef(ctx, `${cn}_${mn}`, mt, md[mt] || {}, L).forEach(m =>
-          L.metrics.push({ alias: m.alias, render: outer => m.render(within(outer), true) })
+          L.metrics.push({ ...m, nullable: true, render: outer => m.render(within(outer), true) })
         );
       }
       ctx.stats.ok++;
@@ -2797,25 +2921,25 @@ function compositeCursor(keys, after) {
   if (branches.length === 1) return branches[0];
   return `(\n         ${branches.join('\n      OR ')}\n  )`;
 }
-function levelOrder(L, alias) {
+function levelOrder(ctx, L) {
   return L.order
     .map(o => {
       if (o.raw) return o.dir ? `${o.by} ${o.dir.toUpperCase()}` : o.by;
       if (o.by === '_count') return `doc_count ${o.dir.toUpperCase()}`;
       if (o.by === '_key') return L.keys.map(k => `${k.alias} ${o.dir.toUpperCase()}`).join(', ');
-      return `${alias ? resolveBucketsPath(L, o.by) : resolveBucketsPath(L, o.by)} ${o.dir.toUpperCase()}`;
+      const t = pathTarget(ctx, L, o.by);
+      return pathOrder(L, t, o.dir, t.sql);
     })
     .filter(Boolean);
 }
-function orderInSub(L) {
+function orderInSub(ctx, L) {
   // Ordre exprimé avec des agrégats, pour les sous-requêtes de restriction
   return L.order.map(o => {
     if (o.raw) return o.dir ? `${o.by} ${o.dir.toUpperCase()}` : o.by;
     if (o.by === '_count') return `count() ${o.dir.toUpperCase()}`;
     if (o.by === '_key') return L.keys.map(k => `${k.alias} ${o.dir.toUpperCase()}`).join(', ');
-    const alias = resolveBucketsPath(L, o.by);
-    const m = L.metrics.find(x => x.alias === alias);
-    return `${m ? m.render(null) : alias} ${o.dir.toUpperCase()}`;
+    const t = pathTarget(ctx, L, o.by);
+    return pathOrder(L, t, o.dir, t.inline);
   });
 }
 function keyLevels(path) {
@@ -2886,7 +3010,7 @@ function restriction(ctx, env, path, upto, scope) {
       where,
       groupBy: keys.map(k => k.alias),
       having: path[j].having.map(h => h.replace(/\bdoc_count\b/g, 'count()')),
-      orderBy: orderInSub(path[j]),
+      orderBy: orderInSub(ctx, path[j]),
       limitBy: parentKeys.length ? { n: path[j].size, by: parentKeys.map(k => k.alias) } : null,
       limit: parentKeys.length ? null : path[j].size
     },
@@ -2989,7 +3113,7 @@ function bucketsQuery(ctx, env, path) {
       .join(',\n')
   );
   // Sans regroupement parent, les groupes sortent dans l’ordre du tableau
-  if (parentKeys.length) lines.push(`ORDER BY ${parents.order.concat(levelOrder(L)).join(', ')}`);
+  if (parentKeys.length) lines.push(`ORDER BY ${parents.order.concat(levelOrder(ctx, L)).join(', ')}`);
   ctx.notes.add(
     'opt',
     `Groupes « ${L.name} » par agrégation conditionnelle`,
@@ -3035,7 +3159,7 @@ function aggQuery(ctx, env, path) {
   for (const p of L.pipes) {
     const b = p.body;
     const bp = b.buckets_path;
-    const res = x => resolveBucketsPath(L, x);
+    const res = x => resolveBucketsPath(ctx, L, x);
     try {
       if (p.type === 'bucket_selector' || p.type === 'bucket_script') {
         const map = {};
@@ -3102,7 +3226,7 @@ function aggQuery(ctx, env, path) {
       todo(ctx, `pipeline ${p.name}`, e.message);
     }
   }
-  order.push(...levelOrder(L));
+  order.push(...levelOrder(ctx, L));
   const orderBy = order.filter(Boolean);
   if (fills) {
     // WITH FILL porte sur la dernière colonne de tri. Les colonnes qui la précèdent (regroupements parents)
@@ -3180,12 +3304,16 @@ function walkAggs(ctx, env, aggs, parentPath, out) {
       }
     }
     if (L.topHits)
-      L.topHits.forEach(th =>
-        out.push({
-          title: `Top hits ${path.map(p => p.name).join(' › ')} › ${th.name}`,
-          sql: topHitsQuery(ctx, env, path, th)
-        })
-      );
+      L.topHits.forEach(th => {
+        try {
+          out.push({
+            title: `Top hits ${path.map(p => p.name).join(' › ')} › ${th.name}`,
+            sql: topHitsQuery(ctx, env, path, th)
+          });
+        } catch (e) {
+          todo(ctx, `agrégation ${th.name}`, e.message);
+        }
+      });
     const kidAggs = {};
     L.children.forEach(c => (kidAggs[c.name] = c.def));
     walkAggs(ctx, env, kidAggs, path, out);

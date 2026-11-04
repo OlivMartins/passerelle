@@ -2,6 +2,17 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Corrigé
+
+- **Tri des groupes sur un chemin vers une sous-agrégation** : un `terms` ordonné par `"f>m"` ou `"f>_count"` produisait `ORDER BY f`, une colonne qui n’existe pas, et ClickHouse refusait la requête. Le moteur lit désormais les chemins comme Elasticsearch (`f>g>m`, `f>s.avg`, `f>p[99.9]`, `f`, `f.doc_count`), sur `terms`, `multi_terms`, `histogram`, `date_histogram`, dans `bucket_sort` et dans les `buckets_path` des pipelines (`bucket_script`, `bucket_selector`, `derivative`, `cumulative_sum`…), qui avaient le même défaut.
+  - **Cible sans colonne sur le niveau trié** (filtre qui porte aussi un regroupement, filtres imbriqués, `missing`) : la valeur est calculée pour le tri par un combinateur `-If`, et le top N qui restreint les niveaux inférieurs lit la même valeur.
+  - **Centiles** : `p.50` trie sur cet élément du tableau, et non plus sur le tableau entier (le premier centile décidait alors du classement) ; un centile ou un rang absent de la liste de la mesure est calculé pour le tri, comme le fait Elasticsearch.
+  - **Groupes sans valeur** : ils suivent la règle d’Elasticsearch, en dernier (NaN), sauf `min` en ordre décroissant et `max` en ordre croissant, en tête (+∞ et −∞), d’où un `NULLS FIRST`. `bucket_sort` les place en dernier dans tous les cas.
+  - **Chemins invalides** : une agrégation inconnue, un chemin qui traverse un regroupement à plusieurs groupes, une mesure multiple sans clé sont « à reprendre » avec la raison, au lieu d’un SQL qui échoue sur une colonne absente.
+  - Elasticsearch refuse `f>_count` et `f._count` dans un tri (HTTP 400), il les accepte dans un pipeline. La traduction les comprend partout et le signale dans un tri (« tri sur … », à vérifier), avec l’écriture attendue.
+
 ## [1.7.3] - 2026-11-04
 
 ### Ajouté

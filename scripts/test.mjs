@@ -2010,6 +2010,238 @@ check(
   'visualisation : dérivée d’une mesure filtrée → à reprendre (le moteur ne désigne pas une mesure sous un filtre)'
 );
 
+/* ---------- Chemins vers une sous-agrégation (tri et pipelines) ---------- */
+const chemin = (dsl, cfg) => E.translateDSL(JSON.stringify(dsl), cfg || E.DEFAULT_CONFIG, { index: 'logs' });
+const chAvg = { avg: { field: 'latency_ms' } };
+const chErr = { range: { status: { gte: 500 } } };
+const chTri = (order, aggs, terms) => ({
+  size: 0,
+  aggs: { svc: { terms: { field: 'service', order, ...terms }, aggs } }
+});
+const chFiltre = aggs => ({ f: { filter: chErr, aggs } });
+const chCols = {
+  m: chAvg,
+  s: { stats: { field: 'bytes' } },
+  p: { percentiles: { field: 'latency_ms', percents: [50, 99.9] } },
+  r: { percentile_ranks: { field: 'latency_ms', values: [500, 99.5] } }
+};
+for (const [path, column] of [
+  ['f>m', 'f_m'],
+  ['f>s.avg', 'f_s_avg'],
+  ['f>s.count', 'f_s_count'],
+  ['f>m.value', 'f_m'],
+  ['f', 'f_doc_count'],
+  ['f.doc_count', 'f_doc_count'],
+  ['f>p.50', 'f_p[1]'],
+  ['f>p[99.9]', 'f_p[2]'],
+  ['f>p[50.0]', 'f_p[1]'],
+  ['f>r.500', 'f_r_500'],
+  ['f>r[500.0]', 'f_r_500'],
+  ['f>r[99.5]', 'f_r_99_5']
+]) {
+  const r = chemin(chTri({ [path]: 'desc' }, chFiltre(chCols)));
+  check(
+    r.sql.includes(`ORDER BY ${column} DESC, svc ASC`) &&
+      !r.stats.ko &&
+      !r.notes.some(n => n.title.startsWith('tri sur')),
+    `chemin de tri ${path} → ${column}`
+  );
+}
+for (const path of ['f>_count', 'f._count']) {
+  const r = chemin(chTri({ [path]: 'desc' }, chFiltre(chCols)));
+  check(
+    r.sql.includes('ORDER BY f_doc_count DESC, svc ASC') &&
+      !r.stats.ko &&
+      r.notes.some(
+        n => n.level === 'warn' && n.title === `tri sur « ${path} »` && n.detail.includes('« f.doc_count »')
+      ),
+    `chemin de tri ${path} → nombre de documents du filtre, avec la remarque qu’Elasticsearch le refuse`
+  );
+}
+const chCentiles = chemin(
+  chTri({ 'p.50': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [99, 50] } } })
+);
+check(
+  chCentiles.sql.includes('ORDER BY p[2] DESC'),
+  'chemin de tri : un centile est un élément du tableau, pas le tableau'
+);
+const chHorsListe = chemin(chTri({ 'p.70': 'desc' }, { p: { percentiles: { field: 'latency_ms', percents: [99] } } }));
+check(
+  chHorsListe.sql.includes('quantilesTDigest(0.7)(latency_ms))[1] DESC, svc ASC'),
+  'chemin de tri : un centile absent de la liste est calculé pour le tri, comme le fait Elasticsearch'
+);
+const chRangHorsListe = chemin(
+  chTri({ 'r.700': 'desc' }, { r: { percentile_ranks: { field: 'latency_ms', values: [500] } } })
+);
+check(
+  /ORDER BY round\(100 \* countIf\(latency_ms <= 700\)/.test(chRangHorsListe.sql),
+  'chemin de tri : un rang absent de la liste est calculé pour le tri'
+);
+const chTop = chemin(
+  chTri({ 'f>p.50': 'desc' }, { ...chFiltre({ p: chCols.p }), h: { terms: { field: 'host' } } }, { size: 2 })
+);
+check(
+  /top_svc AS \([^;]*ORDER BY arrayMap\(v -> if\(isNaN\(v\), NULL, v\), quantilesTDigestIf\(0\.5, 0\.999\)\(latency_ms, status >= 500\)\)\[1\] DESC, svc ASC/.test(
+    chTop.sql
+  ),
+  'chemin de tri : le top N d’un niveau parent calcule la même valeur que le niveau'
+);
+const chSansTri = chemin(
+  chTri({ _count: 'desc' }, { f: { filter: chErr, aggs: { m: chAvg, h: { terms: { field: 'host' } } } } })
+);
+const chMixte = chemin(
+  chTri({ 'f>m': 'desc' }, { f: { filter: chErr, aggs: { m: chAvg, h: { terms: { field: 'host' } } } } })
+);
+check(
+  chMixte.sql.includes('ORDER BY avgIfOrNull(latency_ms, status >= 500) DESC, svc ASC') &&
+    JSON.stringify(chMixte.stats) === JSON.stringify(chSansTri.stats),
+  'chemin de tri : filtre qui porte un regroupement → calculé pour le tri, sans fausser la couverture'
+);
+const chSeul = chemin(chTri({ f: 'desc' }, { f: { filter: chErr, aggs: { h: { terms: { field: 'host' } } } } }));
+check(
+  chSeul.sql.includes('ORDER BY countIf(status >= 500) DESC, svc ASC'),
+  'chemin de tri : filtre seul qui porte un regroupement → son nombre de documents'
+);
+const chImbriques = chemin(
+  chTri(
+    { 'f1>f2>m': 'desc' },
+    { f1: { filter: chErr, aggs: { f2: { filter: { term: { level: 'ERROR' } }, aggs: { m: chAvg } } } } }
+  )
+);
+check(
+  chImbriques.sql.includes("ORDER BY avgIfOrNull(latency_ms, (status >= 500) AND (level = 'ERROR')) DESC") ||
+    chImbriques.sql.includes("ORDER BY avgIfOrNull(latency_ms, status >= 500 AND level = 'ERROR') DESC"),
+  'chemin de tri : filtres imbriqués → conditions réunies'
+);
+const chMissing = chemin(chTri({ 'a>m': 'desc' }, { a: { missing: { field: 'env' }, aggs: { m: chAvg } } }));
+check(
+  chMissing.sql.includes('ORDER BY avgIfOrNull(latency_ms, isNull(env)) DESC'),
+  'chemin de tri : missing se traverse comme un filtre'
+);
+const chVide = (path, dir, aggs) => chemin(chTri({ [path]: dir }, chFiltre(aggs))).sql;
+check(
+  chVide('f>m', 'desc', { m: { min: { field: 'bytes' } } }).includes('ORDER BY f_m DESC NULLS FIRST, svc ASC') &&
+    chVide('f>m', 'asc', { m: { min: { field: 'bytes' } } }).includes('ORDER BY f_m ASC, svc ASC') &&
+    chVide('f>m', 'asc', { m: { max: { field: 'bytes' } } }).includes('ORDER BY f_m ASC NULLS FIRST, svc ASC') &&
+    chVide('f>m', 'desc', { m: { max: { field: 'bytes' } } }).includes('ORDER BY f_m DESC, svc ASC') &&
+    chVide('f>s.min', 'desc', { s: chCols.s }).includes('ORDER BY f_s_min DESC NULLS FIRST, svc ASC') &&
+    chVide('f>s.avg', 'desc', { s: chCols.s }).includes('ORDER BY f_s_avg DESC, svc ASC') &&
+    chVide('f>m', 'desc', { m: chAvg }).includes('ORDER BY f_m DESC, svc ASC'),
+  'chemin de tri : un groupe sans valeur vaut +∞ pour min et −∞ pour max, NaN (en dernier) pour le reste'
+);
+const chMin = chTri({ mn: 'desc' }, { mn: { min: { field: 'retries' } } });
+check(
+  chemin(chMin).sql.includes('ORDER BY mn DESC, svc ASC') &&
+    chemin(chMin, E.mergeConfig(E.DEFAULT_CONFIG, configOverride('N'))).sql.includes(
+      'ORDER BY mn DESC NULLS FIRST, svc ASC'
+    ),
+  'chemin de tri : min d’une colonne qui peut être NULL → même règle ; colonne sans NULL → rien à préciser'
+);
+check(
+  chemin(
+    chTri(
+      { _key: 'asc' },
+      {
+        ...chFiltre({ m: { min: { field: 'bytes' } } }),
+        top: { bucket_sort: { sort: [{ 'f>m': { order: 'desc' } }] } }
+      }
+    )
+  ).sql.includes('ORDER BY f_m DESC'),
+  'bucket_sort : le min d’un groupe vide est un trou, en dernier dans tous les cas'
+);
+for (const [title, dsl] of [
+  ['agrégation inconnue', chTri({ absent: 'desc' }, { lat: chAvg })],
+  ['sous-agrégation inconnue', chTri({ 'f>absent': 'desc' }, chFiltre({ m: chAvg }))],
+  ['chemin qui traverse un terms', chTri({ 'h>m': 'desc' }, { h: { terms: { field: 'host' }, aggs: { m: chAvg } } })],
+  ['mesure multiple sans clé', chTri({ s: 'desc' }, { s: chCols.s })],
+  ['clé inconnue d’une mesure multiple', chTri({ 's.absente': 'desc' }, { s: chCols.s })],
+  ['centiles sans clé', chTri({ p: 'desc' }, { p: chCols.p })],
+  ['clé d’un filtre', chTri({ 'f.avg': 'desc' }, chFiltre({ m: chAvg }))],
+  ['filtre traversé par sa clé', chTri({ "f['a']>m": 'desc' }, chFiltre({ m: chAvg }))]
+]) {
+  const r = chemin(dsl);
+  check(
+    !r.error &&
+      r.stats.ko > 0 &&
+      !/ORDER BY (absent|f|h|s|p)\b(?!_)/.test(r.sql) &&
+      r.notes.some(n => /chemin/.test(n.detail)),
+    `chemin de tri refusé : ${title} → à reprendre, jamais de colonne absente`
+  );
+}
+const chTopHits = chemin(
+  chTri({ 'h>m': 'desc' }, { h: { terms: { field: 'host' }, aggs: { m: chAvg } }, d: { top_hits: { size: 1 } } })
+);
+check(
+  !chTopHits.error && chTopHits.stats.ko > 0,
+  'chemin de tri refusé avec un top_hits : à reprendre, la traduction des autres requêtes continue'
+);
+const chScript = chemin(
+  chTri(
+    { _key: 'asc' },
+    {
+      ...chFiltre({ m: chAvg }),
+      part: {
+        bucket_script: {
+          buckets_path: { e: 'f>_count', l: 'f>m', t: '_count' },
+          script: 'params.e * params.l / params.t'
+        }
+      }
+    }
+  )
+);
+check(
+  chScript.sql.includes('(f_doc_count * f_m) / doc_count AS part') &&
+    !chScript.notes.some(n => n.title.startsWith('tri sur')),
+  'pipeline : f>_count et f>m → colonnes du filtre, sans la remarque réservée aux tris'
+);
+const chSort = chemin(
+  chTri(
+    { _key: 'asc' },
+    { ...chFiltre({ m: chAvg }), top: { bucket_sort: { sort: [{ 'f>_count': { order: 'desc' } }], size: 2 } } }
+  )
+);
+check(
+  chSort.sql.includes('ORDER BY f_doc_count DESC'),
+  'bucket_sort : chemin f>_count → nombre de documents du filtre'
+);
+const chSortScript = chemin(
+  chTri(
+    { _key: 'asc' },
+    {
+      lat: chAvg,
+      double: { bucket_script: { buckets_path: { l: 'lat' }, script: 'params.l * 2' } },
+      top: { bucket_sort: { sort: [{ double: { order: 'desc' } }], size: 2 } }
+    }
+  )
+);
+check(
+  chSortScript.sql.includes('ORDER BY double DESC') && !chSortScript.stats.ko,
+  'bucket_sort : le nom d’un pipeline reste une colonne'
+);
+const chDerivee = chemin({
+  size: 0,
+  aggs: {
+    d: {
+      date_histogram: { field: '@timestamp', calendar_interval: 'day' },
+      aggs: { ...chFiltre({ m: chAvg }), dv: { derivative: { buckets_path: 'f>m' } } }
+    }
+  }
+});
+check(
+  chDerivee.sql.includes('f_m - lagInFrame(toNullable(f_m), 1) OVER'),
+  'pipeline : dérivée sur le chemin d’une mesure filtrée → colonne de la mesure'
+);
+const chMulti = chemin({
+  size: 0,
+  aggs: {
+    mt: {
+      multi_terms: { terms: [{ field: 'service' }, { field: 'host' }], order: { 'f>m': 'desc' } },
+      aggs: chFiltre({ m: chAvg })
+    }
+  }
+});
+check(chMulti.sql.includes('ORDER BY f_m DESC'), 'chemin de tri sur multi_terms → colonne de la mesure');
+
 /* ---------- Tableaux de bord Grafana ---------- */
 const gDash = JSON.stringify(grafanaOut.dashboard);
 const gPanel = title => grafanaOut.dashboard.panels.find(p => p.title === title) || { targets: [] };
