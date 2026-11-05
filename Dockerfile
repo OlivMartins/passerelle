@@ -1,6 +1,7 @@
 # Passerelle en conteneur : interface, API et ligne de commande, exécutées par Node.js 24.
 #   docker build -t passerelle .
 #   docker run --rm -p 127.0.0.1:8080:8080 -e PASSERELLE_TOKEN=… passerelle
+# L'image écoute sur 0.0.0.0 : sans PASSERELLE_TOKEN (ou server.tokens dans le fichier monté), le service refuse de démarrer.
 # Configuration : montez votre fichier sur /etc/passerelle/passerelle.yaml.
 # Le binaire autonome et l'unité systemd restent la voie d'installation sur serveur (docs/INSTALL.md).
 

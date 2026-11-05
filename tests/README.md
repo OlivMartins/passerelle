@@ -14,7 +14,10 @@ npm run test:update
 
 S’y ajoutent des garde-fous ciblés : refus des clés inconnues, verdicts, paramètres de requête, sorties Elasticsearch, profondeur d’imbrication, et le graphe des modules du moteur (il n’importe que ses propres fichiers, aucun cycle d’import hors celui, connu, de la base et du DSL, la façade réexporte tout), ainsi que les chiffres de couverture du README : `scripts/couverture.mjs` compte ce que le moteur traduit et ce que les cas des deux bancs (différentiel, Logstash / Vector) rejouent sans écart, et le test échoue si la section « Ce que Passerelle sait traduire » ne le dit plus.
 
-`npm test` lance aussi `tests/server/run.mjs` : le serveur et la ligne de commande, interrogés à travers une fausse instance ClickHouse et un faux binaire Vector (Linux seulement). Il couvre les codes HTTP, les refus de sécurité, les options et les codes de sortie.
+`npm test` lance aussi `tests/server/run.mjs` : le serveur et la ligne de commande, interrogés à travers une fausse instance ClickHouse et un faux binaire Vector (Linux seulement). Il couvre les codes HTTP, les refus de sécurité, les options et les codes de sortie, ainsi que :
+
+- la garde réseau sans jeton (adresses de bouclage, refus de démarrer sur `0.0.0.0`, `[::]` ou une adresse du réseau, refus d'un rechargement `SIGHUP` qui retirerait les jetons, `Host: localhost` écrit par un autre poste) ;
+- les gros exports : `/healthz` pendant un export de 8 Mio, un worker qui dépasse son délai (503), un export trop gros pour sa mémoire (413) et le service intact après chacun. Le fichier est écrit pour Linux : sous Windows, le faux Vector interrompt la suite avant ces tests.
 
 `npm test` lance enfin `tests/verify/run.mjs` : `passerelle verify`, sans aucun vrai moteur. Il éprouve :
 

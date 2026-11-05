@@ -191,9 +191,10 @@ jobs:
         run: docker build -t passerelle:ci .
       - name: Démarrer et traduire une requête
         run: |
-          docker run -d --name passerelle -p 127.0.0.1:8080:8080 --read-only --tmpfs /tmp passerelle:ci
+          # L'image écoute sur 0.0.0.0 : elle refuse de démarrer sans jeton
+          docker run -d --name passerelle -p 127.0.0.1:8080:8080 -e PASSERELLE_TOKEN=jeton-ci --read-only --tmpfs /tmp passerelle:ci
           for i in $(seq 30); do curl -fsS http://127.0.0.1:8080/healthz && break; sleep 1; done
-          curl -fsS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
+          curl -fsS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" -H "Authorization: Bearer jeton-ci" \
             --data-binary '{"query":{"term":{"service":"api"}}}' | grep -q '"verdict"'
       - name: Journal du conteneur
         if: failure()

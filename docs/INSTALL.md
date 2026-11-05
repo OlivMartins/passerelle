@@ -8,7 +8,7 @@ Passerelle traduit les requêtes DSL Elasticsearch en SQL ClickHouse et les pipe
 |---|---|
 | Système | Linux x86_64 avec glibc 2.28 ou plus récente : RHEL, Rocky ou Alma 8+, Debian 10+, Ubuntu 20.04+. Les distributions musl (Alpine) ne sont pas prises en charge. |
 | Service | systemd (pour l’unité fournie) et un accès root pour l’installation. |
-| Ressources | 130 Mo de disque ; environ 55 Mo de mémoire au repos et 75 Mo en charge, plafonnés à 1 Go par l’unité. |
+| Ressources | 130 Mo de disque ; environ 55 Mo de mémoire au repos et 75 Mo en charge pour les traductions courantes. Un gros export (Kibana, 30 Mo) atteint environ 1,3 Go en pointe : l’unité plafonne à 2 Go ([gros exports](#gros-exports)). |
 | Réseau | Aucun accès Internet requis. Le port 8080 est ouvert sur 127.0.0.1 uniquement. |
 | Navigateur | Chrome, Edge, Firefox ou Safari de 2023 ou plus récent. |
 
@@ -246,7 +246,19 @@ Chaque traduction porte un `verdict` : `ready` (prête), `review` (à vérifier)
 
 Les corps de requête sont limités à 2 Mio, et à 32 Mio pour `/v1/inventory/kibana`, `/v1/translate/watcher`, `/v1/translate/grafana`, `/v1/translate/ingest`, `/v1/translate/logstash/pipelines`, `/v1/schema/ddl` et `/v1/schema/analyzers`. Au plus deux validations, Vector et SQL confondues, tournent en parallèle.
 
-Un navigateur ne peut pas appeler l’API depuis un autre site : `/v1/*` refuse les requêtes intersites. Sans jeton, cas d’un `passerelle serve` lancé sur un poste, l’API ne répond qu’aux requêtes adressées à `localhost`, `127.0.0.1` ou `[::1]`.
+Un navigateur ne peut pas appeler l’API depuis un autre site : `/v1/*` refuse les requêtes intersites. Sans jeton, cas d’un `passerelle serve` lancé sur un poste, l’API ne répond qu’aux connexions de la machine locale (`127.0.0.1`, `::1`), adressées à `localhost`, `127.0.0.1` ou `[::1]` : l’adresse de la connexion est contrôlée, pas seulement l’en-tête `Host`, qu’un client écrit comme il veut. **Hors de la boucle locale, le jeton est obligatoire** : `passerelle serve --listen 0.0.0.0:8080` (ou `[::]`, ou une adresse du réseau) sans `PASSERELLE_TOKEN` ni `server.tokens` refuse de démarrer, comme l’image conteneur, qui écoute sur `0.0.0.0`. Un rechargement (`SIGHUP`) qui retirerait les jetons d’un service exposé est refusé : la configuration précédente reste en place.
+
+### Gros exports
+
+Les sept routes qui acceptent un corps jusqu’à 32 Mio sont calculées par un `worker_thread`, jamais par le fil qui répond à `/healthz`, `/metrics` et aux traductions courantes. Un export Kibana de 30 Mo, qui bloquait le service une quinzaine de secondes, laisse `/healthz` répondre en quelques dizaines de millisecondes.
+
+| Variable | Défaut | Effet |
+|---|---|---|
+| `PASSERELLE_WORKERS` | 1 | Workers simultanés (1 à 16). Les autres traitements attendent, jusqu’à 16 ; au-delà, `429`. |
+| `PASSERELLE_WORKER_MEMORY_MB` | 1024 | Tas d’un worker. Un export demande environ 30 fois sa taille : au-delà, il est refusé avant tout calcul (`413`, la variable est nommée). |
+| `PASSERELLE_WORKER_TIMEOUT_S` | 100 | Durée maximale d’un traitement (1 à 110). Au-delà, le worker est arrêté et la requête reçoit `503` ; un worker neuf prend la suite. |
+
+Le plafond `MemoryMax` de l’unité systemd (2 Go) doit rester au-dessus de `PASSERELLE_WORKER_MEMORY_MB` plus 200 Mio. Pour le baisser, baissez aussi cette variable : un export trop gros est alors refusé, au lieu d’être abattu par le noyau. Si `worker_threads` ne démarre pas, le service le journalise et calcule dans le fil principal : les réponses sont les mêmes, l’isolation disparaît.
 
 ## Ligne de commande (CI, dépôts Git)
 

@@ -19,11 +19,9 @@ import {
   inventoryHTML,
   inventoryMarkdown,
   inventorySQLFiles,
-  isObj,
   kibanaInventory,
   pipelinesFromYML,
   profilesFromSystem,
-  schemaFromElastic,
   schemaPullQueries,
   toYAML,
   translateDSL,
@@ -42,6 +40,9 @@ import {
   watchFromSource
 } from './engine/index.js';
 import { collect, ENV_REF, expand, fail, HttpError, ingestInputs, jobs, log, outDir, VERSION } from './node/common.js';
+import { crossSiteRefusal, requireTokenOffLoopback } from './node/guard.js';
+import { createPool } from './node/pool.js';
+import { HEAVY_ROUTES, schemaFromDocuments, validTimeZone } from './node/routes.js';
 import {
   opsActionOf,
   opsAuditOpen,
@@ -185,7 +186,24 @@ function json(res, status, obj) {
   if (res.opsRq) opsNote(res.opsRq, obj);
   send(res, status, JSON.stringify(obj, null, 2) + '\n', { 'content-type': 'application/json; charset=utf-8' });
 }
-function readBody(req, limit) {
+// Réponse déjà mise en octets par un worker : { status, headers, bytes, verdict?, valid? }
+function sendBytes(res, reply) {
+  if (res.opsRq) opsNote(res.opsRq, reply);
+  const body = Buffer.from(reply.bytes.buffer, reply.bytes.byteOffset, reply.bytes.byteLength);
+  res.writeHead(reply.status, Object.assign({}, SEC_HEADERS, reply.headers, { 'content-length': body.length }));
+  res.end(body);
+}
+// Entier d'une variable d'environnement, borné ; absente ou vide : la valeur par défaut
+function envInt(name, def, min, max) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return def;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max)
+    throw new Error(`${name} attend un entier de ${min} à ${max}, pas « ${raw} »`);
+  return n;
+}
+// raw : rendre les octets (Buffer) plutôt que du texte, pour un corps que le fil principal ne décodera pas
+function readBody(req, limit, raw) {
   const tooBig = () => new HttpError(413, `corps de requête limité à ${Math.round(limit / 1024)} Kio`);
   if (+req.headers['content-length'] > limit) return Promise.reject(tooBig());
   return new Promise((resolve, reject) => {
@@ -202,27 +220,11 @@ function readBody(req, limit) {
       } else chunks.push(c);
     });
     req.on('end', () => {
-      if (!over) resolve(Buffer.concat(chunks).toString('utf8'));
+      if (!over) resolve(raw ? Buffer.concat(chunks) : Buffer.concat(chunks).toString('utf8'));
     });
     req.on('error', reject);
   });
 }
-function isLoopback(host) {
-  return host === '127.0.0.1' || host === '::1' || host === 'localhost';
-}
-// Une page web ouverte sur le poste ne doit pas pouvoir appeler l’API : requête intersite (CSRF),
-// ou nom de domaine qui pointe soudain vers 127.0.0.1 (DNS rebinding), ce que seul un jeton empêchait.
-function crossSiteRefusal(req, rt) {
-  const site = req.headers['sec-fetch-site'];
-  if (site === 'cross-site' || site === 'same-site') return 'requête intersite refusée';
-  if (rt.authRequired) return '';
-  const m = /^(\[[^\]]*\]|[^:]*)(?::\d+)?$/.exec(req.headers.host || '');
-  const host = m ? m[1].replace(/^\[|\]$/g, '').toLowerCase() : '';
-  return isLoopback(host)
-    ? ''
-    : 'sans jeton configuré (PASSERELLE_TOKEN ou server.tokens), l’API ne répond qu’aux requêtes adressées à localhost, 127.0.0.1 ou [::1]';
-}
-
 /* ---------- Validation par les moteurs réels ---------- */
 // Validations Vector et SQL confondues : chacune occupe un processus ou une requête ClickHouse jusqu’à son délai
 const MAX_JOBS = 2;
@@ -380,6 +382,9 @@ function serve(opts) {
   let cfg = loadConfig(cfgFile);
   let ui = buildUI(cfg);
   let ops = opsRuntime(cfg);
+  const { host, port } = parseListen(opts.listen || process.env.PASSERELLE_LISTEN || '127.0.0.1:8080');
+  // Avant tout effet de bord (journal d’audit, écoute) : pas d’API ouverte au réseau sans jeton
+  requireTokenOffLoopback(host, port, ops.authRequired);
   try {
     opsAuditOpen(ops.auditLog);
   } catch (e) {
@@ -389,14 +394,19 @@ function serve(opts) {
   }
   opsTraceConfigure(ops);
   opsMetricsInit();
-  const { host, port } = parseListen(opts.listen || process.env.PASSERELLE_LISTEN || '127.0.0.1:8080');
   const LIMIT = 2 * 1024 * 1024;
   const INVENTORY_LIMIT = 32 * 1024 * 1024;
+  // Délai des workers sous celui de la requête (server.requestTimeout, 120 s) : l'appelant reçoit notre erreur, pas une coupure
+  const pool = createPool({
+    size: envInt('PASSERELLE_WORKERS', 1, 1, 16),
+    memoryMb: envInt('PASSERELLE_WORKER_MEMORY_MB', 1024, 256, 32768),
+    timeoutMs: envInt('PASSERELLE_WORKER_TIMEOUT_S', 100, 1, 110) * 1000
+  });
   configWarnings(cfg).forEach(w => log('warn', w));
   if (!ops.authRequired)
     log(
-      isLoopback(host) ? 'info' : 'warn',
-      'aucun jeton (PASSERELLE_TOKEN, server.tokens) : l’API /v1 est accessible sans authentification, pour les seules requêtes adressées à localhost',
+      'info',
+      'aucun jeton (PASSERELLE_TOKEN, server.tokens) : l’API /v1 est accessible sans authentification, aux seules connexions de la machine locale adressées à localhost',
       { listen: `${host}:${port}` }
     );
   log('info', 'exploitation', {
@@ -461,19 +471,11 @@ function serve(opts) {
       if (req.method === 'GET' && url.pathname === '/v1/config') return json(res, 200, publicConfig(cfg));
       if (req.method !== 'POST') return json(res, 405, { error: 'méthode non autorisée' });
       // Un export Kibana complet ou un gros tableau de bord dépassent vite 2 Mio : leurs routes acceptent davantage
-      const body = await readBody(
-        req,
-        url.pathname === '/v1/inventory/kibana' ||
-          url.pathname === '/v1/translate/watcher' ||
-          url.pathname === '/v1/translate/grafana' ||
-          url.pathname === '/v1/translate/ingest' ||
-          url.pathname === '/v1/translate/logstash/pipelines' ||
-          url.pathname === '/v1/schema/ddl' ||
-          url.pathname === '/v1/schema/analyzers'
-          ? INVENTORY_LIMIT
-          : LIMIT
-      );
+      // et sont calculées par un worker (src/node/routes.js), jamais dans le fil qui répond à /healthz
+      const heavy = HEAVY_ROUTES.has(url.pathname);
+      const body = await readBody(req, heavy ? INVENTORY_LIMIT : LIMIT, heavy);
       opsBody(rq, body);
+      if (heavy) return sendBytes(res, await pool.run(url.pathname, url.search, body, cfg));
       switch (url.pathname) {
         case '/v1/translate/dsl': {
           const r = translateDSL(body, cfg, { index: url.searchParams.get('index') || '' });
@@ -506,186 +508,6 @@ function serve(opts) {
             env: r.env,
             summary: r.sentence
           });
-        }
-        case '/v1/translate/logstash/pipelines': {
-          // Corps : pipelines.yml seul (config.string), ou JSON { "pipelines": "<pipelines.yml>", "files": { "chemin": "contenu" } }
-          const fmt = url.searchParams.get('format') === 'toml' ? 'toml' : 'yaml';
-          let yml = body;
-          let files = {};
-          if (/^\s*\{/.test(body)) {
-            let j;
-            try {
-              j = JSON.parse(body);
-            } catch (e) {
-              return json(res, 400, { error: `JSON invalide : ${e.message}` });
-            }
-            if (typeof j.pipelines !== 'string')
-              return json(res, 400, { error: 'champ « pipelines » attendu : le texte de pipelines.yml' });
-            if (
-              j.files !== undefined &&
-              (typeof j.files !== 'object' ||
-                Array.isArray(j.files) ||
-                Object.values(j.files).some(x => typeof x !== 'string'))
-            )
-              return json(res, 400, { error: '« files » attend un objet { chemin: contenu }' });
-            yml = j.pipelines;
-            files = j.files || {};
-          }
-          let list;
-          try {
-            list = pipelinesFromYML(yml, Object.keys(files), f => files[f]);
-          } catch (e) {
-            return json(res, 422, { error: e.message, verdict: 'unrecognized' });
-          }
-          const r = translatePipelines(list, cfg);
-          if (r.error)
-            return json(res, 422, { error: r.error, verdict: 'unrecognized', notes: r.notes, pipelines: r.pipelines });
-          r.pipelines.forEach((p, k) => Object.assign(p, { from: list[k].from, matched: list[k].matched }));
-          return json(res, 200, {
-            verdict: verdictOf(r),
-            format: fmt,
-            config: r[fmt],
-            notes: r.notes,
-            coverage: coverage(r.stats),
-            topology: r.graph,
-            env: r.env,
-            summary: r.sentence,
-            pipelines: r.pipelines
-          });
-        }
-        case '/v1/translate/ingest': {
-          // Corps : un pipeline (YAML, JSON, ou requête PUT _ingest/pipeline de la console Kibana), ou JSON { "files": { "nom": "contenu" } }
-          const fmt = url.searchParams.get('format') === 'toml' ? 'toml' : 'yaml';
-          let inputs;
-          try {
-            const j = JSON.parse(body);
-            inputs =
-              isObj(j) && isObj(j.files)
-                ? Object.entries(j.files).map(([name, text]) => ({
-                    name: name.replace(/^.*\//, '').replace(/\.(ya?ml|json)$/i, ''),
-                    text: String(text)
-                  }))
-                : null;
-          } catch {
-            inputs = null;
-          }
-          if (!inputs) inputs = [{ name: url.searchParams.get('name') || 'pipeline', text: body }];
-          if (!inputs.length) return json(res, 400, { error: 'aucun pipeline', verdict: 'unrecognized' });
-          const r = translateIngest(inputs, cfg);
-          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized', notes: r.notes });
-          return json(res, 200, {
-            verdict: verdictOf(r),
-            format: fmt,
-            config: r[fmt],
-            notes: r.notes,
-            coverage: coverage(r.stats),
-            topology: r.graph,
-            summary: r.sentence,
-            pipelines: r.pipelines.map(({ vrl, ...p }) => p)
-          });
-        }
-        case '/v1/inventory/kibana': {
-          const fmt = url.searchParams.get('format') || 'json';
-          if (!['json', 'md', 'html', 'csv'].includes(fmt))
-            return json(res, 400, { error: `format inconnu « ${fmt} » (json, md, html ou csv)` });
-          const tz = url.searchParams.get('timezone') || null;
-          if (tz && !validTimeZone(tz)) return json(res, 400, { error: `fuseau inconnu « ${tz} »` });
-          const inv = kibanaInventory(body, cfg, { timeZone: tz });
-          if (!inv.summary.objects && !Object.keys(inv.source.ignored).length)
-            return json(res, 422, {
-              error: `aucun objet sauvegardé lisible${inv.source.errors.length ? ` (${inv.source.errors[0]})` : ''}`
-            });
-          if (fmt === 'md')
-            return send(res, 200, inventoryMarkdown(inv), { 'content-type': 'text/markdown; charset=utf-8' });
-          if (fmt === 'html')
-            return send(res, 200, inventoryHTML(inv, 'Inventaire Kibana'), {
-              'content-type': 'text/html; charset=utf-8',
-              'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
-            });
-          if (fmt === 'csv')
-            return send(res, 200, inventoryCSV(inv), {
-              'content-type': 'text/csv; charset=utf-8',
-              'content-disposition': 'attachment; filename="inventaire.csv"'
-            });
-          return json(res, 200, inv);
-        }
-        case '/v1/translate/watcher': {
-          const fmt = url.searchParams.get('format') || 'json';
-          if (!['json', 'md', 'html', 'csv'].includes(fmt))
-            return json(res, 400, { error: `format inconnu « ${fmt} » (json, md, html ou csv)` });
-          const rep = watcherTranslate(body, cfg, {});
-          if (!rep.entries.length)
-            return json(res, 422, {
-              error: `aucune watch lisible${rep.source.errors.length ? ` (${rep.source.errors[0]})` : ''}`
-            });
-          if (fmt === 'md')
-            return send(res, 200, watcherReportMarkdown(rep), { 'content-type': 'text/markdown; charset=utf-8' });
-          if (fmt === 'html')
-            return send(res, 200, watcherReportHTML(rep, 'Watches Elasticsearch'), {
-              'content-type': 'text/html; charset=utf-8',
-              'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
-            });
-          if (fmt === 'csv')
-            return send(res, 200, watcherReportCSV(rep), {
-              'content-type': 'text/csv; charset=utf-8',
-              'content-disposition': 'attachment; filename="watches.csv"'
-            });
-          return json(res, 200, rep);
-        }
-        case '/v1/translate/grafana': {
-          const r = grafanaDashboard(body, cfg, { index: url.searchParams.get('index') || '' });
-          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized' });
-          if (r.empty)
-            return json(res, 422, {
-              error: 'aucune requête Elasticsearch dans ce tableau de bord',
-              verdict: 'unrecognized'
-            });
-          if (url.searchParams.get('format') === 'md')
-            return send(res, 200, grafanaReportMarkdown(r), { 'content-type': 'text/markdown; charset=utf-8' });
-          return json(res, 200, { verdict: r.verdict, summary: r.summary, report: r.report, dashboard: r.dashboard });
-        }
-        case '/v1/schema/ddl': {
-          // Corps : un mapping, un modèle d'index ou une réponse d'API (texte ou JSON), ou JSON { "files": { "nom": "contenu" } }
-          const sp = url.searchParams;
-          const fmt = sp.get('format') === 'sql' ? 'sql' : 'json';
-          const blocks = schemaBlocks(body);
-          if (!blocks) return json(res, 400, { error: '« files » attend un objet { nom: contenu }' });
-          const r = schemaFromDocuments(blocks, cfg, {
-            preset: sp.get('preset') || undefined,
-            compact: sp.get('compact') === 'true',
-            json: sp.get('json') === 'true',
-            table: sp.get('table') || undefined
-          });
-          if (r.empty) return json(res, 400, { error: 'aucun mapping lisible', verdict: 'unrecognized' });
-          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized' });
-          if (fmt === 'sql')
-            return send(
-              res,
-              200,
-              `-- Généré par Passerelle ${VERSION} — verdict : ${VERDICTS[verdictOf(r)]}\n\n${r.sql}`,
-              { 'content-type': 'text/plain; charset=utf-8' }
-            );
-          return json(res, 200, {
-            verdict: verdictOf(r),
-            sql: r.sql,
-            profiles: r.yaml,
-            tables: r.tables.map(t => ({ table: t.table, error: t.error || null })),
-            notes: r.notes,
-            coverage: coverage(r.stats),
-            summary: r.sentence
-          });
-        }
-        case '/v1/schema/analyzers': {
-          const sp = url.searchParams;
-          const blocks = schemaBlocks(body);
-          if (!blocks) return json(res, 400, { error: '« files » attend un objet { nom: contenu }' });
-          const r = schemaFromDocuments(blocks, cfg, {});
-          if (r.empty) return json(res, 400, { error: 'aucun mapping lisible', verdict: 'unrecognized' });
-          if (r.error) return json(res, 422, { error: r.error, verdict: 'unrecognized' });
-          const rep = anReport(r.tables, sp.get('text') || undefined, sp.get('field') || undefined);
-          if (sp.get('format') === 'md')
-            return send(res, 200, rep.markdown, { 'content-type': 'text/markdown; charset=utf-8' });
-          return json(res, 200, { verdict: rep.verdict, plans: rep.plans });
         }
         case '/v1/validate/vector':
           return json(res, 200, await limited(() => validateVector(body, url.searchParams.get('format') || 'yaml')));
@@ -736,6 +558,8 @@ function serve(opts) {
       const next = loadConfig(cfgFile);
       const nextUi = buildUI(next);
       const nextOps = opsRuntime(next);
+      // Retirer les jetons d’un service qui écoute sur le réseau ouvrirait l’API : le rechargement est refusé
+      requireTokenOffLoopback(host, port, nextOps.authRequired);
       try {
         opsAuditOpen(nextOps.auditLog);
       } catch (e) {
@@ -789,9 +613,12 @@ Utilisation :
 
 Variables d’environnement :
   PASSERELLE_CONFIG      fichier de configuration (passerelle.yaml)
-  PASSERELLE_LISTEN      adresse d’écoute, 127.0.0.1:8080 par défaut
+  PASSERELLE_LISTEN      adresse d’écoute, 127.0.0.1:8080 par défaut ; hors de la boucle locale, un jeton est obligatoire (le service refuse de démarrer sans)
   PASSERELLE_TOKEN       jeton exigé sur /v1/* et /metrics, toutes portées (Authorization: Bearer …) ; d’autres jetons, à portée, se déclarent dans server.tokens
   PASSERELLE_VECTOR_BIN  binaire Vector pour /v1/validate/vector (vector par défaut)
+  PASSERELLE_WORKERS     workers qui calculent les gros exports (Kibana, watches, Grafana, Logstash, schéma), 1 par défaut
+  PASSERELLE_WORKER_MEMORY_MB  tas d’un worker en Mio, 1024 par défaut : un export demande environ 30 fois sa taille, au-delà il est refusé (413)
+  PASSERELLE_WORKER_TIMEOUT_S  durée maximale d’un gros traitement en secondes, 100 par défaut (503 au-delà)
   CLICKHOUSE_USER, CLICKHOUSE_PASSWORD, KAFKA_USERNAME, KAFKA_PASSWORD, ES_USER, ES_PASSWORD, ES_API_KEY : secrets référencés par la configuration
 
 Verdict de chaque fichier : prête, à vérifier, à reprendre, non reconnue.
@@ -1167,32 +994,6 @@ function schemaAnalyzers(o) {
   if (o['fail-on'] && VERDICT_RANK[rep.verdict] >= VERDICT_RANK[o['fail-on']]) process.exit(2);
 }
 // Corps d'une route schema : un seul document, ou { "files": { nom: contenu } } ; null si « files » est mal formé
-function schemaBlocks(body) {
-  let j = null;
-  if (/^\s*\{/.test(body)) {
-    try {
-      j = JSON.parse(body);
-    } catch {
-      j = null;
-    }
-  }
-  if (j && Object.prototype.hasOwnProperty.call(j, 'files')) {
-    if (
-      typeof j.files !== 'object' ||
-      j.files === null ||
-      Array.isArray(j.files) ||
-      Object.values(j.files).some(x => typeof x !== 'string')
-    )
-      return null;
-    return Object.values(j.files).map(x => x.trim());
-  }
-  return [body.trim()];
-}
-// Plusieurs fichiers JSON (réponses d’API) : chacun est lu pour lui-même, puis tous sont traduits ensemble
-function schemaFromDocuments(blocks, cfg, opts) {
-  const wrapped = blocks.map(b => (/^(GET|PUT|POST)\s/i.test(b) ? b : `POST _passerelle\n${b}`)).join('\n\n');
-  return schemaFromElastic(wrapped, cfg, opts);
-}
 async function schemaPull(o) {
   const cfg = loadCfgOrFail(o);
   if (!expand(cfg.clickhouse.endpoint)) fail('clickhouse.endpoint n’est pas configuré');
@@ -1223,16 +1024,6 @@ async function schemaPull(o) {
 }
 
 /* ---------- Inventaire Kibana (passerelle kibana) ---------- */
-// Fuseau IANA (Europe/Paris) ou décalage en heures entières (+02:00), comme le paramètre time_zone d’Elasticsearch
-function validTimeZone(tz) {
-  if (/^[+-]\d{2}:?00$/.test(tz)) return true;
-  try {
-    new Intl.DateTimeFormat('fr', { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
 function kibanaReport(o) {
   if (o.timezone !== undefined && !validTimeZone(o.timezone))
     fail(`--timezone attend un fuseau IANA (Europe/Paris) ou un décalage en heures (+02:00), pas « ${o.timezone} »`);

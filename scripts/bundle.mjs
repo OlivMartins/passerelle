@@ -85,13 +85,23 @@ export async function bundleServer({ version, outfile } = {}) {
       });
     }
   };
+  // Le worker des gros exports (src/node/worker.js) : le moteur et les routes lourdes, en un fichier CommonJS que le
+  // serveur embarque comme texte et démarre en « eval » (le binaire autonome n'a pas de fichier à charger)
+  const worker = await bundle({
+    entryPoints: ['src/node/worker.js'],
+    format: 'cjs',
+    platform: 'node',
+    target: 'node24',
+    banner: { js: `${STRICT}\n/* Passerelle — worker : calcul des routes lourdes */` },
+    plugins: [versionPlugin]
+  });
   const js = await bundle({
     entryPoints: ['src/server.js'],
     format: 'cjs',
     platform: 'node',
     target: 'node24',
     // Dans un fichier CommonJS, import.meta.dirname est __dirname : le dossier où le binaire ou le paquet est posé
-    define: { 'import.meta.dirname': '__dirname' },
+    define: { 'import.meta.dirname': '__dirname', 'globalThis.__PASSERELLE_WORKER__': JSON.stringify(worker) },
     banner: { js: `${STRICT}\n/* Passerelle — binaire autonome : moteur de traduction + serveur + CLI */` },
     plugins: [versionPlugin]
   });
