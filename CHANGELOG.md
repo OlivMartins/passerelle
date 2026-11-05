@@ -4,7 +4,7 @@ Toutes les évolutions notables de Passerelle sont consignées ici. Le format s�
 
 ## [Unreleased]
 
-First step of the service hardening that precedes any announcement (phase 0 of `docs/specs/passerelle-clickstack.md`). From this version on, entries are written in English; earlier entries stay in French.
+First step of the service hardening that precedes any announcement. From this version on, entries are written in English; earlier entries stay in French.
 
 ### Security
 
