@@ -2,6 +2,42 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [Unreleased]
+
+First step of the service hardening that precedes any announcement. From this version on, entries are written in English; earlier entries stay in French.
+
+### Security
+
+- **The service refuses to listen beyond the loopback without a token.** `passerelle serve --listen 0.0.0.0:8080` (or `[::]`, or any network address) with neither `PASSERELLE_TOKEN` nor `server.tokens` now exits with an error instead of logging a warning and serving an open API. A `SIGHUP` reload that would remove the tokens of an exposed service is refused, and the previous configuration stays in place.
+- **Without a token, the peer address is checked, not only `Host`.** The old guard read the `Host` header alone, which the client writes: `Host: localhost` turned a 403 into a 200 from any machine that could reach the port. The connection itself must now come from `127.0.0.0/8` or `::1` (the `X-Forwarded-For` header is never read); the `Host` check stays, against DNS rebinding. With a token configured, the token decides, as before.
+- Guard code moved to `src/node/guard.js`, with unit tests.
+
+### Fixed
+
+- **Large exports no longer freeze the service.** The seven routes that accept up to 32 MiB (`/v1/inventory/kibana`, `/v1/translate/watcher`, `/v1/translate/grafana`, `/v1/translate/ingest`, `/v1/translate/logstash/pipelines`, `/v1/schema/ddl`, `/v1/schema/analyzers`) are computed by a `worker_thread` pool (`src/node/routes.js`, `worker.js`, `pool.js`) instead of the thread that answers `/healthz`. Measured on 1.7.4 before and after, with a synthetic Kibana export of copies of `examples/kibana/supervision_web.ndjson` (Windows, Node 22.11; one `/healthz` probe every 20 ms from a separate thread):
+
+  | Export | Slowest `/healthz` before | after | Peak process memory before | after |
+  |---|---|---|---|---|
+  | 4 MB | 2 203 ms | 30 ms | 316 MB | 272 MB |
+  | 30 MB | 13 989 ms | 28 ms | 1 767 MB | 1 303 MB |
+
+  The 32 MiB body is read as bytes and handed to the worker without a copy; the response comes back as bytes, also without a copy. The worker is embedded in the bundle as text and started with `eval`, which works inside the single executable (built and run on Linux, Node 24.22). If `worker_threads` cannot start, the service logs a warning and computes in the main thread, as before.
+- Limits, all tunable: `PASSERELLE_WORKERS` (1), `PASSERELLE_WORKER_MEMORY_MB` (1024), `PASSERELLE_WORKER_TIMEOUT_S` (100). A worker past its timeout is terminated and replaced (`503`, the service keeps running); a queue of 16 absorbs bursts, then `429`.
+- **An export too large for the worker is refused before any computation** (`413`, naming `PASSERELLE_WORKER_MEMORY_MB`). The heap of a worker is about 25 bytes per byte of export (30 MB: about 770 MB); the check uses 30. It is a prior check on purpose: on Linux with Node 24, running out of heap during a large native allocation (`TextEncoder` on a 145 MB response) aborts the whole process (SIGABRT) instead of stopping the worker, so `resourceLimits` alone does not protect the service.
+
+### Changed
+
+- **The container image needs `PASSERELLE_TOKEN`** (or `server.tokens` in the mounted configuration): it listens on `0.0.0.0`, so it now refuses to start without one. The CI smoke test passes a token.
+- **systemd unit: `MemoryMax` goes from 1G to 2G.** A 30 MB Kibana export peaks around 1.3 GB, above the old cap; with it the kernel would have killed the service. Lower it together with `PASSERELLE_WORKER_MEMORY_MB`.
+- The CLI help and `docs/INSTALL.md` (French) describe the new rules and variables.
+
+### Known gaps
+
+- The peak for a 30 MB export is 1.3 GB, above the 1 GB target of the specification. The result object alone is about 240 MB and its indented JSON about 290 MB of strings (145 MB of text for a 30 MB input). Compact JSON (92 MB) and a smaller inventory structure are the remaining levers; neither is done.
+- The worker memory limit is a prior estimate fitted on one synthetic corpus; a denser real export could still exceed the heap.
+- No metrics yet for the pool (queue length, timeouts, refusals).
+- Long exports are still answered synchronously (the request waits, up to 100 s); there is no HTTP job API. The MCP server will carry `passerelle_job_status` (phase 1b).
+
 ## [1.7.4] - 2026-11-04
 
 ### Corrigé

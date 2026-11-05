@@ -13,6 +13,12 @@ import { spawn, spawnSync } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
 import { bundleServer } from '../../scripts/bundle.mjs';
+import {
+  crossSiteRefusal,
+  isLoopbackAddress,
+  isLoopbackListen,
+  requireTokenOffLoopback
+} from '../../src/node/guard.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const rd = p => readFileSync(join(ROOT, p), 'utf8');
@@ -79,9 +85,10 @@ const freePort = () =>
     });
   });
 const servers = [];
-async function start(env) {
+// listen : adresse d'écoute si ce n'est pas 127.0.0.1 (le port est celui renvoyé dans srv.port)
+async function start(env, listen, bin = BIN) {
   const port = await freePort();
-  const p = spawn(process.execPath, [BIN, 'serve', '--listen', `127.0.0.1:${port}`], {
+  const p = spawn(process.execPath, [bin, 'serve', '--listen', listen ? listen(port) : `127.0.0.1:${port}`], {
     env: Object.assign(
       {
         PATH: process.env.PATH,
@@ -153,6 +160,22 @@ function raw(srv, text) {
 }
 const auth = { authorization: `Bearer ${TOKEN}` };
 const DSL = JSON.stringify({ query: { match_all: {} } });
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Export Kibana synthétique d'au moins `mb` Mio : copies de l'exemple, identifiants rendus uniques par copie
+function exportOf(mb) {
+  const lines = rd('examples/kibana/supervision_web.ndjson').trimEnd().split('\n');
+  const ids = lines.map(l => JSON.parse(l).id).sort((a, b) => b.length - a.length);
+  const out = [];
+  let size = 0;
+  for (let k = 0; size < mb * 1048576; k++)
+    for (const line of lines) {
+      let l = line;
+      for (const id of ids) l = l.split(id).join(`${id}-c${k}`);
+      out.push(l);
+      size += l.length + 1;
+    }
+  return `${out.join('\n')}\n`;
+}
 
 try {
   const open = await start({}); // sans jeton, usage local
@@ -463,6 +486,203 @@ try {
     'inventaire Kibana : export de plus de 2 Mio accepté, CSV',
     `statut ${r.status}, ${Math.round(big.length / 1048576)} Mio`
   );
+
+  /* ---------- Garde réseau : sans jeton, la machine locale seulement ---------- */
+  const fake = (peer, headers) => ({ headers: headers || {}, socket: { remoteAddress: peer } });
+  check(
+    ['127.0.0.1', '127.8.8.8', '::1', '::ffff:127.0.0.1'].every(isLoopbackAddress) &&
+      [
+        '10.0.0.5',
+        '192.168.1.2',
+        '::ffff:10.0.0.5',
+        'fe80::1',
+        '::',
+        '0.0.0.0',
+        '127.0.0.1.evil.example',
+        '',
+        undefined
+      ].every(a => !isLoopbackAddress(a)),
+    'adresses de bouclage : 127.0.0.0/8 et ::1 seulement'
+  );
+  check(
+    ['localhost', '127.0.0.1', '127.0.0.2', '::1'].every(isLoopbackListen) &&
+      ['0.0.0.0', '::', '192.168.1.2', 'passerelle.example.com', ''].every(h => !isLoopbackListen(h)),
+    'adresses d’écoute : 0.0.0.0, :: et les autres exposent le réseau'
+  );
+  check(
+    (() => {
+      try {
+        requireTokenOffLoopback('0.0.0.0', 8080, false);
+        return false;
+      } catch (e) {
+        return /sans jeton/.test(e.message) && /PASSERELLE_TOKEN/.test(e.message) && /0\.0\.0\.0:8080/.test(e.message);
+      }
+    })() &&
+      requireTokenOffLoopback('0.0.0.0', 8080, true) === undefined &&
+      requireTokenOffLoopback('127.0.0.1', 8080, false) === undefined,
+    'démarrage : 0.0.0.0 sans jeton refusé, avec jeton ou sur la boucle locale accepté'
+  );
+  // Le contournement d'origine : Host: localhost écrit par un client qui n'est pas la machine locale
+  check(
+    /connexions de la machine locale/.test(
+      crossSiteRefusal(fake('192.168.1.50', { host: 'localhost:8080' }), { authRequired: false })
+    ),
+    'sans jeton : « Host: localhost » depuis un autre poste refusé (le pair compte, pas l’en-tête)'
+  );
+  check(
+    crossSiteRefusal(fake('::ffff:192.168.1.50', { host: 'localhost' }), { authRequired: false }) !== '' &&
+      crossSiteRefusal({ headers: { host: 'localhost' }, socket: undefined }, { authRequired: false }) !== '' &&
+      crossSiteRefusal(fake(undefined, { host: 'localhost' }), { authRequired: false }) !== '',
+    'sans jeton : pair IPv4-mappé étranger, socket absente ou sans adresse refusés'
+  );
+  check(
+    crossSiteRefusal(fake('127.0.0.1', { host: 'localhost:8080' }), { authRequired: false }) === '' &&
+      crossSiteRefusal(fake('::1', { host: '[::1]:8080' }), { authRequired: false }) === '' &&
+      /adressées à localhost/.test(
+        crossSiteRefusal(fake('127.0.0.1', { host: 'attaquant.example' }), { authRequired: false })
+      ),
+    'sans jeton : pair local accepté, Host étranger refusé (DNS rebinding)'
+  );
+  check(
+    crossSiteRefusal(fake('192.168.1.50', { host: 'passerelle.example.com' }), { authRequired: true }) === '' &&
+      crossSiteRefusal(fake('192.168.1.50', { 'sec-fetch-site': 'cross-site' }), { authRequired: true }) !== '',
+    'avec jeton : le pair n’est pas contrôlé (le jeton fait foi), l’intersite reste refusé'
+  );
+  for (const listen of ['0.0.0.0', '[::]', '192.0.2.10']) {
+    const port = await freePort();
+    const rr = spawnSync(process.execPath, [BIN, 'serve', '--listen', `${listen}:${port}`], {
+      env: { PATH: process.env.PATH, PASSERELLE_UI: UI, PASSERELLE_CONFIG: CONFIG },
+      encoding: 'utf8',
+      timeout: 15000
+    });
+    check(
+      rr.status === 1 && /sans jeton/.test(rr.stderr) && /PASSERELLE_TOKEN/.test(rr.stderr) && !/at /.test(rr.stderr),
+      `serve --listen ${listen} sans jeton : le service refuse de démarrer, sans pile`,
+      `code ${rr.status} ${rr.stderr.slice(0, 200)}`
+    );
+  }
+  // Retirer les jetons par rechargement ouvrirait l'API d'un service qui écoute sur le réseau : refusé (Linux : SIGHUP)
+  if (process.platform !== 'win32') {
+    const cfgTok = join(TMP, 'avec-jeton.json');
+    const withTokens = JSON.parse(readFileSync(CONFIG, 'utf8'));
+    withTokens.server = { tokens: [{ name: 'ci', token: '${PSG_TEST_JETON}', scopes: ['translate'] }] };
+    writeFileSync(cfgTok, JSON.stringify(withTokens));
+    const net0 = await start(
+      { PASSERELLE_CONFIG: cfgTok, PSG_TEST_JETON: 'jeton-rechargement-9d41' },
+      port => `0.0.0.0:${port}`
+    );
+    const bearer = { authorization: 'Bearer jeton-rechargement-9d41' };
+    r = await request(net0, 'POST', '/v1/translate/dsl', { body: DSL, headers: bearer });
+    check(
+      r.status === 200,
+      'écoute sur 0.0.0.0 avec jeton : démarre, requête authentifiée acceptée',
+      `statut ${r.status}`
+    );
+    writeFileSync(cfgTok, JSON.stringify(JSON.parse(readFileSync(CONFIG, 'utf8'))));
+    net0.proc.kill('SIGHUP');
+    for (let i = 0; i < 60 && !/rechargement refusé/.test(net0.stderr()); i++) await sleep(50);
+    check(
+      /rechargement refusé/.test(net0.stderr()) && /sans jeton/.test(net0.stderr()),
+      'rechargement sans jeton sur 0.0.0.0 : refusé, configuration précédente conservée',
+      net0.stderr().slice(-300)
+    );
+    r = await request(net0, 'POST', '/v1/translate/dsl', { body: DSL });
+    check(r.status === 401, 'après le rechargement refusé : le jeton reste exigé', `statut ${r.status}`);
+    net0.proc.kill();
+  }
+
+  /* ---------- Gros exports : un worker, jamais le fil qui répond à /healthz ---------- */
+  const huge = exportOf(8);
+  {
+    const pending = request(prod, 'POST', '/v1/inventory/kibana?format=csv', { body: huge, headers: auth });
+    let done = false;
+    pending.then(
+      () => {
+        done = true;
+      },
+      () => {
+        done = true;
+      }
+    );
+    await sleep(150);
+    const lat = [];
+    while (!done) {
+      const t = Date.now();
+      await request(prod, 'GET', '/healthz');
+      lat.push(Date.now() - t);
+      await sleep(25);
+    }
+    r = await pending;
+    const worst = Math.max(...lat, 0);
+    check(
+      r.status === 200 && /^﻿Type;/.test(r.body) && lat.length >= 5,
+      `export de ${Math.round(huge.length / 1048576)} Mio : traité, CSV complet`,
+      `statut ${r.status}, ${lat.length} sondages`
+    );
+    check(
+      worst < 750,
+      `export de ${Math.round(huge.length / 1048576)} Mio : /healthz répond pendant le traitement`,
+      `${lat.length} sondages, le pire ${worst} ms`
+    );
+  }
+  {
+    // Un worker qui dépasse son délai est terminé ; le suivant prend la relève, le service ne bouge pas
+    const slow = await start({ PASSERELLE_WORKER_TIMEOUT_S: '1' });
+    r = await request(slow, 'POST', '/v1/inventory/kibana', { body: huge });
+    check(
+      r.status === 503 && /interrompu après 1 s/.test(r.json && r.json.error),
+      'export plus long que le délai du worker : 503 explicite',
+      `statut ${r.status} ${r.body.slice(0, 120)}`
+    );
+    r = await request(slow, 'POST', '/v1/inventory/kibana', { body: ndjson });
+    check(
+      slow.exited === null && r.status === 200 && r.json.summary.objects > 10,
+      'après un délai dépassé : un worker neuf répond, le service est intact',
+      `statut ${r.status}, sortie ${slow.exited}`
+    );
+    // Mémoire : un export dont le tas dépasserait la limite du worker est refusé avant tout calcul (413), la variable à régler est nommée
+    // (~25 octets de tas par octet d'export : 16 Mio demandent ~400 Mio, au-delà du minimum de 256 Mio)
+    const small = await start({ PASSERELLE_WORKER_MEMORY_MB: '256' });
+    r = await request(small, 'POST', '/v1/inventory/kibana', { body: exportOf(16) });
+    check(
+      r.status === 413 && /PASSERELLE_WORKER_MEMORY_MB/.test(r.json && r.json.error),
+      'export plus gros que la mémoire du worker : refusé a priori, 413 explicite',
+      `statut ${r.status} ${r.body.slice(0, 160)}`
+    );
+    r = await request(small, 'POST', '/v1/inventory/kibana', { body: ndjson });
+    check(
+      small.exited === null && r.status === 200 && r.json.summary.objects > 10,
+      'après un dépassement de mémoire : un worker neuf répond, le service est intact',
+      `statut ${r.status}, sortie ${small.exited}`
+    );
+    // Aucun worker ne démarre (ici : un code de worker qui plante) : calcul en ligne, mêmes réponses, avertissement
+    const BIN_NOWORKER = join(TMP, 'sans-worker.cjs');
+    await bundleServer({ outfile: BIN_NOWORKER, workerSource: 'throw new Error("worker de test qui plante");' });
+    const inline = await start({}, undefined, BIN_NOWORKER);
+    r = await request(inline, 'POST', '/v1/inventory/kibana', { body: ndjson });
+    const viaWorker = await request(prod, 'POST', '/v1/inventory/kibana', { body: ndjson, headers: auth });
+    check(
+      r.status === 200 && r.body === viaWorker.body && /worker_threads indisponible/.test(inline.stderr()),
+      'worker qui ne démarre pas : repli en ligne, réponse identique octet pour octet, avertissement journalisé',
+      `statut ${r.status}, ${inline.stderr().slice(0, 200)}`
+    );
+    r = await request(inline, 'POST', '/v1/inventory/kibana', { body: ndjson });
+    check(
+      inline.exited === null && r.status === 200,
+      'repli en ligne : les requêtes suivantes sont servies',
+      `statut ${r.status}`
+    );
+    const bad = spawnSync(process.execPath, [BIN, 'serve', '--listen', `127.0.0.1:${await freePort()}`], {
+      env: { PATH: process.env.PATH, PASSERELLE_UI: UI, PASSERELLE_CONFIG: CONFIG, PASSERELLE_WORKERS: '0' },
+      encoding: 'utf8',
+      timeout: 15000
+    });
+    check(
+      bad.status === 1 && /PASSERELLE_WORKERS attend un entier/.test(bad.stderr),
+      'PASSERELLE_WORKERS invalide : le démarrage échoue en nommant la variable',
+      `code ${bad.status} ${bad.stderr.slice(0, 160)}`
+    );
+  }
 
   /* ---------- Tableau de bord Grafana ---------- */
   r = await request(prod, 'POST', '/v1/translate/grafana?index=logs-*', {
