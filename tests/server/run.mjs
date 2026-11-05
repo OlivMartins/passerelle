@@ -86,9 +86,9 @@ const freePort = () =>
   });
 const servers = [];
 // listen : adresse d'écoute si ce n'est pas 127.0.0.1 (le port est celui renvoyé dans srv.port)
-async function start(env, listen) {
+async function start(env, listen, bin = BIN) {
   const port = await freePort();
-  const p = spawn(process.execPath, [BIN, 'serve', '--listen', listen ? listen(port) : `127.0.0.1:${port}`], {
+  const p = spawn(process.execPath, [bin, 'serve', '--listen', listen ? listen(port) : `127.0.0.1:${port}`], {
     env: Object.assign(
       {
         PATH: process.env.PATH,
@@ -654,6 +654,23 @@ try {
       small.exited === null && r.status === 200 && r.json.summary.objects > 10,
       'après un dépassement de mémoire : un worker neuf répond, le service est intact',
       `statut ${r.status}, sortie ${small.exited}`
+    );
+    // Aucun worker ne démarre (ici : un code de worker qui plante) : calcul en ligne, mêmes réponses, avertissement
+    const BIN_NOWORKER = join(TMP, 'sans-worker.cjs');
+    await bundleServer({ outfile: BIN_NOWORKER, workerSource: 'throw new Error("worker de test qui plante");' });
+    const inline = await start({}, undefined, BIN_NOWORKER);
+    r = await request(inline, 'POST', '/v1/inventory/kibana', { body: ndjson });
+    const viaWorker = await request(prod, 'POST', '/v1/inventory/kibana', { body: ndjson, headers: auth });
+    check(
+      r.status === 200 && r.body === viaWorker.body && /worker_threads indisponible/.test(inline.stderr()),
+      'worker qui ne démarre pas : repli en ligne, réponse identique octet pour octet, avertissement journalisé',
+      `statut ${r.status}, ${inline.stderr().slice(0, 200)}`
+    );
+    r = await request(inline, 'POST', '/v1/inventory/kibana', { body: ndjson });
+    check(
+      inline.exited === null && r.status === 200,
+      'repli en ligne : les requêtes suivantes sont servies',
+      `statut ${r.status}`
     );
     const bad = spawnSync(process.execPath, [BIN, 'serve', '--listen', `127.0.0.1:${await freePort()}`], {
       env: { PATH: process.env.PATH, PASSERELLE_UI: UI, PASSERELLE_CONFIG: CONFIG, PASSERELLE_WORKERS: '0' },

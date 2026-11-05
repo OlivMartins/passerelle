@@ -69,8 +69,9 @@ export function bundleUI() {
 /*
  * version : celle de package.json, qui remplace la version écrite en dur dans src/node/common.js.
  * outfile : si donné, le fichier est aussi écrit là.
+ * workerSource : pour les tests, remplace le code du worker (un worker qui plante éprouve le repli en ligne).
  */
-export async function bundleServer({ version, outfile } = {}) {
+export async function bundleServer({ version, outfile, workerSource } = {}) {
   const versionPlugin = {
     name: 'passerelle-version',
     setup(b) {
@@ -87,14 +88,16 @@ export async function bundleServer({ version, outfile } = {}) {
   };
   // Le worker des gros exports (src/node/worker.js) : le moteur et les routes lourdes, en un fichier CommonJS que le
   // serveur embarque comme texte et démarre en « eval » (le binaire autonome n'a pas de fichier à charger)
-  const worker = await bundle({
-    entryPoints: ['src/node/worker.js'],
-    format: 'cjs',
-    platform: 'node',
-    target: 'node24',
-    banner: { js: `${STRICT}\n/* Passerelle — worker : calcul des routes lourdes */` },
-    plugins: [versionPlugin]
-  });
+  const worker =
+    workerSource ??
+    (await bundle({
+      entryPoints: ['src/node/worker.js'],
+      format: 'cjs',
+      platform: 'node',
+      target: 'node24',
+      banner: { js: `${STRICT}\n/* Passerelle — worker : calcul des routes lourdes */` },
+      plugins: [versionPlugin]
+    }));
   const js = await bundle({
     entryPoints: ['src/server.js'],
     format: 'cjs',
