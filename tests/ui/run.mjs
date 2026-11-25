@@ -55,6 +55,54 @@ await p.waitForTimeout(400);
     v.slice(0, 160)
   );
 }
+// Log vers Vector : juste sous Requêtes, un échantillon de journal devient un pipeline VRL
+{
+  const nav = (await p.locator('.rail .nav').first().locator('.nav-item').allInnerTexts()).map(s =>
+    s.split('\n')[0].trim()
+  );
+  check(nav[1] === 'Log vers Vector', 'navigation : « Log vers Vector » juste sous « Requêtes »', nav.join(' | '));
+}
+await p.click('[data-view="logs"]');
+await p.waitForTimeout(400);
+{
+  const v = await text('#view-logs [data-role="verdict"]');
+  check(
+    /Prête/.test(v) && /Journal d’accès HTTP/.test(v) && /des événements reconnus/.test(v),
+    'log vers Vector : l’exemple nginx est reconnu, prêt',
+    v.slice(0, 200)
+  );
+  const vrl = await text('#view-logs [data-role="out"]');
+  check(
+    /parse_regex\(ligne/.test(vrl) && /attributes\."http\.response\.status_code"/.test(vrl),
+    'log vers Vector : le VRL en OpenTelemetry',
+    vrl.slice(0, 120)
+  );
+}
+for (const [tab, must] of [
+  ['fields', /http\.request\.method/],
+  ['preview', /"client\.address": "203\.0\.113\.10"/],
+  ['config', /tests:/],
+  ['notes', /Format détecté/],
+  ['validate', /vector test/]
+]) {
+  await p.click(`#view-logs [data-tab="${tab}"]`);
+  await p.waitForTimeout(150);
+  const t = await text('#view-logs [data-role="out"]');
+  check(must.test(t), `log vers Vector : onglet ${tab}`, t.slice(0, 160));
+}
+await p.click('#view-logs [data-conv="ecs"]');
+await p.selectOption('#view-logs [data-act="example"]', '1');
+await p.click('#view-logs [data-tab="preview"]');
+await p.waitForTimeout(400);
+{
+  const t = await text('#view-logs [data-role="out"]');
+  check(
+    /"error": \{/.test(t) && /java\.lang\.IllegalStateException/.test(t) && /"@timestamp"/.test(t),
+    'log vers Vector : ECS, trace de pile Java rattachée à son événement',
+    t.slice(0, 200)
+  );
+  await p.click('#view-logs [data-conv="otel"]');
+}
 // Ingestion : deux traducteurs de pipelines (Elasticsearch, Logstash) derrière un sélecteur, comme « Autres sources »
 await p.click('[data-view="ingest"]');
 await p.waitForTimeout(400);
@@ -124,14 +172,14 @@ await p.waitForTimeout(500);
   check(/\.conf/.test(accept), 'ingestion, Logstash : le sélecteur de fichiers attend des .conf', accept);
 }
 
-// Navigation : Kibana n’a plus de section à part (il ouvre « Autres sources »), ni Logstash (il ouvre « Ingestion ») : 6 sections
+// Navigation : Kibana n’a plus de section à part (il ouvre « Autres sources »), ni Logstash (il ouvre « Ingestion ») : 7 sections (« Log vers Vector » sous « Requêtes »)
 {
   const navItems = await p.locator('.nav-item').count();
   const kibanaNav = await p.locator('[data-view="kibana"]').count();
   const lsNav = await p.locator('[data-view="ls"]').count();
   check(
-    navItems === 6 && kibanaNav === 0 && lsNav === 0,
-    'navigation : 6 sections, plus d’entrée Kibana ni Pipelines à part',
+    navItems === 7 && kibanaNav === 0 && lsNav === 0,
+    'navigation : 7 sections, plus d’entrée Kibana ni Pipelines à part',
     `${navItems} entrées, ${kibanaNav} Kibana, ${lsNav} Pipelines`
   );
   const subIngest = await text('[data-view="ingest"] small');
@@ -434,7 +482,7 @@ await p.waitForTimeout(600);
   );
   await p2.close();
 }
-// Mobile : 6 entrées dans la barre du bas, rien ne déborde, le banc Kibana s’affiche
+// Mobile : 7 entrées dans la barre du bas, rien ne déborde, le banc Kibana s’affiche
 {
   const p3 = await browser.newPage({ viewport: { width: 390, height: 844 } });
   p3.on('pageerror', e => errs.push(`pageerror ${e.message}`));
@@ -447,8 +495,8 @@ await p.waitForTimeout(600);
     h: Math.round(document.querySelector('#kb .pane-in').getBoundingClientRect().height)
   }));
   check(
-    m.items === 6 && m.overflow <= 0 && (await p3.locator('#kb').isVisible()) && m.h >= 380,
-    'mobile : 6 entrées, pas de débordement, banc Kibana affiché',
+    m.items === 7 && m.overflow <= 0 && (await p3.locator('#kb').isVisible()) && m.h >= 380,
+    'mobile : 7 entrées, pas de débordement, banc Kibana affiché',
     JSON.stringify(m)
   );
   // Ingestion sur téléphone : le sélecteur Elasticsearch / Logstash tient dans l’écran et chaque banc s’affiche

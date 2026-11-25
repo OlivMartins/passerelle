@@ -13,6 +13,48 @@
       "file": "dsl/recherche_texte.json"
     }
   ],
+  "logs": [
+    {
+      "title": "Accès nginx (combined)",
+      "file": "logs/nginx_acces.log"
+    },
+    {
+      "title": "Java Logback avec trace de pile",
+      "file": "logs/java_logback.log"
+    },
+    {
+      "title": "Syslog : sshd, sudo, cron",
+      "file": "logs/syslog_messages.log"
+    },
+    {
+      "title": "Nomad (hclog)",
+      "file": "logs/nomad.log"
+    },
+    {
+      "title": "Audit de Vault (JSON)",
+      "file": "logs/vault_audit.log"
+    },
+    {
+      "title": "Kafka (log4j)",
+      "file": "logs/kafka_server.log"
+    },
+    {
+      "title": "ClickHouse, journal du serveur",
+      "file": "logs/clickhouse_serveur.log"
+    },
+    {
+      "title": "Collecteur OpenTelemetry (zap)",
+      "file": "logs/otel_collector.log"
+    },
+    {
+      "title": "Python logging avec traceback",
+      "file": "logs/python_logging.log"
+    },
+    {
+      "title": "Kubernetes (klog)",
+      "file": "logs/kubernetes_klog.log"
+    }
+  ],
   "ls": [
     {
       "title": "Logs nginx enrichis",

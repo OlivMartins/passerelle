@@ -14,6 +14,8 @@ import {
   kbFlat,
   kibanaInventory,
   kibanaObjects,
+  LOG_FORMAT_LABELS,
+  logToVRL,
   makeZip,
   mergeConfig,
   parseYAMLConfig,
@@ -93,6 +95,20 @@ const LANGS = {
     ['path', '(?:\\[[^\\]\\s"\',]+\\])+'],
     ['fn', '\\b[a-z_][a-z0-9_]*(?=\\s*\\{)'],
     ['op', '=>|==|!=|=~|!~'],
+    ['num', '\\b\\d+(?:\\.\\d+)?\\b']
+  ],
+  // Journaux : horodatages, niveaux, chaînes, clés de paires clé=valeur
+  log: [
+    [
+      'com',
+      '\\d{4}[-/.]\\d{2}[-/.]\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}(?:[.,]\\d+)?(?:Z|[+-]\\d{2}:?\\d{2})?|\\b\\d{2}/[A-Z][a-z]{2}/\\d{4}:\\d{2}:\\d{2}:\\d{2} [+-]\\d{4}|\\b[A-Z][a-z]{2} [ \\d]\\d \\d{2}:\\d{2}:\\d{2}\\b'
+    ],
+    [
+      'kw',
+      '\\b(?:TRACE|DEBUG|INFO|NOTICE|WARN|WARNING|ERROR|ERR|CRIT|CRITICAL|FATAL|SEVERE|Trace|Debug|Information|Notice|Warning|Error|Fatal|trace|debug|info|notice|warn|warning|error|crit|fatal)\\b'
+    ],
+    ['str', '"(?:[^"\\\\\\n]|\\\\.)*"'],
+    ['key', '[A-Za-z_@][\\w.@-]*(?==)'],
     ['num', '\\b\\d+(?:\\.\\d+)?\\b']
   ],
   bash: [
@@ -272,6 +288,16 @@ const S = {
     res: null,
     ed: null,
     lang: 'yaml'
+  },
+  // Log vers Vector : un échantillon de journal par onglet, ses options (convention, fuseau, format imposé)
+  logs: {
+    files: [{ name: EXAMPLES.logs[0].file, text: EXAMPLES.logs[0].text, example: true }],
+    active: 0,
+    tab: 'vrl',
+    res: null,
+    ed: null,
+    lang: 'log',
+    opts: Object.assign({ convention: 'otel', timezone: 'UTC', format: 'auto' }, store.get('logs-opts', {}))
   }
 };
 // « Ingestion » réunit les deux traducteurs de pipelines vers Vector (Elasticsearch, Logstash), sur le modèle d’« Autres sources »
@@ -281,8 +307,8 @@ const INGEST_TOOLS = [
 ];
 S.ingestTool = store.get('ingest-tool', 'ingest');
 if (!INGEST_TOOLS.some(([k]) => k === S.ingestTool)) S.ingestTool = 'ingest';
-// La racine d’un banc : Requêtes a sa vue, les deux bancs d’Ingestion se partagent la leur
-const benchRoot = kind => $(kind === 'dsl' ? '#view-dsl' : `#bench-${kind}`);
+// La racine d’un banc : Requêtes et Log vers Vector ont leur vue, les deux bancs d’Ingestion se partagent la leur
+const benchRoot = kind => $(kind === 'dsl' || kind === 'logs' ? `#view-${kind}` : `#bench-${kind}`);
 // Libellés propres à chaque banc de traduction
 const BENCH = {
   dsl: {
@@ -316,6 +342,19 @@ const BENCH = {
     error: 'Vérifiez l’indentation du YAML (ou les accolades du JSON) et la liste processors.',
     zip: 'passerelle-ingest.zip',
     copy: 'Configuration'
+  },
+  logs: {
+    file: 'journal.log',
+    label: 'Échantillon de journal',
+    placeholder:
+      'Collez ici quelques lignes d’un journal : accès nginx ou Apache, Java, Python, Go, Kafka, ClickHouse, Nomad, Vault, syslog, journald, JSON ou logfmt. Plus les lignes sont variées, plus le pipeline est juste.',
+    empty: 'Aucune ligne à analyser',
+    emptyHint: 'Collez des lignes de journal à gauche ou déposez des fichiers .log.',
+    error: 'Vérifiez les options : convention, fuseau (nom IANA, par exemple Europe/Paris) et format imposé.',
+    zip: 'passerelle-log-vector.zip',
+    copy: 'VRL',
+    score: 'des événements reconnus',
+    ok: ['reconnu', 'reconnus']
   }
 };
 let downloads = null;
@@ -389,6 +428,7 @@ function translate(kind, file) {
       if (all && !all.error && all.pipelines.some(p => p.name === mine.name)) return all;
       return translateIngest([mine], cfg);
     }
+    if (kind === 'logs') return logToVRL(file.text, cfg, Object.assign({ name: file.name }, S.logs.opts));
     return kind === 'dsl' ? translateDSL(file.text, cfg, { index: S.dsl.index }) : translateLogstash(file.text, cfg);
   } catch (e) {
     return { error: `Erreur interne du traducteur : ${e.message}` };
@@ -437,6 +477,14 @@ const TABS = {
     ['flow', 'Topologie'],
     ['notes', 'Remarques'],
     ['validate', 'Valider']
+  ],
+  logs: [
+    ['vrl', 'VRL'],
+    ['fields', 'Champs'],
+    ['preview', 'Aperçu'],
+    ['config', 'Configuration'],
+    ['notes', 'Remarques'],
+    ['validate', 'Valider']
   ]
 };
 function render(kind) {
@@ -467,8 +515,9 @@ function render(kind) {
     const total = ok + approx + ko || 1;
     const verdict = verdictOf(r);
     // Le verdict d’abord : il dit si la sortie part telle quelle ; le pourcentage compte des clauses
-    v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-${verdict}"><i></i>${verdictLabel(verdict)}</span><span class="score">${coverage(r.stats).percent} %</span><span class="score-label">traduit automatiquement</span>
-      <span class="counts"><span><i class="c-ok"></i>${ok} direct${ok > 1 ? 's' : ''}</span><span><i class="c-approx"></i>${approx} à vérifier</span><span><i class="c-ko"></i>${ko} à reprendre</span></span></div>
+    const okWord = BENCH[kind].ok || ['direct', 'directs'];
+    v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-${verdict}"><i></i>${verdictLabel(verdict)}</span><span class="score">${coverage(r.stats).percent} %</span><span class="score-label">${BENCH[kind].score || 'traduit automatiquement'}</span>
+      <span class="counts"><span><i class="c-ok"></i>${ok} ${okWord[ok > 1 ? 1 : 0]}</span><span><i class="c-approx"></i>${approx} à vérifier</span><span><i class="c-ko"></i>${ko} à reprendre</span></span></div>
       <div class="gauge" role="img" aria-label="${ok} éléments traduits directement, ${approx} à vérifier, ${ko} à reprendre"><span class="c-ok" style="width:${(100 * ok) / total}%"></span><span class="c-approx" style="width:${(100 * approx) / total}%"></span><span class="c-ko" style="width:${(100 * ko) / total}%"></span></div>
       <p class="sentence">${esc(r.sentence || '')}</p>`;
   }
@@ -506,8 +555,13 @@ function render(kind) {
   else if (tab === 'config')
     out.innerHTML = `<div class="stmt"><div class="stmt-head"><span>vector.${cfg.vector.format}</span><div class="seg" role="group" aria-label="Format">${['yaml', 'toml'].map(f => `<button type="button" data-format="${f}" aria-pressed="${cfg.vector.format === f}">${f.toUpperCase()}</button>`).join('')}</div></div><pre class="code">${hl(r[cfg.vector.format], cfg.vector.format)}</pre></div>`;
   else if (tab === 'notes') out.innerHTML = notesHTML(r.notes);
+  else if (tab === 'vrl')
+    out.innerHTML = `<div class="stmt"><div class="stmt-head"><span>${esc(r.transform)}.vrl</span><button class="icon-btn" type="button" data-copy-raw="${esc(r.vrl)}" title="Copier le VRL" aria-label="Copier le VRL">${ICON_COPY}</button></div><pre class="code">${hl(r.vrl, 'vrl')}</pre></div>`;
+  else if (tab === 'fields') out.innerHTML = logFieldsHTML(r);
+  else if (tab === 'preview') out.innerHTML = logPreviewHTML(r);
   else if (tab === 'anatomy') out.innerHTML = anatomyHTML(r);
-  else if (tab === 'validate') out.innerHTML = kind === 'dsl' ? validateDSL(r) : validateLS(r, kind);
+  else if (tab === 'validate')
+    out.innerHTML = kind === 'dsl' ? validateDSL(r) : kind === 'logs' ? validateLogs(r) : validateLS(r, kind);
   else if (tab === 'flow') {
     out.innerHTML = flowHTML(r.graph);
     requestAnimationFrame(() => drawEdges(out, r.graph));
@@ -592,6 +646,65 @@ docker run --rm -v "$PWD/${f}:/etc/vector/vector.${cfg.vector.format}:ro" \\
     <pre class="code boxed">${hl(cmd, 'bash')}</pre>
     <p>L’archive téléchargée contient aussi un squelette de test unitaire, exécutable avec vector test, à compléter avec un message réel.</p></div>`;
 }
+/* ---------- Log vers Vector : champs, aperçu, validation ---------- */
+const LOG_TYPES = {
+  texte: 'texte',
+  entier: 'entier',
+  flottant: 'flottant',
+  horodatage: 'horodatage',
+  booléen: 'booléen'
+};
+function logFieldsHTML(r) {
+  if (!r.fields.length)
+    return '<div class="empty"><strong>Aucun champ</strong><span>Aucune ligne n’est reconnue : le pipeline garde le message tel quel.</span></div>';
+  const n = r.events.filter(e => e.recognized).length;
+  const rows = r.fields
+    .map(
+      f =>
+        `<tr><td>${logFieldName(f.name)}</td><td>${esc(LOG_TYPES[f.type] || f.type)}</td><td class="ex">${esc(typeof f.example === 'string' ? f.example : JSON.stringify(f.example))}</td><td class="n">${f.count}/${n}</td></tr>`
+    )
+    .join('');
+  return `<div class="prose md"><p>Les champs que le pipeline écrit, nommés selon ${r.convention === 'otel' ? 'les conventions sémantiques d’OpenTelemetry (attributs et ressources à clés pointées, comme LogAttributes et ResourceAttributes de ClickStack)' : 'ECS (Elastic Common Schema), en objets imbriqués'}. L’exemple est la valeur lue dans la première ligne qui porte le champ.</p><div class="tw"><table><thead><tr><th>Champ</th><th>Type</th><th>Exemple</th><th class="n">Événements</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+// attributes["http.request.method"] s’affiche http.request.method, avec sa nature (attribut, ressource)
+function logFieldName(name) {
+  const m = /^(attributes|resources)\["(.*)"\]$/.exec(name);
+  return m
+    ? `<code>${esc(m[2])}</code> <small class="kind">${m[1] === 'attributes' ? 'attribut' : 'ressource'}</small>`
+    : `<code>${esc(name)}</code>`;
+}
+function logPreviewHTML(r) {
+  const shown = r.events.slice(0, 20);
+  return `<div class="prose md"><p>Ce que Vector produira pour ${shown.length < r.events.length ? `les ${shown.length} premiers des ${r.events.length} événements` : r.events.length > 1 ? `les ${r.events.length} événements` : 'l’événement'} de l’échantillon. Les tests unitaires de la configuration vérifient ces valeurs dans Vector (vector test).</p>${shown
+    .map(
+      (e, i) =>
+        `<div class="stmt"><div class="stmt-head"><span><span class="verdict-chip v-${e.recognized ? 'ready' : 'review'}"><i></i>${e.recognized ? 'reconnu' : 'non reconnu'}</span>Événement ${i + 1}</span></div><pre class="code wrap">${hl(e.text, 'log')}</pre><pre class="code wrap">${hl(e.preview, 'json')}</pre></div>`
+    )
+    .join('')}</div>`;
+}
+function validateLogs(r) {
+  const f = `vector.${cfg.vector.format}`;
+  const cmd = `# 1. Rejouer l’échantillon : les tests unitaires du fichier vérifient chaque champ (sans source ni réseau)
+vector test ${f}
+
+# 2. Essayer le VRL seul sur des événements, une ligne JSON { "message": "…" } par événement
+vector vrl --input evenements.ndjson --program ${r.transform}.vrl --print-object
+
+# 3. Lancer sur le fichier : ${r.multiline ? 'la source file regroupe les traces de pile (multiline)' : 'chaque ligne de l’entrée standard est un événement'}
+${
+  r.multiline
+    ? `mkdir -p /var/lib/vector && cp journal.log echantillon.log
+vector --config ${f}`
+    : `vector --config ${f} < journal.log`
+}
+
+# 4. Dans un conteneur
+docker run --rm -i -v "$PWD/${f}:/etc/vector/${f}:ro" \\
+  timberio/vector:0.59.0-debian test /etc/vector/${f}`;
+  return `<div class="prose"><p>Le VRL suit les règles de typage de Vector 0.59 : chaque appel faillible est traité, une ligne d’un autre format passe sans être perdue, marquée ${r.convention === 'otel' ? 'par l’attribut log.parse.error' : 'par l’étiquette _vrl_parse_failure'}.</p>
+    <pre class="code boxed">${hl(cmd, 'bash')}</pre>
+    <p>L’archive téléchargée contient la configuration, le programme VRL, l’échantillon et ses événements au format attendu par vector vrl. En production, remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie ».</p></div>`;
+}
 const KIND_LABEL = n =>
   n.kind === 'source'
     ? `Source ${n.type === 'kafka' ? 'Kafka' : n.type}`
@@ -659,6 +772,23 @@ function exportKind(kind) {
   const st = S[kind];
   const results = st.files.map(f => ({ name: f.name, r: translate(kind, f) })).filter(x => !x.r.empty);
   const files = [];
+  if (kind === 'logs') {
+    const fmt = cfg.vector.format;
+    results.forEach(({ name, r }) => {
+      if (r.error) return;
+      const b = base(name);
+      files.push({ name: `vector/${b}.${fmt}`, content: r[fmt] });
+      files.push({ name: `vrl/${r.transform}.vrl`, content: r.vrl });
+      files.push({ name: `echantillons/${b}.log`, content: r.events.map(e => e.text).join('\n') + '\n' });
+      files.push({
+        name: `echantillons/${b}.ndjson`,
+        content: r.events.map(e => JSON.stringify({ message: e.text })).join('\n') + '\n'
+      });
+    });
+    files.push({ name: 'NOTES.md', content: notesMD('Remarques : journaux vers pipelines VRL', results) });
+    saveFile(BENCH[kind].zip, makeZip(files));
+    return;
+  }
   if (kind === 'dsl') {
     results.forEach(({ name, r }) => {
       if (!r.error)
@@ -741,6 +871,13 @@ function handleFiles(files) {
     const savedObject =
       /"attributes"\s*:/.test(firstLine) && /"type"\s*:\s*"/.test(firstLine) && /"id"\s*:/.test(firstLine);
     const detectionRule = /"rule_id"\s*:/.test(firstLine) && /"(?:severity|risk_score)"\s*:/.test(firstLine);
+    // Un journal (.log), ou tout fichier texte déposé dans « Log vers Vector », va à l’analyse de journaux
+    if (
+      !savedObject &&
+      !detectionRule &&
+      (/\.(log|out)$/i.test(f.name) || (S.view === 'logs' && !/\.(conf|cfg|ya?ml)$/i.test(f.name)))
+    )
+      return 'logs';
     if (/\.ndjson$/i.test(f.name) || savedObject || detectionRule) return 'kibana';
     // Des watches (console, export _query/watches, définition) vont à l’outil Watcher, d’où qu’elles soient déposées
     if (
@@ -1020,6 +1157,7 @@ function configChanged() {
     run('dsl');
     run('ls');
     run('ingest');
+    run('logs');
     runKibana();
   }, 250);
 }
@@ -1032,6 +1170,7 @@ function importConfig(f) {
     run('dsl');
     run('ls');
     run('ingest');
+    run('logs');
     runKibana();
     toast(`Configuration importée depuis ${f.name}`);
   } catch (e) {
@@ -1066,6 +1205,11 @@ function renderAPI() {
           'POST',
           '/v1/translate/ingest?format=yaml',
           'Traduit des pipelines d’ingestion Elasticsearch (YAML, JSON ou requête PUT _ingest/pipeline, ou { files }) en VRL, avec verdict par pipeline.'
+        ],
+        [
+          'POST',
+          '/v1/translate/log?convention=otel&timezone=UTC',
+          'Lit quelques lignes d’un journal, reconnaît leur format et renvoie le VRL, la configuration Vector et ses tests unitaires, les champs et les événements prédits. convention : otel ou ecs ; log_format : imposer un format.'
         ],
         [
           'POST',
@@ -1121,6 +1265,7 @@ curl -sS -X POST "https://passerelle.internal/v1/translate/logstash?format=${cfg
       `passerelle dsl2sql requetes/ --config passerelle.yaml --out build/sql --fail-on todo
 passerelle ls2vector pipelines/ --config passerelle.yaml --format ${cfg.vector.format} --out build/vector --fail-on todo
 passerelle ingest ingest_pipelines/ --config passerelle.yaml --out build/ingest --fail-on todo
+passerelle log2vector journaux/ --convention otel --timezone Europe/Paris --out build/journaux --fail-on todo
 passerelle kibana export.ndjson --config passerelle.yaml --format md --out build/kibana
 passerelle grafana tableaux/ --config passerelle.yaml --out build/grafana
 passerelle watcher watches.json --config passerelle.yaml --out build/watcher
@@ -2275,8 +2420,8 @@ function setupBench(kind) {
     runSoon(kind);
   });
   st.ed.value = st.files[st.active].text;
-  // L’en-tête de Requêtes sert ce banc ; celui d’Ingestion sert les deux (setupIngest)
-  if (kind === 'dsl') {
+  // Les en-têtes de Requêtes et de Log vers Vector servent leur banc ; celui d’Ingestion sert les deux (setupIngest)
+  if (kind === 'dsl' || kind === 'logs') {
     const sel = $('[data-act="example"]', view);
     sel.innerHTML = `<option value="">Charger un exemple</option>${EXAMPLES[kind].map((e, i) => `<option value="${i}">${esc(e.title)}</option>`).join('')}`;
     sel.addEventListener('change', () => {
@@ -2309,7 +2454,7 @@ function setupBench(kind) {
   $('[data-act="copy"]', view).addEventListener('click', () => {
     const r = st.res;
     if (!r || r.error || r.empty) return;
-    copyText(kind === 'dsl' ? r.sql : r[cfg.vector.format], BENCH[kind].copy);
+    copyText(kind === 'dsl' ? r.sql : kind === 'logs' ? r.vrl : r[cfg.vector.format], BENCH[kind].copy);
   });
   $('[data-act="export"]', view).addEventListener('click', () => exportKind(kind));
   view.addEventListener('click', e => {
@@ -2330,6 +2475,8 @@ function setupBench(kind) {
     if (t.dataset.tab) {
       st.tab = t.dataset.tab;
       render(kind);
+      // Un autre onglet s’ouvre en haut, pas à la position de défilement du précédent
+      $('[data-role="out"]', view).scrollTop = 0;
       return;
     }
     if (t.dataset.file !== undefined) {
@@ -2407,6 +2554,47 @@ function setupIngest() {
   });
   renderIngest();
 }
+/* ---------- Log vers Vector : convention, format imposé, fuseau ---------- */
+function setupLogs() {
+  const view = $('#view-logs');
+  const st = S.logs;
+  const save = () => store.set('logs-opts', st.opts);
+  const seg = $('[data-role="conv-seg"]', view);
+  const paint = () =>
+    $$('[data-conv]', seg).forEach(b => b.setAttribute('aria-pressed', b.dataset.conv === st.opts.convention));
+  seg.innerHTML = [
+    ['otel', 'OpenTelemetry'],
+    ['ecs', 'ECS']
+  ]
+    .map(([k, l]) => `<button type="button" data-conv="${k}" aria-pressed="false">${l}</button>`)
+    .join('');
+  seg.addEventListener('click', e => {
+    const b = e.target.closest('[data-conv]');
+    if (!b) return;
+    st.opts.convention = b.dataset.conv;
+    save();
+    paint();
+    run('logs', true);
+  });
+  paint();
+  const fmt = $('[data-role="format"]', view);
+  fmt.innerHTML = `<option value="auto">Format détecté</option>${Object.entries(LOG_FORMAT_LABELS)
+    .map(([k, l]) => `<option value="${k}">${esc(l)}</option>`)
+    .join('')}`;
+  fmt.value = LOG_FORMAT_LABELS[st.opts.format] ? st.opts.format : 'auto';
+  fmt.addEventListener('change', () => {
+    st.opts.format = fmt.value;
+    save();
+    run('logs', true);
+  });
+  const tz = $('[data-role="tz"]', view);
+  tz.value = st.opts.timezone || 'UTC';
+  tz.addEventListener('input', () => {
+    st.opts.timezone = tz.value.trim() || 'UTC';
+    save();
+    runSoon('logs');
+  });
+}
 function setupConfig() {
   renderConfigForm();
   const form = $('#cfg-form');
@@ -2467,6 +2655,7 @@ function setupConfig() {
     run('dsl');
     run('ls');
     run('ingest');
+    run('logs');
     runKibana();
     toast('Configuration réinitialisée');
   });
@@ -2502,6 +2691,8 @@ setupTheme();
 setupBench('dsl');
 setupBench('ls');
 setupBench('ingest');
+setupBench('logs');
+setupLogs();
 setupIngest();
 setupKibana();
 setupTools();
@@ -2509,6 +2700,7 @@ setupConfig();
 run('dsl');
 run('ls');
 run('ingest');
+run('logs');
 // La section « Kibana » est devenue l’outil Kibana d’« Autres sources » : une vue mémorisée par une version précédente y mène
 if (S.view === 'kibana') {
   S.view = 'tools';
@@ -2522,7 +2714,7 @@ if (S.view === 'ls') {
   store.set('ingest-tool', 'ls');
   renderIngest();
 }
-show(['dsl', 'ingest', 'tools', 'config', 'api', 'arch'].includes(S.view) ? S.view : 'dsl');
+show(['dsl', 'logs', 'ingest', 'tools', 'config', 'api', 'arch'].includes(S.view) ? S.view : 'dsl');
 // Téléchargement classique par le navigateur (page servie par le binaire ou ouverte en local)
 downloads = {
   save: async ({ filename, data }) => {
