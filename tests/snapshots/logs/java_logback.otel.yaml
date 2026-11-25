@@ -1,0 +1,146 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Java Logback ou Log4j 2 (date [thread] NIVEAU logger - message))
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : placez l’échantillon dans ./echantillon.log, créez /var/lib/vector, puis vector --config <fichier>
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+data_dir: /var/lib/vector
+sources:
+  journaux:
+    type: file
+    include: [./echantillon.log]
+    read_from: beginning
+    multiline:
+      start_pattern: '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
+      mode: halt_before
+      condition_pattern: '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
+      timeout_ms: 1000
+transforms:
+  analyse_java_logback:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Java Logback ou Log4j 2 (date [thread] NIVEAU logger - message) »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      ligne = string(.message) ?? ""
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      champs, erreur = parse_regex(ligne, r'^(?P<time>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?) +\[(?P<thread>[^\]]+)\] +(?P<level>TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|SEVERE) +(?P<logger>\S+) +- (?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .attributes."log.parse.error" = "ligne non reconnue : format « Java Logback ou Log4j 2 (date [thread] NIVEAU logger - message) » attendu"
+      } else {
+        .attributes."log.record.original" = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%Y-%m-%d %H:%M:%S%.f", timezone: "UTC")
+        if erreur_horodatage1 == null {
+          .timestamp = horodatage1
+        }
+        .attributes."thread.name" = champs.thread
+        niveau2 = string!(champs.level)
+        .severity_text = niveau2
+        niveau_min3 = downcase(niveau2)
+        .severity_number = if includes(["trace", "finest", "finer", "trace1", "trace2", "trace3", "trace4", "trace5", "trace6", "trace7", "trace8"], niveau_min3) { 1 } else if includes(["debug", "fine", "dbg", "config", "verbose"], niveau_min3) { 5 } else if includes(["info", "information", "informational"], niveau_min3) { 9 } else if includes(["notice"], niveau_min3) { 10 } else if includes(["warn", "warning"], niveau_min3) { 13 } else if includes(["error", "err", "severe"], niveau_min3) { 17 } else if includes(["fatal", "critical", "crit", "alert", "emerg", "emergency", "panic", "dpanic"], niveau_min3) { 21 } else { 0 }
+        .scope.name = champs.logger
+        lignes5 = split(string!(champs.msg), "\n", limit: 2)
+        message4 = string(lignes5[0]) ?? ""
+        .message = message4
+        if length(lignes5) > 1 {
+          trace6 = string(lignes5[1]) ?? ""
+          .attributes."exception.stacktrace" = trace6
+          exception7, exception_erreur7 = parse_regex(trace6, r'(?m)^(?:Caused by: )?(?P<type>(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:Exception|Error|Throwable|Interrupt|Exit))(?::[ \t]*(?P<message>.*))?')
+          if exception_erreur7 == null {
+            .attributes."exception.type" = exception7.type
+            if exception7.message != null {
+              .attributes."exception.message" = exception7.message
+            }
+          }
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_java_logback]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026-05-01 10:00:00.123 [main] INFO  com.example.boutique.Ap…'
+    inputs:
+      - insert_at: analyse_java_logback
+        type: log
+        log_fields:
+          message: '2026-05-01 10:00:00.123 [main] INFO  com.example.boutique.Application - Démarrage de l’application en 4.2 s'
+    outputs:
+      - extract_from: analyse_java_logback
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026-05-01 10:00:00.123 [main] INFO  com.example.boutique.Application - Démarrage de l’application en 4.2 s")
+              assert_eq!(.attributes."thread.name", "main")
+              assert_eq!(.timestamp, t'2026-05-01T10:00:00.123Z')
+              assert_eq!(.severity_text, "INFO")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.scope.name, "com.example.boutique.Application")
+              assert_eq!(.message, "Démarrage de l’application en 4.2 s")
+  - name: 'reconnue : 2026-05-01 10:00:01.456 [http-nio-8080-exec-1] WARN  com.exa…'
+    inputs:
+      - insert_at: analyse_java_logback
+        type: log
+        log_fields:
+          message: '2026-05-01 10:00:01.456 [http-nio-8080-exec-1] WARN  com.example.boutique.web.PanierController - Panier 8812 introuvable pour la session 3fa2'
+    outputs:
+      - extract_from: analyse_java_logback
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026-05-01 10:00:01.456 [http-nio-8080-exec-1] WARN  com.example.boutique.web.PanierController - Panier 8812 introuvable pour la session 3fa2")
+              assert_eq!(.attributes."thread.name", "http-nio-8080-exec-1")
+              assert_eq!(.timestamp, t'2026-05-01T10:00:01.456Z')
+              assert_eq!(.severity_text, "WARN")
+              assert_eq!(.severity_number, 13)
+              assert_eq!(.scope.name, "com.example.boutique.web.PanierController")
+              assert_eq!(.message, "Panier 8812 introuvable pour la session 3fa2")
+  - name: 'reconnue : 2026-05-01 10:00:02.789 [http-nio-8080-exec-3] ERROR com.exa…'
+    inputs:
+      - insert_at: analyse_java_logback
+        type: log
+        log_fields:
+          message: |-
+            2026-05-01 10:00:02.789 [http-nio-8080-exec-3] ERROR com.example.boutique.service.PaiementService - Échec du paiement de la commande 1042
+            java.lang.IllegalStateException: Solde insuffisant pour la commande 1042
+            	at com.example.boutique.service.PaiementService.debiter(PaiementService.java:88)
+            	at com.example.boutique.web.CommandeController.payer(CommandeController.java:41)
+            Caused by: java.net.SocketTimeoutException: Read timed out
+            	at java.base/sun.nio.ch.NioSocketImpl.timedRead(NioSocketImpl.java:288)
+            	... 42 more
+    outputs:
+      - extract_from: analyse_java_logback
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026-05-01 10:00:02.789 [http-nio-8080-exec-3] ERROR com.example.boutique.service.PaiementService - Échec du paiement de la commande 1042\njava.lang.IllegalStateException: Solde insuffisant pour la commande 1042\n\tat com.example.boutique.service.PaiementService.debiter(PaiementService.java:88)\n\tat com.example.boutique.web.CommandeController.payer(CommandeController.java:41)\nCaused by: java.net.SocketTimeoutException: Read timed out\n\tat java.base/sun.nio.ch.NioSocketImpl.timedRead(NioSocketImpl.java:288)\n\t... 42 more")
+              assert_eq!(.attributes."thread.name", "http-nio-8080-exec-3")
+              assert_eq!(.attributes."exception.stacktrace", "java.lang.IllegalStateException: Solde insuffisant pour la commande 1042\n\tat com.example.boutique.service.PaiementService.debiter(PaiementService.java:88)\n\tat com.example.boutique.web.CommandeController.payer(CommandeController.java:41)\nCaused by: java.net.SocketTimeoutException: Read timed out\n\tat java.base/sun.nio.ch.NioSocketImpl.timedRead(NioSocketImpl.java:288)\n\t... 42 more")
+              assert_eq!(.attributes."exception.type", "java.lang.IllegalStateException")
+              assert_eq!(.attributes."exception.message", "Solde insuffisant pour la commande 1042")
+              assert_eq!(.timestamp, t'2026-05-01T10:00:02.789Z')
+              assert_eq!(.severity_text, "ERROR")
+              assert_eq!(.severity_number, 17)
+              assert_eq!(.scope.name, "com.example.boutique.service.PaiementService")
+              assert_eq!(.message, "Échec du paiement de la commande 1042")
+  - name: 'reconnue : 2026-05-01 10:00:03.001 [scheduler-1] DEBUG com.example.bout…'
+    inputs:
+      - insert_at: analyse_java_logback
+        type: log
+        log_fields:
+          message: '2026-05-01 10:00:03.001 [scheduler-1] DEBUG com.example.boutique.batch.Purge - 12 paniers expirés supprimés'
+    outputs:
+      - extract_from: analyse_java_logback
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026-05-01 10:00:03.001 [scheduler-1] DEBUG com.example.boutique.batch.Purge - 12 paniers expirés supprimés")
+              assert_eq!(.attributes."thread.name", "scheduler-1")
+              assert_eq!(.timestamp, t'2026-05-01T10:00:03.001Z')
+              assert_eq!(.severity_text, "DEBUG")
+              assert_eq!(.severity_number, 5)
+              assert_eq!(.scope.name, "com.example.boutique.batch.Purge")
+              assert_eq!(.message, "12 paniers expirés supprimés")

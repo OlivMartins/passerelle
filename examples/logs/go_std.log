@@ -1,0 +1,3 @@
+2026/05/01 10:00:00 main.go:42: démarrage du serveur sur :8080
+2026/05/01 10:00:01 handlers.go:117: requête GET /api/stock traitée en 12ms
+2026/05/01 10:00:02 db.go:88: connexion à la base perdue, nouvelle tentative dans 5s

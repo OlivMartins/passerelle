@@ -1,0 +1,131 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Syslog BSD (/var/log/messages, syslog, auth.log, kern.log))
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_syslog_kern:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Syslog BSD (/var/log/messages, syslog, auth.log, kern.log) »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      # Le journal ne donne pas l’année : celle du jour, ou la précédente pour une date dans le futur
+      annee = format_timestamp!(now(), "%Y", timezone: "UTC")
+      champs, erreur = parse_regex(ligne, r'^(?:<(?P<pri>\d{1,3})>)?(?P<time>[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}) (?P<host>\S+) (?P<app>[^\s\[:]+)(?:\[(?P<pid>\d+)\])?: +(?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Syslog BSD (/var/log/messages, syslog, auth.log, kern.log) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        if champs.pri != null {
+          priorite1 = to_int(champs.pri) ?? 0
+          .log.syslog.priority = priorite1
+          .log.syslog.facility.name = get(["kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv", "ftp", "ntp", "security", "console", "solaris-cron", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7"], [to_int(floor(priorite1 / 8))]) ?? null
+          severite2 = get(["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"], [mod(priorite1, 8)]) ?? null
+          .log.syslog.severity.name = severite2
+        }
+        horodatage3, erreur_horodatage3 = parse_timestamp(annee + " " + string!(champs.time), "%Y %b %e %H:%M:%S", timezone: "UTC")
+        if erreur_horodatage3 == null && to_unix_timestamp(horodatage3) > to_unix_timestamp(now()) + 86400 {
+          # Date à plus d’un jour dans le futur : elle est de l’année précédente (journal de décembre lu en janvier)
+          horodatage3 = parse_timestamp(to_string((to_int(annee) ?? 0) - 1) + " " + string!(champs.time), "%Y %b %e %H:%M:%S", timezone: "UTC") ?? horodatage3
+        }
+        if erreur_horodatage3 == null {
+          ."@timestamp" = horodatage3
+          del(.timestamp)
+        }
+        .host.name = champs.host
+        .process.name = champs.app
+        if champs.pid != null {
+          .process.pid = to_int(champs.pid) ?? null
+        }
+        message4 = string!(champs.msg)
+        .message = message4
+        # Enrichissement : horloge du noyau ([secondes depuis le démarrage])
+        if champs.app == "kernel" {
+          detail5, detail_erreur5 = parse_regex(message4, r'^\[ *(?P<uptime>\d+\.\d+)\] (?P<rest>[\s\S]*)\z')
+          if detail_erreur5 == null {
+            .host.uptime = to_float(detail5.uptime) ?? null
+            .message = detail5.rest
+          }
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_syslog_kern]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : May  1 10:00:00 web01 kernel: [    0.000000] Linux version 6…'
+    inputs:
+      - insert_at: analyse_syslog_kern
+        type: log
+        log_fields:
+          message: 'May  1 10:00:00 web01 kernel: [    0.000000] Linux version 6.8.0-45-generic (buildd@lcy02-amd64-075) (x86_64-linux-gnu-gcc-13)'
+    outputs:
+      - extract_from: analyse_syslog_kern
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "May  1 10:00:00 web01 kernel: [    0.000000] Linux version 6.8.0-45-generic (buildd@lcy02-amd64-075) (x86_64-linux-gnu-gcc-13)")
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-01T10:00:00.000000000")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.host.uptime, 0.0)
+              assert_eq!(.process.name, "kernel")
+              assert_eq!(.message, "Linux version 6.8.0-45-generic (buildd@lcy02-amd64-075) (x86_64-linux-gnu-gcc-13)")
+  - name: 'reconnue : May  1 10:00:10 web01 kernel: [ 3605.123456] eth0: Link is U…'
+    inputs:
+      - insert_at: analyse_syslog_kern
+        type: log
+        log_fields:
+          message: 'May  1 10:00:10 web01 kernel: [ 3605.123456] eth0: Link is Up - 10Gbps Full Duplex, Flow Control: None'
+    outputs:
+      - extract_from: analyse_syslog_kern
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "May  1 10:00:10 web01 kernel: [ 3605.123456] eth0: Link is Up - 10Gbps Full Duplex, Flow Control: None")
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-01T10:00:10.000000000")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.host.uptime, 3605.123456)
+              assert_eq!(.process.name, "kernel")
+              assert_eq!(.message, "eth0: Link is Up - 10Gbps Full Duplex, Flow Control: None")
+  - name: 'reconnue : May  1 10:00:20 web01 kernel: [ 7211.654321] Out of memory: …'
+    inputs:
+      - insert_at: analyse_syslog_kern
+        type: log
+        log_fields:
+          message: 'May  1 10:00:20 web01 kernel: [ 7211.654321] Out of memory: Killed process 4242 (java) total-vm:8123456kB, anon-rss:4123456kB'
+    outputs:
+      - extract_from: analyse_syslog_kern
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "May  1 10:00:20 web01 kernel: [ 7211.654321] Out of memory: Killed process 4242 (java) total-vm:8123456kB, anon-rss:4123456kB")
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-01T10:00:20.000000000")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.host.uptime, 7211.654321)
+              assert_eq!(.process.name, "kernel")
+              assert_eq!(.message, "Out of memory: Killed process 4242 (java) total-vm:8123456kB, anon-rss:4123456kB")
+  - name: 'reconnue : May  1 10:00:30 web01 kernel: [ 7300.000001] [UFW BLOCK] IN=…'
+    inputs:
+      - insert_at: analyse_syslog_kern
+        type: log
+        log_fields:
+          message: 'May  1 10:00:30 web01 kernel: [ 7300.000001] [UFW BLOCK] IN=eth0 OUT= MAC=00:11:22:33:44:55 SRC=203.0.113.5 DST=10.0.0.4 PROTO=TCP SPT=51515 DPT=22'
+    outputs:
+      - extract_from: analyse_syslog_kern
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "May  1 10:00:30 web01 kernel: [ 7300.000001] [UFW BLOCK] IN=eth0 OUT= MAC=00:11:22:33:44:55 SRC=203.0.113.5 DST=10.0.0.4 PROTO=TCP SPT=51515 DPT=22")
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-01T10:00:30.000000000")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.host.uptime, 7300.000001)
+              assert_eq!(.process.name, "kernel")
+              assert_eq!(.message, "[UFW BLOCK] IN=eth0 OUT= MAC=00:11:22:33:44:55 SRC=203.0.113.5 DST=10.0.0.4 PROTO=TCP SPT=51515 DPT=22")

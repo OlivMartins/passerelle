@@ -1,0 +1,134 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Python logging (date - logger - NIVEAU - message))
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : placez l’échantillon dans ./echantillon.log, créez /var/lib/vector, puis vector --config <fichier>
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+data_dir: /var/lib/vector
+sources:
+  journaux:
+    type: file
+    include: [./echantillon.log]
+    read_from: beginning
+    multiline:
+      start_pattern: '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}'
+      mode: halt_before
+      condition_pattern: '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}'
+      timeout_ms: 1000
+transforms:
+  analyse_python_logging:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Python logging (date - logger - NIVEAU - message) »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) - (?P<logger>\S+) - (?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL|NOTSET) - (?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Python logging (date - logger - NIVEAU - message) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(replace(string!(champs.time), ",", "."), "%Y-%m-%d %H:%M:%S%.f", timezone: "UTC")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        .log.logger = champs.logger
+        niveau2 = string!(champs.level)
+        .log.level = niveau2
+        lignes4 = split(string!(champs.msg), "\n", limit: 2)
+        message3 = string(lignes4[0]) ?? ""
+        .message = message3
+        if length(lignes4) > 1 {
+          trace5 = string(lignes4[1]) ?? ""
+          .error.stack_trace = trace5
+          exception6, exception_erreur6 = parse_regex(trace5, r'(?m)^(?:Caused by: )?(?P<type>(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:Exception|Error|Throwable|Interrupt|Exit))(?::[ \t]*(?P<message>.*))?')
+          if exception_erreur6 == null {
+            .error.type = exception6.type
+            if exception6.message != null {
+              .error.message = exception6.message
+            }
+          }
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_python_logging]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026-05-01 10:00:00,123 - facturation.worker - INFO - Traite…'
+    inputs:
+      - insert_at: analyse_python_logging
+        type: log
+        log_fields:
+          message: '2026-05-01 10:00:00,123 - facturation.worker - INFO - Traitement du lot 77 (120 factures)'
+    outputs:
+      - extract_from: analyse_python_logging
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01 10:00:00,123 - facturation.worker - INFO - Traitement du lot 77 (120 factures)")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.123Z')
+              assert_eq!(.log.logger, "facturation.worker")
+              assert_eq!(.log.level, "INFO")
+              assert_eq!(.message, "Traitement du lot 77 (120 factures)")
+  - name: 'reconnue : 2026-05-01 10:00:00,456 - facturation.worker - WARNING - Fac…'
+    inputs:
+      - insert_at: analyse_python_logging
+        type: log
+        log_fields:
+          message: '2026-05-01 10:00:00,456 - facturation.worker - WARNING - Facture 9001 sans adresse de livraison'
+    outputs:
+      - extract_from: analyse_python_logging
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01 10:00:00,456 - facturation.worker - WARNING - Facture 9001 sans adresse de livraison")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.456Z')
+              assert_eq!(.log.logger, "facturation.worker")
+              assert_eq!(.log.level, "WARNING")
+              assert_eq!(.message, "Facture 9001 sans adresse de livraison")
+  - name: 'reconnue : 2026-05-01 10:00:01,002 - facturation.export - ERROR - Expor…'
+    inputs:
+      - insert_at: analyse_python_logging
+        type: log
+        log_fields:
+          message: |-
+            2026-05-01 10:00:01,002 - facturation.export - ERROR - Export PDF impossible pour la facture 9002
+            Traceback (most recent call last):
+              File "/app/facturation/export.py", line 54, in rendre
+                pdf = moteur.rendre(facture)
+              File "/app/facturation/moteur.py", line 12, in rendre
+                raise ValueError("gabarit introuvable : facture_v3")
+            ValueError: gabarit introuvable : facture_v3
+    outputs:
+      - extract_from: analyse_python_logging
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01 10:00:01,002 - facturation.export - ERROR - Export PDF impossible pour la facture 9002\nTraceback (most recent call last):\n  File \"/app/facturation/export.py\", line 54, in rendre\n    pdf = moteur.rendre(facture)\n  File \"/app/facturation/moteur.py\", line 12, in rendre\n    raise ValueError(\"gabarit introuvable : facture_v3\")\nValueError: gabarit introuvable : facture_v3")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:01.002Z')
+              assert_eq!(.log.logger, "facturation.export")
+              assert_eq!(.log.level, "ERROR")
+              assert_eq!(.message, "Export PDF impossible pour la facture 9002")
+              assert_eq!(.error.stack_trace, "Traceback (most recent call last):\n  File \"/app/facturation/export.py\", line 54, in rendre\n    pdf = moteur.rendre(facture)\n  File \"/app/facturation/moteur.py\", line 12, in rendre\n    raise ValueError(\"gabarit introuvable : facture_v3\")\nValueError: gabarit introuvable : facture_v3")
+              assert_eq!(.error.type, "ValueError")
+              assert_eq!(.error.message, "gabarit introuvable : facture_v3")
+  - name: 'reconnue : 2026-05-01 10:00:02,000 - facturation.worker - DEBUG - Lot 7…'
+    inputs:
+      - insert_at: analyse_python_logging
+        type: log
+        log_fields:
+          message: '2026-05-01 10:00:02,000 - facturation.worker - DEBUG - Lot 77 terminé'
+    outputs:
+      - extract_from: analyse_python_logging
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01 10:00:02,000 - facturation.worker - DEBUG - Lot 77 terminé")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:02Z')
+              assert_eq!(.log.logger, "facturation.worker")
+              assert_eq!(.log.level, "DEBUG")
+              assert_eq!(.message, "Lot 77 terminé")

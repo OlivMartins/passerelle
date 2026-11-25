@@ -1,0 +1,96 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (JSON — audit de Vault)
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_vault_audit:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « JSON — audit de Vault »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      ligne = string(.message) ?? ""
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      objet, erreur = parse_json(ligne)
+      if erreur != null || !is_object(objet) {
+        .attributes."log.parse.error" = "ligne non reconnue : un objet JSON attendu"
+      } else {
+        .attributes."log.record.original" = ligne
+        champs = flatten(object!(objet))
+        # Horodatage : clé "time"
+        if exists(champs."time") {
+          horodatage1, erreur_horodatage1 = parse_timestamp(string(champs."time") ?? "", "%Y-%m-%dT%H:%M:%S%.f%#z")
+          if erreur_horodatage1 == null {
+            .timestamp = horodatage1
+          }
+          del(champs."time")
+        }
+        # Rôle exc_message : clé "error"
+        if exists(champs."error") {
+          .attributes."exception.message" = champs."error"
+          del(champs."error")
+        }
+        # Les autres clés deviennent des attributs
+        .attributes = merge(.attributes, champs)
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_vault_audit]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : {"time":"2026-05-01T08:00:10.123456Z","type":"request","auth…'
+    inputs:
+      - insert_at: analyse_vault_audit
+        type: log
+        log_fields:
+          message: '{"time":"2026-05-01T08:00:10.123456Z","type":"request","auth":{"client_token":"hmac-sha256:7c1e","accessor":"hmac-sha256:1a2b","display_name":"oidc-alice","policies":["default","dev"],"token_type":"service"},"request":{"id":"6c8a4b2e-1d3f-4e5a-9b7c-8d0e1f2a3b4c","operation":"read","mount_type":"kv","client_token":"hmac-sha256:7c1e","namespace":{"id":"root"},"path":"secret/data/boutique/db","remote_address":"10.0.5.20"}}'
+    outputs:
+      - extract_from: analyse_vault_audit
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "{\"time\":\"2026-05-01T08:00:10.123456Z\",\"type\":\"request\",\"auth\":{\"client_token\":\"hmac-sha256:7c1e\",\"accessor\":\"hmac-sha256:1a2b\",\"display_name\":\"oidc-alice\",\"policies\":[\"default\",\"dev\"],\"token_type\":\"service\"},\"request\":{\"id\":\"6c8a4b2e-1d3f-4e5a-9b7c-8d0e1f2a3b4c\",\"operation\":\"read\",\"mount_type\":\"kv\",\"client_token\":\"hmac-sha256:7c1e\",\"namespace\":{\"id\":\"root\"},\"path\":\"secret/data/boutique/db\",\"remote_address\":\"10.0.5.20\"}}")
+              assert_eq!(.attributes."type", "request")
+              assert_eq!(.attributes."auth.client_token", "hmac-sha256:7c1e")
+              assert_eq!(.attributes."auth.accessor", "hmac-sha256:1a2b")
+              assert_eq!(.attributes."auth.display_name", "oidc-alice")
+              assert_eq!(.attributes."auth.policies", ["default", "dev"])
+              assert_eq!(.attributes."auth.token_type", "service")
+              assert_eq!(.attributes."request.id", "6c8a4b2e-1d3f-4e5a-9b7c-8d0e1f2a3b4c")
+              assert_eq!(.attributes."request.operation", "read")
+              assert_eq!(.attributes."request.mount_type", "kv")
+              assert_eq!(.attributes."request.client_token", "hmac-sha256:7c1e")
+              assert_eq!(.attributes."request.namespace.id", "root")
+              assert_eq!(.attributes."request.path", "secret/data/boutique/db")
+              assert_eq!(.attributes."request.remote_address", "10.0.5.20")
+              assert_eq!(.timestamp, t'2026-05-01T08:00:10.123456Z')
+  - name: 'reconnue : {"time":"2026-05-01T08:00:10.130000Z","type":"response","aut…'
+    inputs:
+      - insert_at: analyse_vault_audit
+        type: log
+        log_fields:
+          message: '{"time":"2026-05-01T08:00:10.130000Z","type":"response","auth":{"client_token":"hmac-sha256:7c1e","display_name":"oidc-alice","policies":["default","dev"]},"request":{"id":"6c8a4b2e-1d3f-4e5a-9b7c-8d0e1f2a3b4c","operation":"read","path":"secret/data/boutique/db","remote_address":"10.0.5.20"},"error":"permission denied"}'
+    outputs:
+      - extract_from: analyse_vault_audit
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "{\"time\":\"2026-05-01T08:00:10.130000Z\",\"type\":\"response\",\"auth\":{\"client_token\":\"hmac-sha256:7c1e\",\"display_name\":\"oidc-alice\",\"policies\":[\"default\",\"dev\"]},\"request\":{\"id\":\"6c8a4b2e-1d3f-4e5a-9b7c-8d0e1f2a3b4c\",\"operation\":\"read\",\"path\":\"secret/data/boutique/db\",\"remote_address\":\"10.0.5.20\"},\"error\":\"permission denied\"}")
+              assert_eq!(.attributes."exception.message", "permission denied")
+              assert_eq!(.attributes."type", "response")
+              assert_eq!(.attributes."auth.client_token", "hmac-sha256:7c1e")
+              assert_eq!(.attributes."auth.display_name", "oidc-alice")
+              assert_eq!(.attributes."auth.policies", ["default", "dev"])
+              assert_eq!(.attributes."request.id", "6c8a4b2e-1d3f-4e5a-9b7c-8d0e1f2a3b4c")
+              assert_eq!(.attributes."request.operation", "read")
+              assert_eq!(.attributes."request.path", "secret/data/boutique/db")
+              assert_eq!(.attributes."request.remote_address", "10.0.5.20")
+              assert_eq!(.timestamp, t'2026-05-01T08:00:10.13Z')

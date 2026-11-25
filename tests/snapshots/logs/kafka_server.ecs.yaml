@@ -1,0 +1,137 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Apache Kafka (log4j : [date] NIVEAU message (classe)))
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : placez l’échantillon dans ./echantillon.log, créez /var/lib/vector, puis vector --config <fichier>
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+data_dir: /var/lib/vector
+sources:
+  journaux:
+    type: file
+    include: [./echantillon.log]
+    read_from: beginning
+    multiline:
+      start_pattern: '^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\]'
+      mode: halt_before
+      condition_pattern: '^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}\]'
+      timeout_ms: 1000
+transforms:
+  analyse_kafka_server:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Apache Kafka (log4j : [date] NIVEAU message (classe)) »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^\[(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\] (?P<level>TRACE|DEBUG|INFO|WARN|ERROR|FATAL) (?:\[(?P<component>[^\]]+)\] )?(?P<msg>[^\n]*?)(?: \((?P<logger>[^()\s]+)\))?(?P<stack>\n[\s\S]*)?\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Apache Kafka (log4j : [date] NIVEAU message (classe)) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(replace(string!(champs.time), ",", "."), "%Y-%m-%d %H:%M:%S%.f", timezone: "UTC")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        niveau2 = string!(champs.level)
+        .log.level = niveau2
+        if champs.component != null {
+          .kafka.log.component = champs.component
+        }
+        if champs.logger != null {
+          .log.logger = champs.logger
+        }
+        message3 = string!(champs.msg)
+        .message = message3
+        if champs.stack != null {
+          trace4 = strip_whitespace(string!(champs.stack))
+          .error.stack_trace = trace4
+          exception5, exception_erreur5 = parse_regex(trace4, r'(?m)^(?:Caused by: )?(?P<type>(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:Exception|Error|Throwable|Interrupt|Exit))(?::[ \t]*(?P<message>.*))?')
+          if exception_erreur5 == null {
+            .error.type = exception5.type
+            if exception5.message != null {
+              .error.message = exception5.message
+            }
+          }
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_kafka_server]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : [2026-05-01 10:00:00,123] INFO [KafkaServer id=1] started (k…'
+    inputs:
+      - insert_at: analyse_kafka_server
+        type: log
+        log_fields:
+          message: '[2026-05-01 10:00:00,123] INFO [KafkaServer id=1] started (kafka.server.KafkaServer)'
+    outputs:
+      - extract_from: analyse_kafka_server
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "[2026-05-01 10:00:00,123] INFO [KafkaServer id=1] started (kafka.server.KafkaServer)")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.123Z')
+              assert_eq!(.log.level, "INFO")
+              assert_eq!(.log.logger, "kafka.server.KafkaServer")
+              assert_eq!(.kafka.log.component, "KafkaServer id=1")
+              assert_eq!(.message, "started")
+  - name: 'reconnue : [2026-05-01 10:00:01,456] INFO [Partition commandes-0 broker…'
+    inputs:
+      - insert_at: analyse_kafka_server
+        type: log
+        log_fields:
+          message: '[2026-05-01 10:00:01,456] INFO [Partition commandes-0 broker=1] ISR updated to 1,2,3 and version updated to 7 (kafka.cluster.Partition)'
+    outputs:
+      - extract_from: analyse_kafka_server
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "[2026-05-01 10:00:01,456] INFO [Partition commandes-0 broker=1] ISR updated to 1,2,3 and version updated to 7 (kafka.cluster.Partition)")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:01.456Z')
+              assert_eq!(.log.level, "INFO")
+              assert_eq!(.log.logger, "kafka.cluster.Partition")
+              assert_eq!(.kafka.log.component, "Partition commandes-0 broker=1")
+              assert_eq!(.message, "ISR updated to 1,2,3 and version updated to 7")
+  - name: 'reconnue : [2026-05-01 10:00:02,789] WARN [ReplicaFetcher replicaId=1, …'
+    inputs:
+      - insert_at: analyse_kafka_server
+        type: log
+        log_fields:
+          message: '[2026-05-01 10:00:02,789] WARN [ReplicaFetcher replicaId=1, leaderId=2, fetcherId=0] Error in response for fetch request (kafka.server.ReplicaFetcherThread)'
+    outputs:
+      - extract_from: analyse_kafka_server
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "[2026-05-01 10:00:02,789] WARN [ReplicaFetcher replicaId=1, leaderId=2, fetcherId=0] Error in response for fetch request (kafka.server.ReplicaFetcherThread)")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:02.789Z')
+              assert_eq!(.log.level, "WARN")
+              assert_eq!(.log.logger, "kafka.server.ReplicaFetcherThread")
+              assert_eq!(.kafka.log.component, "ReplicaFetcher replicaId=1, leaderId=2, fetcherId=0")
+              assert_eq!(.message, "Error in response for fetch request")
+  - name: 'reconnue : [2026-05-01 10:00:03,000] ERROR Uncaught exception in schedu…'
+    inputs:
+      - insert_at: analyse_kafka_server
+        type: log
+        log_fields:
+          message: |-
+            [2026-05-01 10:00:03,000] ERROR Uncaught exception in scheduled task 'flush-log' (org.apache.kafka.server.util.KafkaScheduler)
+            java.io.IOException: No space left on device
+            	at java.base/sun.nio.ch.FileDispatcherImpl.write0(Native Method)
+    outputs:
+      - extract_from: analyse_kafka_server
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "[2026-05-01 10:00:03,000] ERROR Uncaught exception in scheduled task 'flush-log' (org.apache.kafka.server.util.KafkaScheduler)\njava.io.IOException: No space left on device\n\tat java.base/sun.nio.ch.FileDispatcherImpl.write0(Native Method)")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:03Z')
+              assert_eq!(.log.level, "ERROR")
+              assert_eq!(.log.logger, "org.apache.kafka.server.util.KafkaScheduler")
+              assert_eq!(.message, "Uncaught exception in scheduled task 'flush-log'")
+              assert_eq!(.error.stack_trace, "java.io.IOException: No space left on device\n\tat java.base/sun.nio.ch.FileDispatcherImpl.write0(Native Method)")
+              assert_eq!(.error.type, "java.io.IOException")
+              assert_eq!(.error.message, "No space left on device")

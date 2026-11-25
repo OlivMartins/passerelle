@@ -1,0 +1,128 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Syslog horodaté ISO 8601 (rsyslog, journalctl -o short-iso))
+# Tests : vector test <fichier> rejoue les 3 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_syslog_iso:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Syslog horodaté ISO 8601 (rsyslog, journalctl -o short-iso) »
+      # Écrit à partir d’un échantillon de 3 événements (3 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^(?:<(?P<pri>\d{1,3})>)?(?P<time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})) (?P<host>\S+) (?P<app>[^\s\[:]+)(?:\[(?P<pid>\d+)\])?: +(?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Syslog horodaté ISO 8601 (rsyslog, journalctl -o short-iso) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        if champs.pri != null {
+          priorite1 = to_int(champs.pri) ?? 0
+          .log.syslog.priority = priorite1
+          .log.syslog.facility.name = get(["kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv", "ftp", "ntp", "security", "console", "solaris-cron", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7"], [to_int(floor(priorite1 / 8))]) ?? null
+          severite2 = get(["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"], [mod(priorite1, 8)]) ?? null
+          .log.syslog.severity.name = severite2
+        }
+        horodatage3, erreur_horodatage3 = parse_timestamp(string!(champs.time), "%Y-%m-%dT%H:%M:%S%.f%#z")
+        if erreur_horodatage3 == null {
+          ."@timestamp" = horodatage3
+          del(.timestamp)
+        }
+        .host.name = champs.host
+        .process.name = champs.app
+        if champs.pid != null {
+          .process.pid = to_int(champs.pid) ?? null
+        }
+        message4 = string!(champs.msg)
+        .message = message4
+        # Enrichissement : connexions SSH (sshd)
+        if champs.app == "sshd" {
+          detail5, detail_erreur5 = parse_regex(message4, r'^(?:(?P<outcome>Accepted|Failed) (?P<method>[\w-]+) for (?:invalid user )?|Invalid user )(?P<user>\S+) from (?P<ip>\S+)(?: port (?P<port>\d+))?')
+          if detail_erreur5 == null {
+            .user.name = detail5.user
+            .source.ip = detail5.ip
+            if detail5.port != null {
+              .source.port = to_int(detail5.port) ?? null
+            }
+            if detail5.method != null {
+              .system.auth.ssh.method = detail5.method
+            }
+            .event.outcome = if detail5.outcome == "Accepted" { "success" } else { "failure" }
+          }
+        }
+        # Enrichissement : horloge du noyau ([secondes depuis le démarrage])
+        if champs.app == "kernel" {
+          detail6, detail_erreur6 = parse_regex(message4, r'^\[ *(?P<uptime>\d+\.\d+)\] (?P<rest>[\s\S]*)\z')
+          if detail_erreur6 == null {
+            .host.uptime = to_float(detail6.uptime) ?? null
+            .message = detail6.rest
+          }
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_syslog_iso]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026-05-01T10:00:00.123456+02:00 web01 systemd[1]: Started s…'
+    inputs:
+      - insert_at: analyse_syslog_iso
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:00.123456+02:00 web01 systemd[1]: Started session-42.scope - Session 42 of User deploy.'
+    outputs:
+      - extract_from: analyse_syslog_iso
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T10:00:00.123456+02:00 web01 systemd[1]: Started session-42.scope - Session 42 of User deploy.")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:00.123456Z')
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.process.name, "systemd")
+              assert_eq!(.process.pid, 1)
+              assert_eq!(.message, "Started session-42.scope - Session 42 of User deploy.")
+  - name: 'reconnue : 2026-05-01T10:00:01.000000+02:00 web01 sshd[2211]: Accepted …'
+    inputs:
+      - insert_at: analyse_syslog_iso
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:01.000000+02:00 web01 sshd[2211]: Accepted publickey for deploy from 198.51.100.20 port 52344 ssh2'
+    outputs:
+      - extract_from: analyse_syslog_iso
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T10:00:01.000000+02:00 web01 sshd[2211]: Accepted publickey for deploy from 198.51.100.20 port 52344 ssh2")
+              assert_eq!(.event.outcome, "success")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:01Z')
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.process.name, "sshd")
+              assert_eq!(.process.pid, 2211)
+              assert_eq!(.message, "Accepted publickey for deploy from 198.51.100.20 port 52344 ssh2")
+              assert_eq!(.user.name, "deploy")
+              assert_eq!(.source.ip, "198.51.100.20")
+              assert_eq!(.source.port, 52344)
+              assert_eq!(.system.auth.ssh.method, "publickey")
+  - name: 'reconnue : 2026-05-01T10:00:02.500000+02:00 web01 kernel: [ 3605.123456…'
+    inputs:
+      - insert_at: analyse_syslog_iso
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:02.500000+02:00 web01 kernel: [ 3605.123456] eth0: Link is Up - 10Gbps Full Duplex'
+    outputs:
+      - extract_from: analyse_syslog_iso
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T10:00:02.500000+02:00 web01 kernel: [ 3605.123456] eth0: Link is Up - 10Gbps Full Duplex")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:02.5Z')
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.host.uptime, 3605.123456)
+              assert_eq!(.process.name, "kernel")
+              assert_eq!(.message, "eth0: Link is Up - 10Gbps Full Duplex")

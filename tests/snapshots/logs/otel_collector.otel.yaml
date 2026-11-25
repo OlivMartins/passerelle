@@ -1,0 +1,134 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Go zap, format console (collecteur OpenTelemetry…))
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_otel_collector:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Go zap, format console (collecteur OpenTelemetry…) »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      ligne = string(.message) ?? ""
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      champs, erreur = parse_regex(ligne, r'^(?P<time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))\t(?P<level>[a-zA-Z]+)\t(?:(?P<caller>[^\t]+:\d+)\t)?(?P<msg>[^\t]*)(?:\t(?P<fields>\{[\s\S]*\}))?\z')
+      if erreur != null {
+        .attributes."log.parse.error" = "ligne non reconnue : format « Go zap, format console (collecteur OpenTelemetry…) » attendu"
+      } else {
+        .attributes."log.record.original" = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%Y-%m-%dT%H:%M:%S%.f%#z")
+        if erreur_horodatage1 == null {
+          .timestamp = horodatage1
+        }
+        niveau2 = string!(champs.level)
+        .severity_text = niveau2
+        niveau_min3 = downcase(niveau2)
+        .severity_number = if includes(["trace", "finest", "finer", "trace1", "trace2", "trace3", "trace4", "trace5", "trace6", "trace7", "trace8"], niveau_min3) { 1 } else if includes(["debug", "fine", "dbg", "config", "verbose"], niveau_min3) { 5 } else if includes(["info", "information", "informational"], niveau_min3) { 9 } else if includes(["notice"], niveau_min3) { 10 } else if includes(["warn", "warning"], niveau_min3) { 13 } else if includes(["error", "err", "severe"], niveau_min3) { 17 } else if includes(["fatal", "critical", "crit", "alert", "emerg", "emergency", "panic", "dpanic"], niveau_min3) { 21 } else { 0 }
+        if champs.caller != null {
+          appelant4 = parse_regex(string!(champs.caller), r'^(?P<fichier>.+):(?P<ligne>\d+)\z') ?? {}
+          .attributes."code.file.path" = appelant4.fichier
+          .attributes."code.line.number" = to_int(appelant4.ligne) ?? null
+        }
+        message5 = string!(champs.msg)
+        .message = message5
+        if champs.fields != null {
+          objet6 = object(parse_json(string!(champs.fields)) ?? {}) ?? {}
+          .attributes = merge(.attributes, flatten(objet6))
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_otel_collector]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026-05-01T10:00:00.123Z	info	service@v0.120.0/service.go:18…'
+    inputs:
+      - insert_at: analyse_otel_collector
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:00.123Z	info	service@v0.120.0/service.go:186	Starting otelcol-contrib...	{"Version": "0.120.0", "NumCPU": 8}'
+    outputs:
+      - extract_from: analyse_otel_collector
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026-05-01T10:00:00.123Z\tinfo\tservice@v0.120.0/service.go:186\tStarting otelcol-contrib...\t{\"Version\": \"0.120.0\", \"NumCPU\": 8}")
+              assert_eq!(.attributes."code.file.path", "service@v0.120.0/service.go")
+              assert_eq!(.attributes."code.line.number", 186)
+              assert_eq!(.attributes."Version", "0.120.0")
+              assert_eq!(.attributes."NumCPU", 8)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:00.123Z')
+              assert_eq!(.severity_text, "info")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.message, "Starting otelcol-contrib...")
+  - name: 'reconnue : 2026-05-01T10:00:00.456Z	info	extensions/extensions.go:39	St…'
+    inputs:
+      - insert_at: analyse_otel_collector
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:00.456Z	info	extensions/extensions.go:39	Starting extensions...'
+    outputs:
+      - extract_from: analyse_otel_collector
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026-05-01T10:00:00.456Z\tinfo\textensions/extensions.go:39\tStarting extensions...")
+              assert_eq!(.attributes."code.file.path", "extensions/extensions.go")
+              assert_eq!(.attributes."code.line.number", 39)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:00.456Z')
+              assert_eq!(.severity_text, "info")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.message, "Starting extensions...")
+  - name: 'reconnue : 2026-05-01T10:00:05.789Z	warn	batchprocessor@v0.120.0/batch_…'
+    inputs:
+      - insert_at: analyse_otel_collector
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:05.789Z	warn	batchprocessor@v0.120.0/batch_processor.go:263	Sender failed	{"kind": "processor", "name": "batch", "pipeline": "logs", "error": "sending queue is full"}'
+    outputs:
+      - extract_from: analyse_otel_collector
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026-05-01T10:00:05.789Z\twarn\tbatchprocessor@v0.120.0/batch_processor.go:263\tSender failed\t{\"kind\": \"processor\", \"name\": \"batch\", \"pipeline\": \"logs\", \"error\": \"sending queue is full\"}")
+              assert_eq!(.attributes."code.file.path", "batchprocessor@v0.120.0/batch_processor.go")
+              assert_eq!(.attributes."code.line.number", 263)
+              assert_eq!(.attributes."kind", "processor")
+              assert_eq!(.attributes."name", "batch")
+              assert_eq!(.attributes."pipeline", "logs")
+              assert_eq!(.attributes."error", "sending queue is full")
+              assert_eq!(.timestamp, t'2026-05-01T10:00:05.789Z')
+              assert_eq!(.severity_text, "warn")
+              assert_eq!(.severity_number, 13)
+              assert_eq!(.message, "Sender failed")
+  - name: 'reconnue : 2026-05-01T10:00:06.001Z	error	exporterhelper/queue_sender.g…'
+    inputs:
+      - insert_at: analyse_otel_collector
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:06.001Z	error	exporterhelper/queue_sender.go:128	Exporting failed. Dropping data.	{"kind": "exporter", "data_type": "logs", "name": "clickhouse", "error": "dial tcp 10.0.3.7:9000: connect: connection refused", "dropped_items": 512}'
+    outputs:
+      - extract_from: analyse_otel_collector
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026-05-01T10:00:06.001Z\terror\texporterhelper/queue_sender.go:128\tExporting failed. Dropping data.\t{\"kind\": \"exporter\", \"data_type\": \"logs\", \"name\": \"clickhouse\", \"error\": \"dial tcp 10.0.3.7:9000: connect: connection refused\", \"dropped_items\": 512}")
+              assert_eq!(.attributes."code.file.path", "exporterhelper/queue_sender.go")
+              assert_eq!(.attributes."code.line.number", 128)
+              assert_eq!(.attributes."kind", "exporter")
+              assert_eq!(.attributes."data_type", "logs")
+              assert_eq!(.attributes."name", "clickhouse")
+              assert_eq!(.attributes."error", "dial tcp 10.0.3.7:9000: connect: connection refused")
+              assert_eq!(.attributes."dropped_items", 512)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:06.001Z')
+              assert_eq!(.severity_text, "error")
+              assert_eq!(.severity_number, 17)
+              assert_eq!(.message, "Exporting failed. Dropping data.")

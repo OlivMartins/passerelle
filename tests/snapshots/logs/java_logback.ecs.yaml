@@ -1,0 +1,139 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Java Logback ou Log4j 2 (date [thread] NIVEAU logger - message))
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : placez l’échantillon dans ./echantillon.log, créez /var/lib/vector, puis vector --config <fichier>
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+data_dir: /var/lib/vector
+sources:
+  journaux:
+    type: file
+    include: [./echantillon.log]
+    read_from: beginning
+    multiline:
+      start_pattern: '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
+      mode: halt_before
+      condition_pattern: '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
+      timeout_ms: 1000
+transforms:
+  analyse_java_logback:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Java Logback ou Log4j 2 (date [thread] NIVEAU logger - message) »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^(?P<time>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?) +\[(?P<thread>[^\]]+)\] +(?P<level>TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL|SEVERE) +(?P<logger>\S+) +- (?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Java Logback ou Log4j 2 (date [thread] NIVEAU logger - message) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%Y-%m-%d %H:%M:%S%.f", timezone: "UTC")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        .process.thread.name = champs.thread
+        niveau2 = string!(champs.level)
+        .log.level = niveau2
+        .log.logger = champs.logger
+        lignes4 = split(string!(champs.msg), "\n", limit: 2)
+        message3 = string(lignes4[0]) ?? ""
+        .message = message3
+        if length(lignes4) > 1 {
+          trace5 = string(lignes4[1]) ?? ""
+          .error.stack_trace = trace5
+          exception6, exception_erreur6 = parse_regex(trace5, r'(?m)^(?:Caused by: )?(?P<type>(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:Exception|Error|Throwable|Interrupt|Exit))(?::[ \t]*(?P<message>.*))?')
+          if exception_erreur6 == null {
+            .error.type = exception6.type
+            if exception6.message != null {
+              .error.message = exception6.message
+            }
+          }
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_java_logback]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026-05-01 10:00:00.123 [main] INFO  com.example.boutique.Ap…'
+    inputs:
+      - insert_at: analyse_java_logback
+        type: log
+        log_fields:
+          message: '2026-05-01 10:00:00.123 [main] INFO  com.example.boutique.Application - Démarrage de l’application en 4.2 s'
+    outputs:
+      - extract_from: analyse_java_logback
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01 10:00:00.123 [main] INFO  com.example.boutique.Application - Démarrage de l’application en 4.2 s")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.123Z')
+              assert_eq!(.process.thread.name, "main")
+              assert_eq!(.log.level, "INFO")
+              assert_eq!(.log.logger, "com.example.boutique.Application")
+              assert_eq!(.message, "Démarrage de l’application en 4.2 s")
+  - name: 'reconnue : 2026-05-01 10:00:01.456 [http-nio-8080-exec-1] WARN  com.exa…'
+    inputs:
+      - insert_at: analyse_java_logback
+        type: log
+        log_fields:
+          message: '2026-05-01 10:00:01.456 [http-nio-8080-exec-1] WARN  com.example.boutique.web.PanierController - Panier 8812 introuvable pour la session 3fa2'
+    outputs:
+      - extract_from: analyse_java_logback
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01 10:00:01.456 [http-nio-8080-exec-1] WARN  com.example.boutique.web.PanierController - Panier 8812 introuvable pour la session 3fa2")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:01.456Z')
+              assert_eq!(.process.thread.name, "http-nio-8080-exec-1")
+              assert_eq!(.log.level, "WARN")
+              assert_eq!(.log.logger, "com.example.boutique.web.PanierController")
+              assert_eq!(.message, "Panier 8812 introuvable pour la session 3fa2")
+  - name: 'reconnue : 2026-05-01 10:00:02.789 [http-nio-8080-exec-3] ERROR com.exa…'
+    inputs:
+      - insert_at: analyse_java_logback
+        type: log
+        log_fields:
+          message: |-
+            2026-05-01 10:00:02.789 [http-nio-8080-exec-3] ERROR com.example.boutique.service.PaiementService - Échec du paiement de la commande 1042
+            java.lang.IllegalStateException: Solde insuffisant pour la commande 1042
+            	at com.example.boutique.service.PaiementService.debiter(PaiementService.java:88)
+            	at com.example.boutique.web.CommandeController.payer(CommandeController.java:41)
+            Caused by: java.net.SocketTimeoutException: Read timed out
+            	at java.base/sun.nio.ch.NioSocketImpl.timedRead(NioSocketImpl.java:288)
+            	... 42 more
+    outputs:
+      - extract_from: analyse_java_logback
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01 10:00:02.789 [http-nio-8080-exec-3] ERROR com.example.boutique.service.PaiementService - Échec du paiement de la commande 1042\njava.lang.IllegalStateException: Solde insuffisant pour la commande 1042\n\tat com.example.boutique.service.PaiementService.debiter(PaiementService.java:88)\n\tat com.example.boutique.web.CommandeController.payer(CommandeController.java:41)\nCaused by: java.net.SocketTimeoutException: Read timed out\n\tat java.base/sun.nio.ch.NioSocketImpl.timedRead(NioSocketImpl.java:288)\n\t... 42 more")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:02.789Z')
+              assert_eq!(.process.thread.name, "http-nio-8080-exec-3")
+              assert_eq!(.log.level, "ERROR")
+              assert_eq!(.log.logger, "com.example.boutique.service.PaiementService")
+              assert_eq!(.message, "Échec du paiement de la commande 1042")
+              assert_eq!(.error.stack_trace, "java.lang.IllegalStateException: Solde insuffisant pour la commande 1042\n\tat com.example.boutique.service.PaiementService.debiter(PaiementService.java:88)\n\tat com.example.boutique.web.CommandeController.payer(CommandeController.java:41)\nCaused by: java.net.SocketTimeoutException: Read timed out\n\tat java.base/sun.nio.ch.NioSocketImpl.timedRead(NioSocketImpl.java:288)\n\t... 42 more")
+              assert_eq!(.error.type, "java.lang.IllegalStateException")
+              assert_eq!(.error.message, "Solde insuffisant pour la commande 1042")
+  - name: 'reconnue : 2026-05-01 10:00:03.001 [scheduler-1] DEBUG com.example.bout…'
+    inputs:
+      - insert_at: analyse_java_logback
+        type: log
+        log_fields:
+          message: '2026-05-01 10:00:03.001 [scheduler-1] DEBUG com.example.boutique.batch.Purge - 12 paniers expirés supprimés'
+    outputs:
+      - extract_from: analyse_java_logback
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01 10:00:03.001 [scheduler-1] DEBUG com.example.boutique.batch.Purge - 12 paniers expirés supprimés")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:03.001Z')
+              assert_eq!(.process.thread.name, "scheduler-1")
+              assert_eq!(.log.level, "DEBUG")
+              assert_eq!(.log.logger, "com.example.boutique.batch.Purge")
+              assert_eq!(.message, "12 paniers expirés supprimés")

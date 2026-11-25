@@ -1,0 +1,2 @@
+{"@level":"info","@message":"Task event","@module":"client.alloc_runner.task_runner","@timestamp":"2026-05-01T10:00:01.456789+02:00","alloc_id":"1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901","failed":false,"msg":"Task started by client","task":"redis","type":"Started"}
+{"@level":"error","@message":"yamux: keepalive failed: i/o deadline reached","@module":"nomad.rpc","@timestamp":"2026-05-01T10:00:03.000000+02:00"}

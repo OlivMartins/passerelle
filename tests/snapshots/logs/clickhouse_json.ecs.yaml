@@ -1,0 +1,107 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (JSON — ClickHouse (format JSON du serveur))
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_clickhouse_json:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « JSON — ClickHouse (format JSON du serveur) »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      objet, erreur = parse_json(ligne)
+      if erreur != null || !is_object(objet) {
+        .error.message = "ligne non reconnue : un objet JSON attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        champs = flatten(object!(objet))
+        # Horodatage : clé "date_time"
+        if exists(champs."date_time") {
+          horodatage1, erreur_horodatage1 = parse_timestamp(string(champs."date_time") ?? "", "%s%.f")
+          if erreur_horodatage1 == null {
+            ."@timestamp" = horodatage1
+            del(.timestamp)
+          }
+          del(champs."date_time")
+        }
+        # Niveau : clé "level"
+        if exists(champs."level") {
+          niveau2 = string(champs."level") ?? ""
+          .log.level = niveau2
+          del(champs."level")
+        }
+        # Message : clé "message"
+        if exists(champs."message") {
+          .message = champs."message"
+          del(champs."message")
+        }
+        # Rôle logger : clé "logger_name"
+        if exists(champs."logger_name") {
+          .log.logger = champs."logger_name"
+          del(champs."logger_name")
+        }
+        # Rôle thread : clé "thread_name"
+        if exists(champs."thread_name") {
+          .process.thread.name = champs."thread_name"
+          del(champs."thread_name")
+        }
+        # Les autres clés sont recopiées à la racine de l’événement
+        . = merge(., unflatten(champs), deep: true)
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_clickhouse_json]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : {"date_time_utc":"2026-05-01T10:00:00Z","date_time":"1777629…'
+    inputs:
+      - insert_at: analyse_clickhouse_json
+        type: log
+        log_fields:
+          message: '{"date_time_utc":"2026-05-01T10:00:00Z","date_time":"1777629600.123456","thread_name":"","thread_id":"4242","level":"Information","query_id":"","logger_name":"Application","message":"Ready for connections.","source_file":"programs/server/Server.cpp; virtual int DB::Server::main(const std::vector<std::string> &)","source_line":"2234"}'
+    outputs:
+      - extract_from: analyse_clickhouse_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "{\"date_time_utc\":\"2026-05-01T10:00:00Z\",\"date_time\":\"1777629600.123456\",\"thread_name\":\"\",\"thread_id\":\"4242\",\"level\":\"Information\",\"query_id\":\"\",\"logger_name\":\"Application\",\"message\":\"Ready for connections.\",\"source_file\":\"programs/server/Server.cpp; virtual int DB::Server::main(const std::vector<std::string> &)\",\"source_line\":\"2234\"}")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.123456Z')
+              assert_eq!(.log.level, "Information")
+              assert_eq!(.log.logger, "Application")
+              assert_eq!(.message, "Ready for connections.")
+              assert_eq!(.process.thread.name, "")
+              assert_eq!(.date_time_utc, "2026-05-01T10:00:00Z")
+              assert_eq!(.thread_id, "4242")
+              assert_eq!(.query_id, "")
+              assert_eq!(.source_file, "programs/server/Server.cpp; virtual int DB::Server::main(const std::vector<std::string> &)")
+              assert_eq!(.source_line, "2234")
+  - name: 'reconnue : {"date_time_utc":"2026-05-01T10:00:01Z","date_time":"1777629…'
+    inputs:
+      - insert_at: analyse_clickhouse_json
+        type: log
+        log_fields:
+          message: '{"date_time_utc":"2026-05-01T10:00:01Z","date_time":"1777629601.345678","thread_name":"TCPHandler","thread_id":"4250","level":"Error","query_id":"9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f","logger_name":"executeQuery","message":"Code: 60. DB::Exception: Table logs.evenements does not exist. (UNKNOWN_TABLE)","source_file":"src/Interpreters/executeQuery.cpp; void DB::logException(ContextPtr, QueryLogElement &, bool)","source_line":"221"}'
+    outputs:
+      - extract_from: analyse_clickhouse_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "{\"date_time_utc\":\"2026-05-01T10:00:01Z\",\"date_time\":\"1777629601.345678\",\"thread_name\":\"TCPHandler\",\"thread_id\":\"4250\",\"level\":\"Error\",\"query_id\":\"9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f\",\"logger_name\":\"executeQuery\",\"message\":\"Code: 60. DB::Exception: Table logs.evenements does not exist. (UNKNOWN_TABLE)\",\"source_file\":\"src/Interpreters/executeQuery.cpp; void DB::logException(ContextPtr, QueryLogElement &, bool)\",\"source_line\":\"221\"}")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:01.345678Z')
+              assert_eq!(.log.level, "Error")
+              assert_eq!(.log.logger, "executeQuery")
+              assert_eq!(.message, "Code: 60. DB::Exception: Table logs.evenements does not exist. (UNKNOWN_TABLE)")
+              assert_eq!(.process.thread.name, "TCPHandler")
+              assert_eq!(.date_time_utc, "2026-05-01T10:00:01Z")
+              assert_eq!(.thread_id, "4250")
+              assert_eq!(.query_id, "9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f")
+              assert_eq!(.source_file, "src/Interpreters/executeQuery.cpp; void DB::logException(ContextPtr, QueryLogElement &, bool)")
+              assert_eq!(.source_line, "221")

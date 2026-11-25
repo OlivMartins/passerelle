@@ -1,0 +1,143 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Journal d’erreurs nginx)
+# Tests : vector test <fichier> rejoue les 3 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_nginx_erreur:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Journal d’erreurs nginx »
+      # Écrit à partir d’un échantillon de 3 événements (3 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^(?P<time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) \[(?P<level>[a-z]+)\] (?P<pid>\d+)#(?P<tid>\d+): (?:\*(?P<cid>\d+) )?(?P<msg>[\s\S]*?)(?:, client: (?P<client>[^,]+))?(?:, server: (?P<server>[^,]*))?(?:, request: "(?P<method>[A-Z]+) (?P<path>[^\s?"]*)(?:\?(?P<query>[^\s"]*))? (?P<protocol>[A-Za-z]+)/(?P<pver>[0-9.]+)")?(?:, upstream: "(?P<upstream>[^"]*)")?(?:, host: "(?P<host>[^"]*)")?(?:, referrer: "(?P<referrer>[^"]*)")?\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Journal d’erreurs nginx » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%Y/%m/%d %H:%M:%S%.f", timezone: "UTC")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        niveau2 = string!(champs.level)
+        .log.level = niveau2
+        .process.pid = to_int(champs.pid) ?? null
+        .process.thread.id = to_int(champs.tid) ?? null
+        if champs.cid != null {
+          .nginx.error.connection_id = to_int(champs.cid) ?? null
+        }
+        message3 = string!(champs.msg)
+        .message = message3
+        if champs.client != null {
+          .source.address = champs.client
+        }
+        if champs.server != null && champs.server != "-" && champs.server != "" {
+          .server.address = champs.server
+        }
+        if champs.method != null {
+          .http.request.method = champs.method
+        }
+        if champs.path != null {
+          .url.path = champs.path
+        }
+        if champs.query != null && champs.query != "-" && champs.query != "" {
+          .url.query = champs.query
+        }
+        if champs.protocol != null {
+          .network.protocol = downcase(string!(champs.protocol))
+        }
+        if champs.pver != null {
+          .http.version = champs.pver
+        }
+        if champs.upstream != null {
+          .nginx.error.upstream = champs.upstream
+        }
+        if champs.host != null && champs.host != "-" && champs.host != "" {
+          .url.domain = champs.host
+        }
+        if champs.referrer != null && champs.referrer != "-" && champs.referrer != "" {
+          .http.request.referrer = champs.referrer
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_nginx_erreur]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026/05/01 10:00:05 [error] 1234#1234: *5678 open() "/usr/sh…'
+    inputs:
+      - insert_at: analyse_nginx_erreur
+        type: log
+        log_fields:
+          message: '2026/05/01 10:00:05 [error] 1234#1234: *5678 open() "/usr/share/nginx/html/robots.txt" failed (2: No such file or directory), client: 203.0.113.10, server: shop.example.com, request: "GET /robots.txt HTTP/1.1", host: "shop.example.com"'
+    outputs:
+      - extract_from: analyse_nginx_erreur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026/05/01 10:00:05 [error] 1234#1234: *5678 open() \"/usr/share/nginx/html/robots.txt\" failed (2: No such file or directory), client: 203.0.113.10, server: shop.example.com, request: \"GET /robots.txt HTTP/1.1\", host: \"shop.example.com\"")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:05Z')
+              assert_eq!(.log.level, "error")
+              assert_eq!(.process.pid, 1234)
+              assert_eq!(.process.thread.id, 1234)
+              assert_eq!(.nginx.error.connection_id, 5678)
+              assert_eq!(.message, "open() \"/usr/share/nginx/html/robots.txt\" failed (2: No such file or directory)")
+              assert_eq!(.source.address, "203.0.113.10")
+              assert_eq!(.server.address, "shop.example.com")
+              assert_eq!(.http.request.method, "GET")
+              assert_eq!(.http.version, "1.1")
+              assert_eq!(.url.path, "/robots.txt")
+              assert_eq!(.url.domain, "shop.example.com")
+              assert_eq!(.network.protocol, "http")
+  - name: 'reconnue : 2026/05/01 10:00:06 [warn] 1234#1234: *5679 an upstream resp…'
+    inputs:
+      - insert_at: analyse_nginx_erreur
+        type: log
+        log_fields:
+          message: '2026/05/01 10:00:06 [warn] 1234#1234: *5679 an upstream response is buffered to a temporary file /var/cache/nginx/proxy_temp/1/00/0000000001 while reading upstream, client: 198.51.100.7, server: shop.example.com, request: "GET /api/export?format=csv HTTP/1.1", upstream: "http://10.0.2.15:8080/api/export?format=csv", host: "shop.example.com"'
+    outputs:
+      - extract_from: analyse_nginx_erreur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026/05/01 10:00:06 [warn] 1234#1234: *5679 an upstream response is buffered to a temporary file /var/cache/nginx/proxy_temp/1/00/0000000001 while reading upstream, client: 198.51.100.7, server: shop.example.com, request: \"GET /api/export?format=csv HTTP/1.1\", upstream: \"http://10.0.2.15:8080/api/export?format=csv\", host: \"shop.example.com\"")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:06Z')
+              assert_eq!(.log.level, "warn")
+              assert_eq!(.process.pid, 1234)
+              assert_eq!(.process.thread.id, 1234)
+              assert_eq!(.nginx.error.connection_id, 5679)
+              assert_eq!(.nginx.error.upstream, "http://10.0.2.15:8080/api/export?format=csv")
+              assert_eq!(.message, "an upstream response is buffered to a temporary file /var/cache/nginx/proxy_temp/1/00/0000000001 while reading upstream")
+              assert_eq!(.source.address, "198.51.100.7")
+              assert_eq!(.server.address, "shop.example.com")
+              assert_eq!(.http.request.method, "GET")
+              assert_eq!(.http.version, "1.1")
+              assert_eq!(.url.path, "/api/export")
+              assert_eq!(.url.query, "format=csv")
+              assert_eq!(.url.domain, "shop.example.com")
+              assert_eq!(.network.protocol, "http")
+  - name: 'reconnue : 2026/05/01 10:00:07 [notice] 1#1: signal process started'
+    inputs:
+      - insert_at: analyse_nginx_erreur
+        type: log
+        log_fields:
+          message: '2026/05/01 10:00:07 [notice] 1#1: signal process started'
+    outputs:
+      - extract_from: analyse_nginx_erreur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026/05/01 10:00:07 [notice] 1#1: signal process started")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:07Z')
+              assert_eq!(.log.level, "notice")
+              assert_eq!(.process.pid, 1)
+              assert_eq!(.process.thread.id, 1)
+              assert_eq!(.message, "signal process started")

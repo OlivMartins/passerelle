@@ -379,6 +379,39 @@ try {
   r = await request(prod, 'POST', '/v1/translate/ingest', { body: 'rien de lisible', headers: auth });
   check(r.status === 422 && r.json.verdict === 'unrecognized', 'ingest : texte illisible refusé', `statut ${r.status}`);
 
+  /* ---------- Log vers Vector ---------- */
+  r = await request(prod, 'POST', '/v1/translate/log?convention=ecs&name=nginx&format=toml', {
+    body: rd('examples/logs/nginx_acces.log'),
+    headers: auth
+  });
+  check(
+    r.status === 200 &&
+      r.json.verdict === 'ready' &&
+      r.json.log_format.id === 'combined' &&
+      r.json.convention === 'ecs' &&
+      r.json.format === 'toml' &&
+      /\[transforms\.analyse_nginx\]/.test(r.json.config) &&
+      r.json.events[0].event.http.response.status_code === 200 &&
+      r.json.events[0].event['@timestamp'] === '2026-05-01T08:00:00Z' &&
+      r.json.tests === 4 &&
+      r.json.fields.some(f => f.name === 'url.path'),
+    'log : journal d’accès en ECS, configuration TOML, événements prédits en JSON',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/translate/log?log_format=json', {
+    body: rd('examples/logs/nginx_acces.log'),
+    headers: auth
+  });
+  check(
+    r.status === 200 && r.json.verdict === 'todo' && r.json.log_format.id === 'none',
+    'log : format imposé qui ne correspond pas : à reprendre',
+    `statut ${r.status}`
+  );
+  r = await request(prod, 'POST', '/v1/translate/log?timezone=Mars/Olympe', { body: 'x', headers: auth });
+  check(r.status === 400 && /fuseau inconnu/.test(r.json.error), 'log : fuseau inconnu refusé', `statut ${r.status}`);
+  r = await request(prod, 'POST', '/v1/translate/log', { body: '\n\n', headers: auth });
+  check(r.status === 400 && r.json.verdict === 'unrecognized', 'log : corps vide refusé', `statut ${r.status}`);
+
   /* ---------- Schéma et analyseurs ---------- */
   const mapping = rd('examples/schema/logs_app.txt');
   const catalogue = rd('examples/analyseurs/catalogue.txt');
@@ -628,6 +661,41 @@ c = cli('ingest', 'examples/ingest/', '--format', 'sql');
 check(c.status === 1 && /--format attend yaml ou toml/.test(c.stderr), 'ingest --format sql : refusé');
 c = cli('ingest', 'absent.yml');
 check(c.status === 1 && /introuvable/.test(c.stderr), 'ingest sur un fichier introuvable : erreur', `code ${c.status}`);
+
+const logOut = join(TMP, 'logs');
+c = cli(
+  'log2vector',
+  'examples/logs/nomad.log',
+  'examples/logs/syslog_messages.log',
+  '--out',
+  logOut,
+  '--convention',
+  'ecs'
+);
+check(
+  c.status === 0 &&
+    existsSync(join(logOut, 'nomad.yaml')) &&
+    existsSync(join(logOut, 'syslog_messages.vrl')) &&
+    /analyse_nomad/.test(readFileSync(join(logOut, 'nomad.yaml'), 'utf8')) &&
+    /HashiCorp hclog/.test(c.stderr),
+  'log2vector --out : une configuration et un .vrl par journal',
+  `code ${c.status} ${c.stderr}`
+);
+c = cli('log2vector', 'examples/logs/inconnu.log', '--fail-on', 'todo');
+check(
+  c.status === 2 && /Format non reconnu/.test(c.stderr),
+  'log2vector --fail-on todo : journal non reconnu, code 2',
+  `code ${c.status}`
+);
+c = cli('log2vector', 'examples/logs/go_std.log', '--format', 'toml', '--log-format', 'goStd');
+check(
+  c.status === 0 && /\[transforms\.analyse_go_std\]/.test(c.stdout),
+  'log2vector --format toml --log-format : sur la sortie standard'
+);
+c = cli('log2vector', 'examples/logs/go_std.log', '--convention', 'gelf');
+check(c.status === 1 && /--convention attend otel ou ecs/.test(c.stderr), 'log2vector --convention inconnue : refusée');
+c = cli('log2vector', 'examples/logs/go_std.log', '--format', 'sql');
+check(c.status === 1 && /--format attend yaml ou toml/.test(c.stderr), 'log2vector --format sql : refusé');
 
 c = cli('schema', 'analyzers', 'examples/analyseurs/catalogue.txt', '--text', 'Les téléviseurs', '--field', 'titre');
 check(

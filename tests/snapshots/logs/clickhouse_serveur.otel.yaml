@@ -1,0 +1,121 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (ClickHouse, journal du serveur (texte))
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_clickhouse_serveur:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « ClickHouse, journal du serveur (texte) »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      ligne = string(.message) ?? ""
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      champs, erreur = parse_regex(ligne, r'^(?P<time>\d{4}\.\d{2}\.\d{2} \d{2}:\d{2}:\d{2}\.\d+) \[ *(?P<tid>\d+) *\] \{(?P<qid>[^}]*)\} <(?P<level>[A-Za-z]+)> (?P<logger>[^:]*?): (?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .attributes."log.parse.error" = "ligne non reconnue : format « ClickHouse, journal du serveur (texte) » attendu"
+      } else {
+        .attributes."log.record.original" = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%Y.%m.%d %H:%M:%S%.f", timezone: "UTC")
+        if erreur_horodatage1 == null {
+          .timestamp = horodatage1
+        }
+        .attributes."thread.id" = to_int(champs.tid) ?? null
+        if champs.qid != "-" && champs.qid != "" {
+          .attributes."clickhouse.query_id" = champs.qid
+        }
+        niveau2 = string!(champs.level)
+        .severity_text = niveau2
+        niveau_min3 = downcase(niveau2)
+        .severity_number = if includes(["trace", "finest", "finer", "trace1", "trace2", "trace3", "trace4", "trace5", "trace6", "trace7", "trace8"], niveau_min3) { 1 } else if includes(["debug", "fine", "dbg", "config", "verbose"], niveau_min3) { 5 } else if includes(["info", "information", "informational"], niveau_min3) { 9 } else if includes(["notice"], niveau_min3) { 10 } else if includes(["warn", "warning"], niveau_min3) { 13 } else if includes(["error", "err", "severe"], niveau_min3) { 17 } else if includes(["fatal", "critical", "crit", "alert", "emerg", "emergency", "panic", "dpanic"], niveau_min3) { 21 } else { 0 }
+        .scope.name = champs.logger
+        message4 = string!(champs.msg)
+        .message = message4
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_clickhouse_serveur]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026.05.01 10:00:00.123456 [ 4242 ] {} <Information> Applica…'
+    inputs:
+      - insert_at: analyse_clickhouse_serveur
+        type: log
+        log_fields:
+          message: '2026.05.01 10:00:00.123456 [ 4242 ] {} <Information> Application: Ready for connections.'
+    outputs:
+      - extract_from: analyse_clickhouse_serveur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026.05.01 10:00:00.123456 [ 4242 ] {} <Information> Application: Ready for connections.")
+              assert_eq!(.attributes."thread.id", 4242)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:00.123456Z')
+              assert_eq!(.severity_text, "Information")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.scope.name, "Application")
+              assert_eq!(.message, "Ready for connections.")
+  - name: 'reconnue : 2026.05.01 10:00:01.234567 [ 4250 ] {9f1c2d3e-0a4b-4c5d-8e6f…'
+    inputs:
+      - insert_at: analyse_clickhouse_serveur
+        type: log
+        log_fields:
+          message: '2026.05.01 10:00:01.234567 [ 4250 ] {9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f} <Debug> executeQuery: (from 10.0.3.7:51522, user: lecteur) SELECT count() FROM logs.events'
+    outputs:
+      - extract_from: analyse_clickhouse_serveur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026.05.01 10:00:01.234567 [ 4250 ] {9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f} <Debug> executeQuery: (from 10.0.3.7:51522, user: lecteur) SELECT count() FROM logs.events")
+              assert_eq!(.attributes."thread.id", 4250)
+              assert_eq!(.attributes."clickhouse.query_id", "9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f")
+              assert_eq!(.timestamp, t'2026-05-01T10:00:01.234567Z')
+              assert_eq!(.severity_text, "Debug")
+              assert_eq!(.severity_number, 5)
+              assert_eq!(.scope.name, "executeQuery")
+              assert_eq!(.message, "(from 10.0.3.7:51522, user: lecteur) SELECT count() FROM logs.events")
+  - name: 'reconnue : 2026.05.01 10:00:01.345678 [ 4250 ] {9f1c2d3e-0a4b-4c5d-8e6f…'
+    inputs:
+      - insert_at: analyse_clickhouse_serveur
+        type: log
+        log_fields:
+          message: '2026.05.01 10:00:01.345678 [ 4250 ] {9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f} <Error> executeQuery: Code: 60. DB::Exception: Table logs.evenements does not exist. (UNKNOWN_TABLE)'
+    outputs:
+      - extract_from: analyse_clickhouse_serveur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026.05.01 10:00:01.345678 [ 4250 ] {9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f} <Error> executeQuery: Code: 60. DB::Exception: Table logs.evenements does not exist. (UNKNOWN_TABLE)")
+              assert_eq!(.attributes."thread.id", 4250)
+              assert_eq!(.attributes."clickhouse.query_id", "9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f")
+              assert_eq!(.timestamp, t'2026-05-01T10:00:01.345678Z')
+              assert_eq!(.severity_text, "Error")
+              assert_eq!(.severity_number, 17)
+              assert_eq!(.scope.name, "executeQuery")
+              assert_eq!(.message, "Code: 60. DB::Exception: Table logs.evenements does not exist. (UNKNOWN_TABLE)")
+  - name: 'reconnue : 2026.05.01 10:00:02.000001 [ 4261 ] {} <Warning> MergeTreeBa…'
+    inputs:
+      - insert_at: analyse_clickhouse_serveur
+        type: log
+        log_fields:
+          message: '2026.05.01 10:00:02.000001 [ 4261 ] {} <Warning> MergeTreeBackgroundExecutor: Pool size is too small'
+    outputs:
+      - extract_from: analyse_clickhouse_serveur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "2026.05.01 10:00:02.000001 [ 4261 ] {} <Warning> MergeTreeBackgroundExecutor: Pool size is too small")
+              assert_eq!(.attributes."thread.id", 4261)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:02.000001Z')
+              assert_eq!(.severity_text, "Warning")
+              assert_eq!(.severity_number, 13)
+              assert_eq!(.scope.name, "MergeTreeBackgroundExecutor")
+              assert_eq!(.message, "Pool size is too small")

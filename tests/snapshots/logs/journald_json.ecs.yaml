@@ -1,0 +1,118 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (JSON — journald (journalctl -o json))
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_journald_json:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « JSON — journald (journalctl -o json) »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      objet, erreur = parse_json(ligne)
+      if erreur != null || !is_object(objet) {
+        .error.message = "ligne non reconnue : un objet JSON attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        champs = flatten(object!(objet))
+        # Horodatage : clé "__REALTIME_TIMESTAMP"
+        if exists(champs."__REALTIME_TIMESTAMP") {
+          horodatage1, erreur_horodatage1 = from_unix_timestamp(to_int(string(champs."__REALTIME_TIMESTAMP") ?? "") ?? 0, unit: "microseconds")
+          if erreur_horodatage1 == null {
+            ."@timestamp" = horodatage1
+            del(.timestamp)
+          }
+          del(champs."__REALTIME_TIMESTAMP")
+        }
+        # Niveau : clé "PRIORITY"
+        if exists(champs."PRIORITY") {
+          niveau2 = string(get(["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"], [to_int(champs."PRIORITY") ?? 6]) ?? "info") ?? "info"
+          .log.level = niveau2
+          del(champs."PRIORITY")
+        }
+        # Message : clé "MESSAGE"
+        if exists(champs."MESSAGE") {
+          .message = champs."MESSAGE"
+          del(champs."MESSAGE")
+        }
+        # Rôle host : clé "_HOSTNAME"
+        if exists(champs."_HOSTNAME") {
+          .host.name = champs."_HOSTNAME"
+          del(champs."_HOSTNAME")
+        }
+        # Rôle service : clé "SYSLOG_IDENTIFIER"
+        if exists(champs."SYSLOG_IDENTIFIER") {
+          .service.name = champs."SYSLOG_IDENTIFIER"
+          del(champs."SYSLOG_IDENTIFIER")
+        }
+        # Rôle pid : clé "_PID"
+        if exists(champs."_PID") {
+          .process.pid = to_int(champs."_PID") ?? null
+          del(champs."_PID")
+        }
+        # Les autres clés sont recopiées à la racine de l’événement
+        . = merge(., unflatten(champs), deep: true)
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_journald_json]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : {"__CURSOR":"s=7f1e;i=1a2b","__REALTIME_TIMESTAMP":"17776296…'
+    inputs:
+      - insert_at: analyse_journald_json
+        type: log
+        log_fields:
+          message: '{"__CURSOR":"s=7f1e;i=1a2b","__REALTIME_TIMESTAMP":"1777629600123456","__MONOTONIC_TIMESTAMP":"3605123456","_BOOT_ID":"0f1e2d3c4b5a69788796a5b4c3d2e1f0","PRIORITY":"6","SYSLOG_FACILITY":"3","SYSLOG_IDENTIFIER":"systemd","_PID":"1","_UID":"0","_COMM":"systemd","_EXE":"/usr/lib/systemd/systemd","_SYSTEMD_UNIT":"init.scope","_HOSTNAME":"web01","MESSAGE":"Started nginx.service - A high performance web server and a reverse proxy server.","UNIT":"nginx.service"}'
+    outputs:
+      - extract_from: analyse_journald_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "{\"__CURSOR\":\"s=7f1e;i=1a2b\",\"__REALTIME_TIMESTAMP\":\"1777629600123456\",\"__MONOTONIC_TIMESTAMP\":\"3605123456\",\"_BOOT_ID\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"PRIORITY\":\"6\",\"SYSLOG_FACILITY\":\"3\",\"SYSLOG_IDENTIFIER\":\"systemd\",\"_PID\":\"1\",\"_UID\":\"0\",\"_COMM\":\"systemd\",\"_EXE\":\"/usr/lib/systemd/systemd\",\"_SYSTEMD_UNIT\":\"init.scope\",\"_HOSTNAME\":\"web01\",\"MESSAGE\":\"Started nginx.service - A high performance web server and a reverse proxy server.\",\"UNIT\":\"nginx.service\"}")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.123456Z')
+              assert_eq!(.log.level, "info")
+              assert_eq!(.message, "Started nginx.service - A high performance web server and a reverse proxy server.")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.service.name, "systemd")
+              assert_eq!(.process.pid, 1)
+              assert_eq!(.__CURSOR, "s=7f1e;i=1a2b")
+              assert_eq!(.__MONOTONIC_TIMESTAMP, "3605123456")
+              assert_eq!(._BOOT_ID, "0f1e2d3c4b5a69788796a5b4c3d2e1f0")
+              assert_eq!(.SYSLOG_FACILITY, "3")
+              assert_eq!(._UID, "0")
+              assert_eq!(._COMM, "systemd")
+              assert_eq!(._EXE, "/usr/lib/systemd/systemd")
+              assert_eq!(._SYSTEMD_UNIT, "init.scope")
+              assert_eq!(.UNIT, "nginx.service")
+  - name: 'reconnue : {"__CURSOR":"s=7f1e;i=1a2c","__REALTIME_TIMESTAMP":"17776296…'
+    inputs:
+      - insert_at: analyse_journald_json
+        type: log
+        log_fields:
+          message: '{"__CURSOR":"s=7f1e;i=1a2c","__REALTIME_TIMESTAMP":"1777629601500000","PRIORITY":"3","SYSLOG_FACILITY":"10","SYSLOG_IDENTIFIER":"sshd","_PID":"2215","_UID":"0","_COMM":"sshd","_SYSTEMD_UNIT":"ssh.service","_HOSTNAME":"web01","MESSAGE":"error: kex_exchange_identification: Connection closed by remote host"}'
+    outputs:
+      - extract_from: analyse_journald_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "{\"__CURSOR\":\"s=7f1e;i=1a2c\",\"__REALTIME_TIMESTAMP\":\"1777629601500000\",\"PRIORITY\":\"3\",\"SYSLOG_FACILITY\":\"10\",\"SYSLOG_IDENTIFIER\":\"sshd\",\"_PID\":\"2215\",\"_UID\":\"0\",\"_COMM\":\"sshd\",\"_SYSTEMD_UNIT\":\"ssh.service\",\"_HOSTNAME\":\"web01\",\"MESSAGE\":\"error: kex_exchange_identification: Connection closed by remote host\"}")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:01.5Z')
+              assert_eq!(.log.level, "err")
+              assert_eq!(.message, "error: kex_exchange_identification: Connection closed by remote host")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.service.name, "sshd")
+              assert_eq!(.process.pid, 2215)
+              assert_eq!(.__CURSOR, "s=7f1e;i=1a2c")
+              assert_eq!(.SYSLOG_FACILITY, "10")
+              assert_eq!(._UID, "0")
+              assert_eq!(._COMM, "sshd")
+              assert_eq!(._SYSTEMD_UNIT, "ssh.service")

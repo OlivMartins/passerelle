@@ -1,0 +1,180 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Syslog BSD (/var/log/messages, syslog, auth.log, kern.log))
+# Tests : vector test <fichier> rejoue les 5 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_syslog_messages:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Syslog BSD (/var/log/messages, syslog, auth.log, kern.log) »
+      # Écrit à partir d’un échantillon de 5 événements (5 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      # Le journal ne donne pas l’année : celle du jour, ou la précédente pour une date dans le futur
+      annee = format_timestamp!(now(), "%Y", timezone: "UTC")
+      champs, erreur = parse_regex(ligne, r'^(?:<(?P<pri>\d{1,3})>)?(?P<time>[A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}) (?P<host>\S+) (?P<app>[^\s\[:]+)(?:\[(?P<pid>\d+)\])?: +(?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Syslog BSD (/var/log/messages, syslog, auth.log, kern.log) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        if champs.pri != null {
+          priorite1 = to_int(champs.pri) ?? 0
+          .log.syslog.priority = priorite1
+          .log.syslog.facility.name = get(["kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv", "ftp", "ntp", "security", "console", "solaris-cron", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7"], [to_int(floor(priorite1 / 8))]) ?? null
+          severite2 = get(["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"], [mod(priorite1, 8)]) ?? null
+          .log.syslog.severity.name = severite2
+        }
+        horodatage3, erreur_horodatage3 = parse_timestamp(annee + " " + string!(champs.time), "%Y %b %e %H:%M:%S", timezone: "UTC")
+        if erreur_horodatage3 == null && to_unix_timestamp(horodatage3) > to_unix_timestamp(now()) + 86400 {
+          # Date à plus d’un jour dans le futur : elle est de l’année précédente (journal de décembre lu en janvier)
+          horodatage3 = parse_timestamp(to_string((to_int(annee) ?? 0) - 1) + " " + string!(champs.time), "%Y %b %e %H:%M:%S", timezone: "UTC") ?? horodatage3
+        }
+        if erreur_horodatage3 == null {
+          ."@timestamp" = horodatage3
+          del(.timestamp)
+        }
+        .host.name = champs.host
+        .process.name = champs.app
+        if champs.pid != null {
+          .process.pid = to_int(champs.pid) ?? null
+        }
+        message4 = string!(champs.msg)
+        .message = message4
+        # Enrichissement : connexions SSH (sshd)
+        if champs.app == "sshd" {
+          detail5, detail_erreur5 = parse_regex(message4, r'^(?:(?P<outcome>Accepted|Failed) (?P<method>[\w-]+) for (?:invalid user )?|Invalid user )(?P<user>\S+) from (?P<ip>\S+)(?: port (?P<port>\d+))?')
+          if detail_erreur5 == null {
+            .user.name = detail5.user
+            .source.ip = detail5.ip
+            if detail5.port != null {
+              .source.port = to_int(detail5.port) ?? null
+            }
+            if detail5.method != null {
+              .system.auth.ssh.method = detail5.method
+            }
+            .event.outcome = if detail5.outcome == "Accepted" { "success" } else { "failure" }
+          }
+        }
+        # Enrichissement : commandes sudo
+        if champs.app == "sudo" {
+          detail6, detail_erreur6 = parse_regex(message4, r'^\s*(?P<user>\S+) : (?:[A-Z]+=[^;]* ; )*?TTY=(?P<tty>\S+) ; PWD=(?P<pwd>[^;]+?) ; USER=(?P<runas>\S+) ;(?: [A-Z]+=[^;]* ;)* COMMAND=(?P<cmd>.+)')
+          if detail_erreur6 == null {
+            .user.name = detail6.user
+            .system.auth.sudo.tty = detail6.tty
+            .system.auth.sudo.pwd = detail6.pwd
+            .user.effective.name = detail6.runas
+            .process.command_line = detail6.cmd
+          }
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_syslog_messages]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : May  1 10:00:00 web01 sshd[2211]: Accepted publickey for dep…'
+    inputs:
+      - insert_at: analyse_syslog_messages
+        type: log
+        log_fields:
+          message: 'May  1 10:00:00 web01 sshd[2211]: Accepted publickey for deploy from 198.51.100.20 port 52344 ssh2: ED25519 SHA256:7Yx0'
+    outputs:
+      - extract_from: analyse_syslog_messages
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "May  1 10:00:00 web01 sshd[2211]: Accepted publickey for deploy from 198.51.100.20 port 52344 ssh2: ED25519 SHA256:7Yx0")
+              assert_eq!(.event.outcome, "success")
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-01T10:00:00.000000000")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.process.name, "sshd")
+              assert_eq!(.process.pid, 2211)
+              assert_eq!(.message, "Accepted publickey for deploy from 198.51.100.20 port 52344 ssh2: ED25519 SHA256:7Yx0")
+              assert_eq!(.user.name, "deploy")
+              assert_eq!(.source.ip, "198.51.100.20")
+              assert_eq!(.source.port, 52344)
+              assert_eq!(.system.auth.ssh.method, "publickey")
+  - name: 'reconnue : May  1 10:00:03 web01 sshd[2215]: Failed password for invali…'
+    inputs:
+      - insert_at: analyse_syslog_messages
+        type: log
+        log_fields:
+          message: 'May  1 10:00:03 web01 sshd[2215]: Failed password for invalid user admin from 203.0.113.99 port 41022 ssh2'
+    outputs:
+      - extract_from: analyse_syslog_messages
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "May  1 10:00:03 web01 sshd[2215]: Failed password for invalid user admin from 203.0.113.99 port 41022 ssh2")
+              assert_eq!(.event.outcome, "failure")
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-01T10:00:03.000000000")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.process.name, "sshd")
+              assert_eq!(.process.pid, 2215)
+              assert_eq!(.message, "Failed password for invalid user admin from 203.0.113.99 port 41022 ssh2")
+              assert_eq!(.user.name, "admin")
+              assert_eq!(.source.ip, "203.0.113.99")
+              assert_eq!(.source.port, 41022)
+              assert_eq!(.system.auth.ssh.method, "password")
+  - name: 'reconnue : May  1 10:00:04 web01 sudo:   deploy : TTY=pts/0 ; PWD=/home…'
+    inputs:
+      - insert_at: analyse_syslog_messages
+        type: log
+        log_fields:
+          message: 'May  1 10:00:04 web01 sudo:   deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx'
+    outputs:
+      - extract_from: analyse_syslog_messages
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "May  1 10:00:04 web01 sudo:   deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx")
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-01T10:00:04.000000000")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.process.name, "sudo")
+              assert_eq!(.process.command_line, "/usr/bin/systemctl restart nginx")
+              assert_eq!(.message, "deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx")
+              assert_eq!(.user.name, "deploy")
+              assert_eq!(.user.effective.name, "root")
+              assert_eq!(.system.auth.sudo.tty, "pts/0")
+              assert_eq!(.system.auth.sudo.pwd, "/home/deploy")
+  - name: 'reconnue : May 11 10:00:05 web01 systemd[1]: Started nginx.service - A …'
+    inputs:
+      - insert_at: analyse_syslog_messages
+        type: log
+        log_fields:
+          message: 'May 11 10:00:05 web01 systemd[1]: Started nginx.service - A high performance web server and a reverse proxy server.'
+    outputs:
+      - extract_from: analyse_syslog_messages
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "May 11 10:00:05 web01 systemd[1]: Started nginx.service - A high performance web server and a reverse proxy server.")
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-11T10:00:05.000000000")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.process.name, "systemd")
+              assert_eq!(.process.pid, 1)
+              assert_eq!(.message, "Started nginx.service - A high performance web server and a reverse proxy server.")
+  - name: 'reconnue : May 11 10:00:06 web01 CRON[3301]: (root) CMD (/usr/local/bin…'
+    inputs:
+      - insert_at: analyse_syslog_messages
+        type: log
+        log_fields:
+          message: 'May 11 10:00:06 web01 CRON[3301]: (root) CMD (/usr/local/bin/sauvegarde.sh)'
+    outputs:
+      - extract_from: analyse_syslog_messages
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "May 11 10:00:06 web01 CRON[3301]: (root) CMD (/usr/local/bin/sauvegarde.sh)")
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-11T10:00:06.000000000")
+              assert_eq!(.host.name, "web01")
+              assert_eq!(.process.name, "CRON")
+              assert_eq!(.process.pid, 3301)
+              assert_eq!(.message, "(root) CMD (/usr/local/bin/sauvegarde.sh)")

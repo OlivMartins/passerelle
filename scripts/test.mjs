@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { CASES } from '../tests/differential/cases.mjs';
 import { INDEX, configOverride } from '../tests/differential/dataset.mjs';
 import { CASES as PIPELINE_CASES } from '../tests/pipelines/cases.mjs';
+import { CASES as LOG_CASES, fieldOf } from '../tests/logs/cases.mjs';
 import { translatedPipeline, translatedChain } from '../tests/pipelines/transport.mjs';
 import * as E from '../src/engine/index.js';
 import { drift, playedByDifferential, playedByPipelines } from './couverture.mjs';
@@ -40,7 +41,8 @@ const SOURCES = {
     return r.entries.length && !r.source.errors.length ? r : { error: r.source.errors[0] || 'aucune watch' };
   },
   schema: t => E.schemaFromElastic(t, E.DEFAULT_CONFIG, {}),
-  analyzers: t => E.schemaFromElastic(t, E.DEFAULT_CONFIG, {})
+  analyzers: t => E.schemaFromElastic(t, E.DEFAULT_CONFIG, {}),
+  logs: t => E.logToVRL(t, E.DEFAULT_CONFIG, {})
 };
 for (const [kind, read] of Object.entries(SOURCES)) {
   for (const ex of index[kind] || []) {
@@ -175,6 +177,167 @@ const watcherRep = E.watcherTranslate(
   { names: ['watches.json', 'console.txt'], origin: 'watches.json, console.txt' }
 );
 snapshot('watcher/rapport.md', E.watcherReportMarkdown(watcherRep));
+
+/* ---------- Log vers Vector : un échantillon de journaux, son pipeline VRL ---------- */
+{
+  // Date de référence figée : les journaux sans année (syslog BSD, klog) prennent la sienne
+  const NOW = '2026-11-25T12:00:00Z';
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const L = (text, o) => E.logToVRL(text, E.DEFAULT_CONFIG, Object.assign({ now: NOW }, o || {}));
+  // Chaque échantillon de examples/logs a son cas, et réciproquement
+  const files = readdirSync(join(ROOT, 'examples/logs')).filter(f => f.endsWith('.log'));
+  const listed = LOG_CASES.map(c => c.file);
+  check(
+    same([...files].sort(), [...listed].sort()),
+    'log vers Vector : chaque échantillon de examples/logs a son cas dans tests/logs/cases.mjs',
+    `sans cas : ${files.filter(f => !listed.includes(f)).join(', ') || '—'} ; sans fichier : ${listed.filter(f => !files.includes(f)).join(', ') || '—'}`
+  );
+  for (const c of LOG_CASES) {
+    const text = rd(`examples/logs/${c.file}`);
+    for (const conv of ['otel', 'ecs']) {
+      const r = L(text, { convention: conv, name: c.file });
+      const where = `log vers Vector (${conv}) : ${c.file}`;
+      if (r.error || r.empty) {
+        check(false, where, r.error || 'résultat vide');
+        continue;
+      }
+      check(r.format.id === c.format, `${where} : format ${c.format}`, `reconnu : ${r.format.id} (${r.format.label})`);
+      check(r.events.length === c.events, `${where} : ${c.events} événements`, `obtenu ${r.events.length}`);
+      const bad = [];
+      for (const [i, fields] of Object.entries(c[conv] || {})) {
+        const ev = E.eventJSON(r.events[+i].event);
+        for (const [name, want] of Object.entries(fields)) {
+          const got = fieldOf(ev, name);
+          if (!same(got, want)) bad.push(`#${i} ${name} = ${JSON.stringify(got)} (attendu ${JSON.stringify(want)})`);
+        }
+      }
+      check(!bad.length, `${where} : champs attendus`, bad.join(' ; '));
+      // Un test unitaire par événement reconnu (douze au plus), le VRL dans le transform, aucun $ doublé
+      check(
+        r.tests === (c.format === 'none' ? 1 : Math.min(12, r.events.length)),
+        `${where} : un test unitaire par événement`,
+        `${r.tests}`
+      );
+      check(r.config.transforms[r.transform].source === r.vrl, `${where} : le VRL est celui du transform`);
+      if (c.format !== 'none')
+        check(
+          r.events.every(e => e.recognized),
+          `${where} : tous les événements reconnus`,
+          r.events
+            .filter(e => !e.recognized)
+            .map(e => e.text.slice(0, 60))
+            .join(' | ')
+        );
+      snapshot(`logs/${c.file.replace(/\.log$/, '')}.${conv}.yaml`, r.yaml);
+    }
+  }
+
+  // Entrées vides ou options invalides
+  check(L('  \n\n').empty === true, 'log vers Vector : un texte vide ne donne rien');
+  check(
+    /convention inconnue/.test(L('x', { convention: 'gelf' }).error || ''),
+    'log vers Vector : convention inconnue refusée'
+  );
+  check(/format inconnu/.test(L('x', { format: 'cobol' }).error || ''), 'log vers Vector : format inconnu refusé');
+  check(
+    /fuseau inconnu/.test(L('x', { timezone: 'Mars/Olympus' }).error || ''),
+    'log vers Vector : fuseau inconnu refusé'
+  );
+
+  const py = rd('examples/logs/python_logging.log');
+  // Fuseau des dates sans fuseau : 10:00 à Paris en mai, c’est 08:00 UTC
+  {
+    const r = L(py, { timezone: 'Europe/Paris' });
+    check(
+      E.eventJSON(r.events[0].event).timestamp === '2026-05-01T08:00:00.123Z' &&
+        /timezone: "Europe\/Paris"/.test(r.vrl),
+      'log vers Vector : fuseau des dates sans fuseau (Europe/Paris)',
+      E.eventJSON(r.events[0].event).timestamp
+    );
+    check(
+      !L(py).notes.some(n => n.level === 'err') &&
+        L(py).notes.some(n => n.title === 'Horodatage sans fuseau' && n.level === 'warn'),
+      'log vers Vector : une date sans fuseau lue en UTC est signalée'
+    );
+  }
+  // Format imposé : celui de l’échantillon, ou rien
+  {
+    const ok = L(py, { format: 'pythonDash' });
+    check(ok.format.id === 'pythonDash' && ok.stats.ko === 0, 'log vers Vector : format imposé, reconnu');
+    const ko = L(py, { format: 'combined' });
+    check(
+      ko.format.id === 'none' &&
+        ko.notes.some(n => n.level === 'err' && n.title === 'Format non reconnu') &&
+        E.verdictOf(ko) === 'todo',
+      'log vers Vector : format imposé qui ne correspond pas : à reprendre'
+    );
+  }
+  // Ligne d’origine : gardée par défaut, retirée sur demande
+  {
+    const a = L(py, { convention: 'ecs' });
+    const b = L(py, { convention: 'ecs', keepOriginal: false });
+    check(
+      !!E.eventJSON(a.events[0].event).event && !E.eventJSON(b.events[0].event).event && !/event\.original/.test(b.vrl),
+      'log vers Vector : event.original gardé par défaut, retiré avec keepOriginal: false'
+    );
+  }
+  // Événements sur plusieurs lignes : source file avec multiline, trace de pile rattachée
+  {
+    const r = L(rd('examples/logs/java_logback.log'));
+    const src = r.config.sources.journaux;
+    check(
+      r.multiline && src.type === 'file' && src.multiline.mode === 'halt_before' && r.events.length === 4,
+      'log vers Vector : trace de pile Java rattachée à son événement, source file multiline'
+    );
+    check(
+      r.yaml.includes('message: |-'),
+      'log vers Vector : le message de test garde ses lignes, sans saut de ligne final'
+    );
+  }
+  // Une ligne d’un autre format : signalée, rejouée comme non reconnue
+  {
+    const r = L(rd('examples/logs/nginx_acces.log') + '\nceci n’est pas un journal d’accès\n');
+    check(
+      r.stats.approx === 1 &&
+        !r.stats.ko &&
+        E.verdictOf(r) === 'review' &&
+        r.tests === 5 &&
+        /non reconnue/.test(r.config.tests[4].name),
+      'log vers Vector : ligne non reconnue comptée « à vérifier », signalée et rejouée',
+      `${JSON.stringify(r.stats)} ${E.verdictOf(r)} ${r.tests}`
+    );
+  }
+  // Format générique : horodatage et niveau en tête, à vérifier
+  {
+    const r = L('2026-05-01 10:00:00 INFO démarrage\n2026-05-01 10:00:01 [ERROR] échec de la tâche 3\n');
+    const ev = E.eventJSON(r.events[1].event);
+    check(
+      r.format.id === 'generic' &&
+        E.verdictOf(r) === 'review' &&
+        ev.severity_text === 'ERROR' &&
+        ev.message === 'échec de la tâche 3',
+      'log vers Vector : format générique (horodatage, niveau, message), à vérifier',
+      JSON.stringify(ev)
+    );
+  }
+  // Un $ du journal reste littéral : la configuration n’a besoin d’aucune interpolation de variables
+  {
+    const r = L('192.0.2.1 - - [10/Oct/2025:13:55:36 -0700] "GET /a?x=$HOME HTTP/1.1" 200 1\n');
+    check(
+      r.yaml.includes('x=$HOME') && !r.yaml.includes('$$') && !/interpolation/.test(r.yaml),
+      'log vers Vector : un $ du journal n’est pas doublé'
+    );
+  }
+  // Échantillon trop long : tronqué et signalé
+  {
+    const many = Array.from({ length: 2100 }, (_, i) => `2026/05/01 10:00:00 ligne ${i}`).join('\n');
+    const r = L(many);
+    check(
+      r.events.length === 2000 && r.notes.some(n => n.title === 'Échantillon tronqué'),
+      'log vers Vector : échantillon tronqué à 2 000 lignes'
+    );
+  }
+}
 
 // pipelines.yml : lecture, fichiers de path.config, liaisons pipeline { send_to }
 {

@@ -1,0 +1,152 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Journal d’accès HTTP (combined ou common : nginx, Apache))
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_nginx_acces:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Journal d’accès HTTP (combined ou common : nginx, Apache) »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      ligne = string(.message) ?? ""
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      champs, erreur = parse_regex(ligne, r'^(?P<client>\S+) (?P<ident>\S+) (?P<user>\S+) \[(?P<time>[^\]]+)\] "(?:(?P<method>[A-Z]+) (?P<path>[^\s?"]*)(?:\?(?P<query>[^\s"]*))?(?: (?P<protocol>[A-Za-z]+)/(?P<pver>[0-9.]+))?|(?P<request>(?:[^"\\]|\\.)*))" (?P<status>\d{3}) (?P<bytes>\d+|-)(?: "(?P<referrer>(?:[^"\\]|\\.)*)" "(?P<agent>(?:[^"\\]|\\.)*)"(?: "(?P<xff>(?:[^"\\]|\\.)*)")?)?(?: (?P<duration>\d+\.\d+))?\z')
+      if erreur != null {
+        .attributes."log.parse.error" = "ligne non reconnue : format « Journal d’accès HTTP (combined ou common : nginx, Apache) » attendu"
+      } else {
+        .attributes."client.address" = champs.client
+        if champs.user != "-" && champs.user != "" {
+          .attributes."user.name" = champs.user
+        }
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%d/%b/%Y:%H:%M:%S%.f %z")
+        if erreur_horodatage1 == null {
+          .timestamp = horodatage1
+        }
+        if champs.method != null {
+          .attributes."http.request.method" = champs.method
+        }
+        if champs.path != null {
+          .attributes."url.path" = champs.path
+        }
+        if champs.query != null && champs.query != "-" && champs.query != "" {
+          .attributes."url.query" = champs.query
+        }
+        if champs.protocol != null {
+          .attributes."network.protocol.name" = downcase(string!(champs.protocol))
+        }
+        if champs.pver != null {
+          .attributes."network.protocol.version" = champs.pver
+        }
+        if champs.request != null && champs.request != "-" && champs.request != "" {
+          .attributes."http.request.line" = champs.request
+        }
+        .attributes."http.response.status_code" = to_int(champs.status) ?? null
+        if champs.bytes != "-" && champs.bytes != "" {
+          .attributes."http.response.body.size" = to_int(champs.bytes) ?? null
+        }
+        if champs.referrer != null && champs.referrer != "-" && champs.referrer != "" {
+          .attributes."http.request.header.referer" = champs.referrer
+        }
+        if champs.agent != null && champs.agent != "-" && champs.agent != "" {
+          .attributes."user_agent.original" = champs.agent
+        }
+        if champs.xff != null && champs.xff != "-" && champs.xff != "" {
+          .attributes."http.request.header.x-forwarded-for" = champs.xff
+        }
+        if champs.duration != null {
+          .attributes."http.server.request.duration" = to_float(champs.duration) ?? null
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_nginx_acces]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 203.0.113.10 - - [01/May/2026:10:00:00 +0200] "GET /index.ht…'
+    inputs:
+      - insert_at: analyse_nginx_acces
+        type: log
+        log_fields:
+          message: '203.0.113.10 - - [01/May/2026:10:00:00 +0200] "GET /index.html HTTP/1.1" 200 5320 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"'
+    outputs:
+      - extract_from: analyse_nginx_acces
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."client.address", "203.0.113.10")
+              assert_eq!(.attributes."http.request.method", "GET")
+              assert_eq!(.attributes."url.path", "/index.html")
+              assert_eq!(.attributes."network.protocol.name", "http")
+              assert_eq!(.attributes."network.protocol.version", "1.1")
+              assert_eq!(.attributes."http.response.status_code", 200)
+              assert_eq!(.attributes."http.response.body.size", 5320)
+              assert_eq!(.attributes."user_agent.original", "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0")
+              assert_eq!(.timestamp, t'2026-05-01T08:00:00Z')
+  - name: 'reconnue : 198.51.100.7 - alice [01/May/2026:10:00:01 +0200] "POST /api…'
+    inputs:
+      - insert_at: analyse_nginx_acces
+        type: log
+        log_fields:
+          message: '198.51.100.7 - alice [01/May/2026:10:00:01 +0200] "POST /api/v1/commandes?source=mobile&lang=fr HTTP/2.0" 201 87 "https://shop.example.com/panier" "okhttp/4.12.0"'
+    outputs:
+      - extract_from: analyse_nginx_acces
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."client.address", "198.51.100.7")
+              assert_eq!(.attributes."user.name", "alice")
+              assert_eq!(.attributes."http.request.method", "POST")
+              assert_eq!(.attributes."url.path", "/api/v1/commandes")
+              assert_eq!(.attributes."url.query", "source=mobile&lang=fr")
+              assert_eq!(.attributes."network.protocol.name", "http")
+              assert_eq!(.attributes."network.protocol.version", "2.0")
+              assert_eq!(.attributes."http.response.status_code", 201)
+              assert_eq!(.attributes."http.response.body.size", 87)
+              assert_eq!(.attributes."http.request.header.referer", "https://shop.example.com/panier")
+              assert_eq!(.attributes."user_agent.original", "okhttp/4.12.0")
+              assert_eq!(.timestamp, t'2026-05-01T08:00:01Z')
+  - name: 'reconnue : 203.0.113.25 - - [01/May/2026:10:00:02 +0200] "GET /favicon.…'
+    inputs:
+      - insert_at: analyse_nginx_acces
+        type: log
+        log_fields:
+          message: '203.0.113.25 - - [01/May/2026:10:00:02 +0200] "GET /favicon.ico HTTP/1.1" 404 153 "https://shop.example.com/" "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"'
+    outputs:
+      - extract_from: analyse_nginx_acces
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."client.address", "203.0.113.25")
+              assert_eq!(.attributes."http.request.method", "GET")
+              assert_eq!(.attributes."url.path", "/favicon.ico")
+              assert_eq!(.attributes."network.protocol.name", "http")
+              assert_eq!(.attributes."network.protocol.version", "1.1")
+              assert_eq!(.attributes."http.response.status_code", 404)
+              assert_eq!(.attributes."http.response.body.size", 153)
+              assert_eq!(.attributes."http.request.header.referer", "https://shop.example.com/")
+              assert_eq!(.attributes."user_agent.original", "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15")
+              assert_eq!(.timestamp, t'2026-05-01T08:00:02Z')
+  - name: 'reconnue : 192.0.2.44 - - [01/May/2026:10:00:03 +0200] "-" 400 0 "-" "-…'
+    inputs:
+      - insert_at: analyse_nginx_acces
+        type: log
+        log_fields:
+          message: '192.0.2.44 - - [01/May/2026:10:00:03 +0200] "-" 400 0 "-" "-"'
+    outputs:
+      - extract_from: analyse_nginx_acces
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."client.address", "192.0.2.44")
+              assert_eq!(.attributes."http.response.status_code", 400)
+              assert_eq!(.attributes."http.response.body.size", 0)
+              assert_eq!(.timestamp, t'2026-05-01T08:00:03Z')

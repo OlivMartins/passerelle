@@ -1,0 +1,115 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (HashiCorp hclog (Nomad, Vault, Consul))
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_vault_serveur:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « HashiCorp hclog (Nomad, Vault, Consul) »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^(?P<time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})) \[(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\] +(?:(?P<module>[A-Za-z0-9_.\-/]+): )?(?P<msg>[\s\S]*?)(?::? (?P<kv>[A-Za-z0-9_.\-]+=(?:"(?:[^"\\]|\\.)*"|\S*)(?: [A-Za-z0-9_.\-]+=(?:"(?:[^"\\]|\\.)*"|\S*))*))?\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « HashiCorp hclog (Nomad, Vault, Consul) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%Y-%m-%dT%H:%M:%S%.f%#z")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        niveau2 = string!(champs.level)
+        .log.level = niveau2
+        if champs.module != null {
+          .log.logger = champs.module
+        }
+        message3 = string!(champs.msg)
+        .message = message3
+        if champs.kv != null {
+          paires4 = parse_key_value(string!(champs.kv), field_delimiter: " ", key_value_delimiter: "=") ?? {}
+          . = merge(., { "labels": paires4 }, deep: true)
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_vault_serveur]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026-05-01T08:00:00.123Z [INFO]  core: successfully mounted:…'
+    inputs:
+      - insert_at: analyse_vault_serveur
+        type: log
+        log_fields:
+          message: '2026-05-01T08:00:00.123Z [INFO]  core: successfully mounted: type=kv version="v0.21.0+builtin" path=secret/ namespace="ID: root. Path: "'
+    outputs:
+      - extract_from: analyse_vault_serveur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T08:00:00.123Z [INFO]  core: successfully mounted: type=kv version=\"v0.21.0+builtin\" path=secret/ namespace=\"ID: root. Path: \"")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:00.123Z')
+              assert_eq!(.log.level, "INFO")
+              assert_eq!(.log.logger, "core")
+              assert_eq!(.message, "successfully mounted")
+              assert_eq!(.labels.type, "kv")
+              assert_eq!(.labels.version, "v0.21.0+builtin")
+              assert_eq!(.labels.path, "secret/")
+              assert_eq!(.labels.namespace, "ID: root. Path: ")
+  - name: 'reconnue : 2026-05-01T08:00:01.000Z [INFO]  core: vault is unsealed'
+    inputs:
+      - insert_at: analyse_vault_serveur
+        type: log
+        log_fields:
+          message: '2026-05-01T08:00:01.000Z [INFO]  core: vault is unsealed'
+    outputs:
+      - extract_from: analyse_vault_serveur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T08:00:01.000Z [INFO]  core: vault is unsealed")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:01Z')
+              assert_eq!(.log.level, "INFO")
+              assert_eq!(.log.logger, "core")
+              assert_eq!(.message, "vault is unsealed")
+  - name: 'reconnue : 2026-05-01T08:00:02.500Z [WARN]  core: leadership lost, stop…'
+    inputs:
+      - insert_at: analyse_vault_serveur
+        type: log
+        log_fields:
+          message: '2026-05-01T08:00:02.500Z [WARN]  core: leadership lost, stopping active operation'
+    outputs:
+      - extract_from: analyse_vault_serveur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T08:00:02.500Z [WARN]  core: leadership lost, stopping active operation")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:02.5Z')
+              assert_eq!(.log.level, "WARN")
+              assert_eq!(.log.logger, "core")
+              assert_eq!(.message, "leadership lost, stopping active operation")
+  - name: 'reconnue : 2026-05-01T08:00:03.750Z [ERROR] core: failed to acquire loc…'
+    inputs:
+      - insert_at: analyse_vault_serveur
+        type: log
+        log_fields:
+          message: '2026-05-01T08:00:03.750Z [ERROR] core: failed to acquire lock: error="context canceled"'
+    outputs:
+      - extract_from: analyse_vault_serveur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T08:00:03.750Z [ERROR] core: failed to acquire lock: error=\"context canceled\"")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:03.75Z')
+              assert_eq!(.log.level, "ERROR")
+              assert_eq!(.log.logger, "core")
+              assert_eq!(.message, "failed to acquire lock")
+              assert_eq!(.labels.error, "context canceled")

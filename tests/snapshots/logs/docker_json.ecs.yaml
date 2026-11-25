@@ -1,0 +1,82 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (JSON — Docker (pilote json-file))
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_docker_json:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « JSON — Docker (pilote json-file) »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      objet, erreur = parse_json(ligne)
+      if erreur != null || !is_object(objet) {
+        .error.message = "ligne non reconnue : un objet JSON attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        champs = flatten(object!(objet))
+        # Horodatage : clé "time"
+        if exists(champs."time") {
+          horodatage1, erreur_horodatage1 = parse_timestamp(string(champs."time") ?? "", "%Y-%m-%dT%H:%M:%S%.f%#z")
+          if erreur_horodatage1 == null {
+            ."@timestamp" = horodatage1
+            del(.timestamp)
+          }
+          del(champs."time")
+        }
+        # Message : clé "log"
+        if exists(champs."log") {
+          .message = strip_whitespace(string(champs."log") ?? "")
+          del(champs."log")
+        }
+        # Rôle stream : clé "stream"
+        if exists(champs."stream") {
+          .stream = champs."stream"
+          del(champs."stream")
+        }
+        # Les autres clés sont recopiées à la racine de l’événement
+        . = merge(., unflatten(champs), deep: true)
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_docker_json]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : {"log":"Serveur prêt sur le port 3000\n","stream":"stdout","…'
+    inputs:
+      - insert_at: analyse_docker_json
+        type: log
+        log_fields:
+          message: '{"log":"Serveur prêt sur le port 3000\n","stream":"stdout","time":"2026-05-01T10:00:00.123456789Z"}'
+    outputs:
+      - extract_from: analyse_docker_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "{\"log\":\"Serveur prêt sur le port 3000\\n\",\"stream\":\"stdout\",\"time\":\"2026-05-01T10:00:00.123456789Z\"}")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.123456789Z')
+              assert_eq!(.message, "Serveur prêt sur le port 3000")
+              assert_eq!(.stream, "stdout")
+  - name: 'reconnue : {"log":"Erreur : connexion Redis refusée\n","stream":"stderr…'
+    inputs:
+      - insert_at: analyse_docker_json
+        type: log
+        log_fields:
+          message: '{"log":"Erreur : connexion Redis refusée\n","stream":"stderr","time":"2026-05-01T10:00:01.000000001Z"}'
+    outputs:
+      - extract_from: analyse_docker_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "{\"log\":\"Erreur : connexion Redis refusée\\n\",\"stream\":\"stderr\",\"time\":\"2026-05-01T10:00:01.000000001Z\"}")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:01.000000001Z')
+              assert_eq!(.message, "Erreur : connexion Redis refusée")
+              assert_eq!(.stream, "stderr")

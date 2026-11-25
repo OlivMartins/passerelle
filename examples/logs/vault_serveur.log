@@ -1,0 +1,4 @@
+2026-05-01T08:00:00.123Z [INFO]  core: successfully mounted: type=kv version="v0.21.0+builtin" path=secret/ namespace="ID: root. Path: "
+2026-05-01T08:00:01.000Z [INFO]  core: vault is unsealed
+2026-05-01T08:00:02.500Z [WARN]  core: leadership lost, stopping active operation
+2026-05-01T08:00:03.750Z [ERROR] core: failed to acquire lock: error="context canceled"

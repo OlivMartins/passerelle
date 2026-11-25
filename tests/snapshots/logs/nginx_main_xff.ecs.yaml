@@ -1,0 +1,117 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Journal d’accès HTTP (combined ou common : nginx, Apache))
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_nginx_main_xff:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Journal d’accès HTTP (combined ou common : nginx, Apache) »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^(?P<client>\S+) (?P<ident>\S+) (?P<user>\S+) \[(?P<time>[^\]]+)\] "(?:(?P<method>[A-Z]+) (?P<path>[^\s?"]*)(?:\?(?P<query>[^\s"]*))?(?: (?P<protocol>[A-Za-z]+)/(?P<pver>[0-9.]+))?|(?P<request>(?:[^"\\]|\\.)*))" (?P<status>\d{3}) (?P<bytes>\d+|-)(?: "(?P<referrer>(?:[^"\\]|\\.)*)" "(?P<agent>(?:[^"\\]|\\.)*)"(?: "(?P<xff>(?:[^"\\]|\\.)*)")?)?(?: (?P<duration>\d+\.\d+))?\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Journal d’accès HTTP (combined ou common : nginx, Apache) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        .source.address = champs.client
+        if champs.user != "-" && champs.user != "" {
+          .user.name = champs.user
+        }
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%d/%b/%Y:%H:%M:%S%.f %z")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        if champs.method != null {
+          .http.request.method = champs.method
+        }
+        if champs.path != null {
+          .url.path = champs.path
+        }
+        if champs.query != null && champs.query != "-" && champs.query != "" {
+          .url.query = champs.query
+        }
+        if champs.protocol != null {
+          .network.protocol = downcase(string!(champs.protocol))
+        }
+        if champs.pver != null {
+          .http.version = champs.pver
+        }
+        if champs.request != null && champs.request != "-" && champs.request != "" {
+          .http.request.line = champs.request
+        }
+        .http.response.status_code = to_int(champs.status) ?? null
+        if champs.bytes != "-" && champs.bytes != "" {
+          .http.response.body.bytes = to_int(champs.bytes) ?? null
+        }
+        if champs.referrer != null && champs.referrer != "-" && champs.referrer != "" {
+          .http.request.referrer = champs.referrer
+        }
+        if champs.agent != null && champs.agent != "-" && champs.agent != "" {
+          .user_agent.original = champs.agent
+        }
+        if champs.xff != null && champs.xff != "-" && champs.xff != "" {
+          .network.forwarded_ip = champs.xff
+        }
+        if champs.duration != null {
+          .event.duration = to_int((to_float(champs.duration) ?? 0.0) * 1000000000.0)
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_nginx_main_xff]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 10.0.4.12 - - [01/May/2026:08:15:42 +0000] "GET /health HTTP…'
+    inputs:
+      - insert_at: analyse_nginx_main_xff
+        type: log
+        log_fields:
+          message: '10.0.4.12 - - [01/May/2026:08:15:42 +0000] "GET /health HTTP/1.1" 200 2 "-" "kube-probe/1.30" "-"'
+    outputs:
+      - extract_from: analyse_nginx_main_xff
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "10.0.4.12 - - [01/May/2026:08:15:42 +0000] \"GET /health HTTP/1.1\" 200 2 \"-\" \"kube-probe/1.30\" \"-\"")
+              assert_eq!(.source.address, "10.0.4.12")
+              assert_eq!(."@timestamp", t'2026-05-01T08:15:42Z')
+              assert_eq!(.http.request.method, "GET")
+              assert_eq!(.http.version, "1.1")
+              assert_eq!(.http.response.status_code, 200)
+              assert_eq!(.http.response.body.bytes, 2)
+              assert_eq!(.url.path, "/health")
+              assert_eq!(.network.protocol, "http")
+              assert_eq!(.user_agent.original, "kube-probe/1.30")
+  - name: 'reconnue : 10.0.4.13 - bob [01/May/2026:08:15:43 +0000] "GET /api/produ…'
+    inputs:
+      - insert_at: analyse_nginx_main_xff
+        type: log
+        log_fields:
+          message: '10.0.4.13 - bob [01/May/2026:08:15:43 +0000] "GET /api/produits/42 HTTP/1.1" 200 1290 "-" "curl/8.5.0" "203.0.113.77, 10.0.0.1"'
+    outputs:
+      - extract_from: analyse_nginx_main_xff
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "10.0.4.13 - bob [01/May/2026:08:15:43 +0000] \"GET /api/produits/42 HTTP/1.1\" 200 1290 \"-\" \"curl/8.5.0\" \"203.0.113.77, 10.0.0.1\"")
+              assert_eq!(.source.address, "10.0.4.13")
+              assert_eq!(.user.name, "bob")
+              assert_eq!(."@timestamp", t'2026-05-01T08:15:43Z')
+              assert_eq!(.http.request.method, "GET")
+              assert_eq!(.http.version, "1.1")
+              assert_eq!(.http.response.status_code, 200)
+              assert_eq!(.http.response.body.bytes, 1290)
+              assert_eq!(.url.path, "/api/produits/42")
+              assert_eq!(.network.protocol, "http")
+              assert_eq!(.network.forwarded_ip, "203.0.113.77, 10.0.0.1")
+              assert_eq!(.user_agent.original, "curl/8.5.0")

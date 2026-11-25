@@ -1,0 +1,91 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Go, paquet log standard)
+# Tests : vector test <fichier> rejoue les 3 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_go_std:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Go, paquet log standard »
+      # Écrit à partir d’un échantillon de 3 événements (3 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^(?P<time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) (?:(?P<file>[^\s:]+\.go):(?P<line>\d+): )?(?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Go, paquet log standard » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%Y/%m/%d %H:%M:%S%.f", timezone: "UTC")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        if champs.file != null {
+          .log.origin.file.name = champs.file
+        }
+        if champs.line != null {
+          .log.origin.file.line = to_int(champs.line) ?? null
+        }
+        message2 = string!(champs.msg)
+        .message = message2
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_go_std]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026/05/01 10:00:00 main.go:42: démarrage du serveur sur :80…'
+    inputs:
+      - insert_at: analyse_go_std
+        type: log
+        log_fields:
+          message: '2026/05/01 10:00:00 main.go:42: démarrage du serveur sur :8080'
+    outputs:
+      - extract_from: analyse_go_std
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026/05/01 10:00:00 main.go:42: démarrage du serveur sur :8080")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00Z')
+              assert_eq!(.log.origin.file.name, "main.go")
+              assert_eq!(.log.origin.file.line, 42)
+              assert_eq!(.message, "démarrage du serveur sur :8080")
+  - name: 'reconnue : 2026/05/01 10:00:01 handlers.go:117: requête GET /api/stock …'
+    inputs:
+      - insert_at: analyse_go_std
+        type: log
+        log_fields:
+          message: '2026/05/01 10:00:01 handlers.go:117: requête GET /api/stock traitée en 12ms'
+    outputs:
+      - extract_from: analyse_go_std
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026/05/01 10:00:01 handlers.go:117: requête GET /api/stock traitée en 12ms")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:01Z')
+              assert_eq!(.log.origin.file.name, "handlers.go")
+              assert_eq!(.log.origin.file.line, 117)
+              assert_eq!(.message, "requête GET /api/stock traitée en 12ms")
+  - name: 'reconnue : 2026/05/01 10:00:02 db.go:88: connexion à la base perdue, no…'
+    inputs:
+      - insert_at: analyse_go_std
+        type: log
+        log_fields:
+          message: '2026/05/01 10:00:02 db.go:88: connexion à la base perdue, nouvelle tentative dans 5s'
+    outputs:
+      - extract_from: analyse_go_std
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026/05/01 10:00:02 db.go:88: connexion à la base perdue, nouvelle tentative dans 5s")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:02Z')
+              assert_eq!(.log.origin.file.name, "db.go")
+              assert_eq!(.log.origin.file.line, 88)
+              assert_eq!(.message, "connexion à la base perdue, nouvelle tentative dans 5s")

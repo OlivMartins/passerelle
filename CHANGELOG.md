@@ -2,6 +2,30 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [1.9.0] - 2026-11-25
+
+### Ajouté
+
+- **Log vers Vector : d’un échantillon de journal à un pipeline VRL.** Nouvelle section de l’interface, juste sous « Requêtes » : on colle quelques lignes d’un journal (ou on dépose un fichier `.log`), Passerelle reconnaît le format, écrit le VRL qui découpe chaque ligne en champs typés et nommés, et une configuration Vector complète dont les tests unitaires rejouent les lignes de l’échantillon. Le guide : [docs/LOG-VERS-VECTOR.md](docs/LOG-VERS-VECTOR.md).
+  - **Formats reconnus** : accès HTTP `combined` et `common` (nginx, Apache, avec `X-Forwarded-For` et durée), erreurs nginx et Apache, Java (Logback, Log4j 2, Spring Boot), Python (`logging`, `basicConfig`, Gunicorn), Go (`log`, klog et glog, zap en console), Elasticsearch 7 et antérieurs, Kafka, ClickHouse, hclog (Nomad, Vault, Consul), syslog BSD (`/var/log/messages`, `auth.log`, `kern.log`), RFC 5424 et ISO 8601 (rsyslog, `journalctl -o short-iso`), `dmesg`, auditd, JSON (Elasticsearch 8 et ECS, zap, slog, pino, Logback, python-json-logger, hclog, audit de Vault, ClickHouse, `journalctl -o json`, Docker `json-file`) et logfmt. Le format qui lit le plus de lignes l’emporte ; un menu l’impose quand la détection hésite. Un repli lit l’horodatage et le niveau en tête (« à vérifier ») ; un journal qu’aucun format ne lit est « à reprendre ».
+  - **Des champs pertinents** : statut et taille en entiers, chemin et chaîne de requête séparés, horodatages convertis en UTC (le fuseau des dates sans fuseau se choisit, UTC par défaut ; l’année manquante du syslog BSD et de klog est celle du jour), niveau et numéro de sévérité, traces de pile Java et Python rattachées à leur événement et lues en exception (type, message, trace), connexions `sshd` et commandes `sudo` détaillées, horloge du noyau, messages structurés de klog, paires clé=valeur de hclog, champs JSON de zap.
+  - **Deux conventions de nommage** : OpenTelemetry (par défaut), dans la forme des événements de la source `opentelemetry` de Vector (attributs et ressources à clés pointées, comme `LogAttributes` et `ResourceAttributes` de ClickStack), ou ECS, en objets imbriqués.
+  - **Rien de faux annoncé comme juste** : une ligne d’un autre format traverse le pipeline, marquée (`log.parse.error`, ou `_vrl_parse_failure` en ECS), et compte « à vérifier ». Chaque ligne de l’échantillon devient un test de `vector test` (douze au plus) qui vérifie chaque valeur annoncée. Les traces de pile sont regroupées par la source `file` (`multiline`) de la configuration.
+  - **Onglets** : VRL, Champs (nom, type, exemple, nombre d’événements), Aperçu (l’événement que Vector produira pour chaque ligne), Configuration (YAML ou TOML), Remarques, Valider. L’archive téléchargée contient la configuration, le VRL, l’échantillon et ses événements au format de `vector vrl`.
+  - **API et ligne de commande** : `POST /v1/translate/log` (`convention`, `timezone`, `log_format`, `name`, `keep_original`, `format`) et `passerelle log2vector <journal.log|dossier>... [--convention otel|ecs] [--timezone FUSEAU] [--log-format FORMAT] [--no-original] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review]`.
+- **Échantillons de journaux** (`examples/logs/`, trente-quatre fichiers) : applicatifs (nginx, Apache, Java, Python, Go, Node.js, Docker), briques de la plateforme (Elasticsearch, Kafka, ClickHouse, Nomad, Vault, collecteur OpenTelemetry) et Linux (syslog, noyau, journald, auditd). Dix sont proposés par le menu d’exemples de la section.
+- **Bancs de tests** : `npm test` vérifie, pour chaque échantillon et chaque convention, le format reconnu, le nombre d’événements et des champs attendus écrits à la main (`tests/logs/cases.mjs`), et compare la configuration générée à son instantané (`tests/snapshots/logs/`). `npm run test:logs` (avec `VECTOR_BIN`) passe `vector test` sur chaque configuration, en YAML et en TOML, puis exige que chaque événement produit par Vector soit exactement celui que Passerelle annonce, types compris. La CI le joue dans le job `ingest`, avec Vector 0.59.0.
+- **GIF de démonstration rejouable** : `npm run demo` (`scripts/demo.mjs`, Playwright et ffmpeg) régénère `docs/assets/demo-light.gif` et `demo-dark.gif`.
+
+### Modifié
+
+- **GIF de démonstration du README** : régénéré sur la 1.9.0. Il montrait encore l’effort estimé de l’inventaire Kibana, retiré en 1.8.0 ; il passe maintenant par « Log vers Vector » (un journal Java déposé, son fuseau, ses champs, l’exception lue dans la trace de pile).
+- **Interface** : la navigation compte sept sections ; un onglet qu’on ouvre s’affiche en haut, et non plus à la position de défilement de l’onglet précédent.
+
+### Corrigé
+
+- **Chaînes sur plusieurs lignes des configurations générées** : une valeur YAML ou TOML sans saut de ligne final en recevait un (`|` au lieu de `|-`, `'''` refermé à la ligne suivante). Aucune sortie existante n’était concernée (le code VRL se termine toujours par un saut de ligne) ; les messages d’essai des tests unitaires, qui le sont, gardent ainsi leur valeur exacte. Une valeur dont la première ligne commence par une espace reçoit l’indentation explicite qu’exige YAML.
+
 ## [1.8.0] - 2026-11-25
 
 ### Modifié

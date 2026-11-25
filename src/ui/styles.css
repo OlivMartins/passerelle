@@ -194,6 +194,10 @@ select.btn { padding-right: 30px; appearance: none; background-image: linear-gra
 .tw td { font-variant-numeric: tabular-nums; }
 .tw .n { text-align: right; }
 .tw td.n { white-space: nowrap; }
+.tw td.ex { max-width: 30ch; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12.5px; }
+.tw small.kind { color: var(--ink-2); font-size: 11.5px; }
+.code.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+.stmt-head .verdict-chip { margin-right: 8px; }
 
 /* ---------- Kibana : objets de l’export à gauche, requêtes à droite ---------- */
 .kb-browse { flex: 1; min-height: 0; display: flex; flex-direction: column; }

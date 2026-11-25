@@ -210,9 +210,29 @@ Vector refuse la configuration entière si un seul VRL ne compile pas, quel que 
 
 La CI joue ce banc dans le job `ingest`, avec Vector 0.59.0 et des clones épinglés des intégrations Elastic et de MaxMind-DB.
 
+## Banc « Log vers Vector » : `npm run test:logs`
+
+Les échantillons de `examples/logs/` (une trentaine de journaux : nginx, Apache, Java, Python, Go, Elasticsearch, Kafka, ClickHouse, Nomad, Vault, collecteur OpenTelemetry, syslog, noyau, journald, auditd, Docker…) sont à la fois les exemples de l’interface et le corpus du banc. `tests/logs/cases.mjs` donne, pour chacun, le format que Passerelle doit reconnaître, le nombre d’événements, et des champs attendus dans les deux conventions, écrits à la main d’après la ligne.
+
+Sans Vector, `npm test` vérifie ces attentes et compare chaque configuration générée à son instantané (`tests/snapshots/logs/`). Avec Vector, `tests/logs/vector.mjs` éprouve, pour chaque échantillon et chaque convention :
+
+- `vector test` sur la configuration générée, en YAML puis en TOML : les tests unitaires qu’elle contient rejouent les lignes et vérifient chaque champ annoncé ; un avertissement de compilation du VRL est une erreur ;
+- l’égalité complète : un second jeu de tests exige que chaque événement produit par Vector soit exactement celui que Passerelle prédit (`assert_eq!(., …)`), types compris ; un champ en trop ou en moins est un écart, ce que les tests unitaires ne voient pas.
+
+```sh
+VECTOR_BIN=vector npm run test:logs                  # tous les échantillons, OpenTelemetry et ECS
+VECTOR_BIN=vector node tests/logs/vector.mjs --only='nginx|syslog' --jobs=2
+```
+
+Sans Vector, le banc est ignoré (sortie 0) ; `npm run test:logs` passe `--require` et échoue. La CI le joue dans le job `ingest`, avec Vector 0.59.0.
+
+### Ajouter un échantillon
+
+Un fichier dans `examples/logs/`, son cas dans `tests/logs/cases.mjs` (`npm test` refuse l’un sans l’autre), puis `npm run test:update` pour son instantané. Le guide [docs/LOG-VERS-VECTOR.md](../docs/LOG-VERS-VECTOR.md) dit, échantillon par échantillon, ce qu’il faut regarder dans le pipeline produit.
+
 ## Interface : `npm run test:ui`
 
-Ouvre `dist/passerelle.html` dans Chromium avec Playwright : la section requête, les deux outils d’« Ingestion » (Elasticsearch et Logstash, avec la topologie de ce dernier) et chaque outil d’« Autres sources » (Kibana, Grafana, Watcher, schéma, analyseurs), traduisent leur exemple et affichent un verdict, leurs onglets s’ouvrent ; la navigation compte six sections ; dans l’outil Kibana, un panneau choisi montre son SQL, un export ouvert par le sélecteur de fichiers remplace l’exemple et un second s’y ajoute ; des watches, un export Kibana ou un pipeline Logstash déposés sur une autre section vont à leur outil, et le menu d’exemples suit l’outil ; une vue « kibana » ou « ls » mémorisée par une ancienne version mène à l’outil Kibana ou à l’outil Logstash ; sur un écran de téléphone, rien ne déborde ; et la page ne produit aucune erreur. Playwright n’est pas une dépendance du projet : `npm run build:ui`, puis `npm install --no-save playwright` et `npx playwright install chromium` (ou `PLAYWRIGHT_FROM=<dossier où playwright se résout>`). La CI joue ce test dans le job `interface`.
+Ouvre `dist/passerelle.html` dans Chromium avec Playwright : la section requête, « Log vers Vector » (juste sous « Requêtes » : l’exemple nginx reconnu et prêt, ses six onglets, la trace de pile Java rattachée en ECS), les deux outils d’« Ingestion » (Elasticsearch et Logstash, avec la topologie de ce dernier) et chaque outil d’« Autres sources » (Kibana, Grafana, Watcher, schéma, analyseurs), traduisent leur exemple et affichent un verdict, leurs onglets s’ouvrent ; la navigation compte sept sections ; dans l’outil Kibana, un panneau choisi montre son SQL, un export ouvert par le sélecteur de fichiers remplace l’exemple et un second s’y ajoute ; des watches, un export Kibana ou un pipeline Logstash déposés sur une autre section vont à leur outil, et le menu d’exemples suit l’outil ; une vue « kibana » ou « ls » mémorisée par une ancienne version mène à l’outil Kibana ou à l’outil Logstash ; sur un écran de téléphone, rien ne déborde ; et la page ne produit aucune erreur. Playwright n’est pas une dépendance du projet : `npm run build:ui`, puis `npm install --no-save playwright` et `npx playwright install chromium` (ou `PLAYWRIGHT_FROM=<dossier où playwright se résout>`). La CI joue ce test dans le job `interface`.
 
 ## Bancs ClickHouse : `npm run test:attributes` et `npm run test:clickhouse`
 

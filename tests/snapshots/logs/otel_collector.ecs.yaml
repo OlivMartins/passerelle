@@ -1,0 +1,127 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Go zap, format console (collecteur OpenTelemetry…))
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_otel_collector:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Go zap, format console (collecteur OpenTelemetry…) »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^(?P<time>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2}))\t(?P<level>[a-zA-Z]+)\t(?:(?P<caller>[^\t]+:\d+)\t)?(?P<msg>[^\t]*)(?:\t(?P<fields>\{[\s\S]*\}))?\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Go zap, format console (collecteur OpenTelemetry…) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%Y-%m-%dT%H:%M:%S%.f%#z")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        niveau2 = string!(champs.level)
+        .log.level = niveau2
+        if champs.caller != null {
+          appelant3 = parse_regex(string!(champs.caller), r'^(?P<fichier>.+):(?P<ligne>\d+)\z') ?? {}
+          .log.origin.file.name = appelant3.fichier
+          .log.origin.file.line = to_int(appelant3.ligne) ?? null
+        }
+        message4 = string!(champs.msg)
+        .message = message4
+        if champs.fields != null {
+          objet5 = object(parse_json(string!(champs.fields)) ?? {}) ?? {}
+          . = merge(., { "labels": flatten(objet5) }, deep: true)
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_otel_collector]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026-05-01T10:00:00.123Z	info	service@v0.120.0/service.go:18…'
+    inputs:
+      - insert_at: analyse_otel_collector
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:00.123Z	info	service@v0.120.0/service.go:186	Starting otelcol-contrib...	{"Version": "0.120.0", "NumCPU": 8}'
+    outputs:
+      - extract_from: analyse_otel_collector
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T10:00:00.123Z\tinfo\tservice@v0.120.0/service.go:186\tStarting otelcol-contrib...\t{\"Version\": \"0.120.0\", \"NumCPU\": 8}")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.123Z')
+              assert_eq!(.log.level, "info")
+              assert_eq!(.log.origin.file.name, "service@v0.120.0/service.go")
+              assert_eq!(.log.origin.file.line, 186)
+              assert_eq!(.message, "Starting otelcol-contrib...")
+              assert_eq!(.labels.Version, "0.120.0")
+              assert_eq!(.labels.NumCPU, 8)
+  - name: 'reconnue : 2026-05-01T10:00:00.456Z	info	extensions/extensions.go:39	St…'
+    inputs:
+      - insert_at: analyse_otel_collector
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:00.456Z	info	extensions/extensions.go:39	Starting extensions...'
+    outputs:
+      - extract_from: analyse_otel_collector
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T10:00:00.456Z\tinfo\textensions/extensions.go:39\tStarting extensions...")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.456Z')
+              assert_eq!(.log.level, "info")
+              assert_eq!(.log.origin.file.name, "extensions/extensions.go")
+              assert_eq!(.log.origin.file.line, 39)
+              assert_eq!(.message, "Starting extensions...")
+  - name: 'reconnue : 2026-05-01T10:00:05.789Z	warn	batchprocessor@v0.120.0/batch_…'
+    inputs:
+      - insert_at: analyse_otel_collector
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:05.789Z	warn	batchprocessor@v0.120.0/batch_processor.go:263	Sender failed	{"kind": "processor", "name": "batch", "pipeline": "logs", "error": "sending queue is full"}'
+    outputs:
+      - extract_from: analyse_otel_collector
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T10:00:05.789Z\twarn\tbatchprocessor@v0.120.0/batch_processor.go:263\tSender failed\t{\"kind\": \"processor\", \"name\": \"batch\", \"pipeline\": \"logs\", \"error\": \"sending queue is full\"}")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:05.789Z')
+              assert_eq!(.log.level, "warn")
+              assert_eq!(.log.origin.file.name, "batchprocessor@v0.120.0/batch_processor.go")
+              assert_eq!(.log.origin.file.line, 263)
+              assert_eq!(.message, "Sender failed")
+              assert_eq!(.labels.kind, "processor")
+              assert_eq!(.labels.name, "batch")
+              assert_eq!(.labels.pipeline, "logs")
+              assert_eq!(.labels.error, "sending queue is full")
+  - name: 'reconnue : 2026-05-01T10:00:06.001Z	error	exporterhelper/queue_sender.g…'
+    inputs:
+      - insert_at: analyse_otel_collector
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:06.001Z	error	exporterhelper/queue_sender.go:128	Exporting failed. Dropping data.	{"kind": "exporter", "data_type": "logs", "name": "clickhouse", "error": "dial tcp 10.0.3.7:9000: connect: connection refused", "dropped_items": 512}'
+    outputs:
+      - extract_from: analyse_otel_collector
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T10:00:06.001Z\terror\texporterhelper/queue_sender.go:128\tExporting failed. Dropping data.\t{\"kind\": \"exporter\", \"data_type\": \"logs\", \"name\": \"clickhouse\", \"error\": \"dial tcp 10.0.3.7:9000: connect: connection refused\", \"dropped_items\": 512}")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:06.001Z')
+              assert_eq!(.log.level, "error")
+              assert_eq!(.log.origin.file.name, "exporterhelper/queue_sender.go")
+              assert_eq!(.log.origin.file.line, 128)
+              assert_eq!(.message, "Exporting failed. Dropping data.")
+              assert_eq!(.labels.kind, "exporter")
+              assert_eq!(.labels.data_type, "logs")
+              assert_eq!(.labels.name, "clickhouse")
+              assert_eq!(.labels.error, "dial tcp 10.0.3.7:9000: connect: connection refused")
+              assert_eq!(.labels.dropped_items, 512)

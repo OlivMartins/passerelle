@@ -1,0 +1,118 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (JSON — Go zap)
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_go_zap_json:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « JSON — Go zap »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      ligne = string(.message) ?? ""
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      objet, erreur = parse_json(ligne)
+      if erreur != null || !is_object(objet) {
+        .attributes."log.parse.error" = "ligne non reconnue : un objet JSON attendu"
+      } else {
+        .attributes."log.record.original" = ligne
+        champs = flatten(object!(objet))
+        # Horodatage : clé "ts"
+        if exists(champs."ts") {
+          horodatage1, erreur_horodatage1 = from_unix_timestamp(to_int((to_float(champs."ts") ?? 0.0) * 1000000.0), unit: "microseconds")
+          if erreur_horodatage1 == null {
+            .timestamp = horodatage1
+          }
+          del(champs."ts")
+        }
+        # Niveau : clé "level"
+        if exists(champs."level") {
+          niveau2 = string(champs."level") ?? ""
+          .severity_text = niveau2
+          niveau_min3 = downcase(niveau2)
+          .severity_number = if includes(["trace", "finest", "finer", "trace1", "trace2", "trace3", "trace4", "trace5", "trace6", "trace7", "trace8"], niveau_min3) { 1 } else if includes(["debug", "fine", "dbg", "config", "verbose"], niveau_min3) { 5 } else if includes(["info", "information", "informational"], niveau_min3) { 9 } else if includes(["notice"], niveau_min3) { 10 } else if includes(["warn", "warning"], niveau_min3) { 13 } else if includes(["error", "err", "severe"], niveau_min3) { 17 } else if includes(["fatal", "critical", "crit", "alert", "emerg", "emergency", "panic", "dpanic"], niveau_min3) { 21 } else { 0 }
+          del(champs."level")
+        }
+        # Message : clé "msg"
+        if exists(champs."msg") {
+          .message = champs."msg"
+          del(champs."msg")
+        }
+        # Rôle caller : clé "caller"
+        if exists(champs."caller") {
+          appelant4 = parse_regex(string(champs."caller") ?? "", r'^(?P<fichier>.+):(?P<ligne>\d+)\z') ?? {}
+          .attributes."code.file.path" = appelant4.fichier
+          .attributes."code.line.number" = to_int(appelant4.ligne) ?? null
+          del(champs."caller")
+        }
+        # Rôle exc_message : clé "error"
+        if exists(champs."error") {
+          .attributes."exception.message" = champs."error"
+          del(champs."error")
+        }
+        # Rôle exc_stack : clé "stacktrace"
+        if exists(champs."stacktrace") {
+          .attributes."exception.stacktrace" = champs."stacktrace"
+          del(champs."stacktrace")
+        }
+        # Les autres clés deviennent des attributs
+        .attributes = merge(.attributes, champs)
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_go_zap_json]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : {"level":"info","ts":1777622400.1234567,"caller":"server/htt…'
+    inputs:
+      - insert_at: analyse_go_zap_json
+        type: log
+        log_fields:
+          message: '{"level":"info","ts":1777622400.1234567,"caller":"server/http.go:58","msg":"requête traitée","method":"GET","path":"/api/stock","status":200,"duration":0.0123}'
+    outputs:
+      - extract_from: analyse_go_zap_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "{\"level\":\"info\",\"ts\":1777622400.1234567,\"caller\":\"server/http.go:58\",\"msg\":\"requête traitée\",\"method\":\"GET\",\"path\":\"/api/stock\",\"status\":200,\"duration\":0.0123}")
+              assert_eq!(.attributes."code.file.path", "server/http.go")
+              assert_eq!(.attributes."code.line.number", 58)
+              assert_eq!(.attributes."method", "GET")
+              assert_eq!(.attributes."path", "/api/stock")
+              assert_eq!(.attributes."status", 200)
+              assert_eq!(.attributes."duration", 0.0123)
+              assert_eq!(.timestamp, t'2026-05-01T08:00:00.123456Z')
+              assert_eq!(.severity_text, "info")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.message, "requête traitée")
+  - name: 'reconnue : {"level":"error","ts":1777622401.5,"caller":"server/http.go:…'
+    inputs:
+      - insert_at: analyse_go_zap_json
+        type: log
+        log_fields:
+          message: '{"level":"error","ts":1777622401.5,"caller":"server/http.go:61","msg":"requête en erreur","method":"POST","path":"/api/paiement","status":502,"error":"upstream indisponible","stacktrace":"main.handler\n\t/app/server/http.go:61"}'
+    outputs:
+      - extract_from: analyse_go_zap_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "{\"level\":\"error\",\"ts\":1777622401.5,\"caller\":\"server/http.go:61\",\"msg\":\"requête en erreur\",\"method\":\"POST\",\"path\":\"/api/paiement\",\"status\":502,\"error\":\"upstream indisponible\",\"stacktrace\":\"main.handler\\n\\t/app/server/http.go:61\"}")
+              assert_eq!(.attributes."code.file.path", "server/http.go")
+              assert_eq!(.attributes."code.line.number", 61)
+              assert_eq!(.attributes."exception.message", "upstream indisponible")
+              assert_eq!(.attributes."exception.stacktrace", "main.handler\n\t/app/server/http.go:61")
+              assert_eq!(.attributes."method", "POST")
+              assert_eq!(.attributes."path", "/api/paiement")
+              assert_eq!(.attributes."status", 502)
+              assert_eq!(.timestamp, t'2026-05-01T08:00:01.5Z')
+              assert_eq!(.severity_text, "error")
+              assert_eq!(.severity_number, 17)
+              assert_eq!(.message, "requête en erreur")

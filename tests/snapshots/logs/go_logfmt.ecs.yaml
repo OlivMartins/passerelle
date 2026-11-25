@@ -1,0 +1,116 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (logfmt (clé=valeur))
+# Tests : vector test <fichier> rejoue les 3 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_go_logfmt:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « logfmt (clé=valeur) »
+      # Écrit à partir d’un échantillon de 3 événements (3 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      objet, erreur = parse_logfmt(ligne)
+      if erreur != null {
+        .error.message = "ligne non reconnue : des paires clé=valeur (logfmt) attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        champs = objet
+        # Horodatage : clé "time"
+        if exists(champs."time") {
+          horodatage1, erreur_horodatage1 = parse_timestamp(string(champs."time") ?? "", "%Y-%m-%dT%H:%M:%S%.f%#z")
+          if erreur_horodatage1 == null {
+            ."@timestamp" = horodatage1
+            del(.timestamp)
+          }
+          del(champs."time")
+        }
+        # Niveau : clé "level"
+        if exists(champs."level") {
+          niveau2 = string(champs."level") ?? ""
+          .log.level = niveau2
+          del(champs."level")
+        }
+        # Message : clé "msg"
+        if exists(champs."msg") {
+          .message = champs."msg"
+          del(champs."msg")
+        }
+        # Rôle trace_id : clé "trace_id"
+        if exists(champs."trace_id") {
+          .trace.id = champs."trace_id"
+          del(champs."trace_id")
+        }
+        # Rôle exc_message : clé "err"
+        if exists(champs."err") {
+          .error.message = champs."err"
+          del(champs."err")
+        }
+        # Les autres clés sont recopiées à la racine de l’événement
+        . = merge(., unflatten(champs), deep: true)
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_go_logfmt]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : time=2026-05-01T10:00:00.000+02:00 level=INFO msg="serveur d…'
+    inputs:
+      - insert_at: analyse_go_logfmt
+        type: log
+        log_fields:
+          message: time=2026-05-01T10:00:00.000+02:00 level=INFO msg="serveur démarré" addr=:8080 version=1.4.2
+    outputs:
+      - extract_from: analyse_go_logfmt
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "time=2026-05-01T10:00:00.000+02:00 level=INFO msg=\"serveur démarré\" addr=:8080 version=1.4.2")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:00Z')
+              assert_eq!(.log.level, "INFO")
+              assert_eq!(.message, "serveur démarré")
+              assert_eq!(.addr, ":8080")
+              assert_eq!(.version, "1.4.2")
+  - name: 'reconnue : time=2026-05-01T10:00:01.250+02:00 level=WARN msg="latence é…'
+    inputs:
+      - insert_at: analyse_go_logfmt
+        type: log
+        log_fields:
+          message: time=2026-05-01T10:00:01.250+02:00 level=WARN msg="latence élevée" route=/api/stock duree_ms=812 tentative=2
+    outputs:
+      - extract_from: analyse_go_logfmt
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "time=2026-05-01T10:00:01.250+02:00 level=WARN msg=\"latence élevée\" route=/api/stock duree_ms=812 tentative=2")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:01.25Z')
+              assert_eq!(.log.level, "WARN")
+              assert_eq!(.message, "latence élevée")
+              assert_eq!(.route, "/api/stock")
+              assert_eq!(.duree_ms, "812")
+              assert_eq!(.tentative, "2")
+  - name: 'reconnue : time=2026-05-01T10:00:02.500+02:00 level=ERROR msg="échec de…'
+    inputs:
+      - insert_at: analyse_go_logfmt
+        type: log
+        log_fields:
+          message: time=2026-05-01T10:00:02.500+02:00 level=ERROR msg="échec de la requête" route=/api/paiement err="context deadline exceeded" trace_id=4bf92f3577b34da6a3ce929d0e0e4736
+    outputs:
+      - extract_from: analyse_go_logfmt
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "time=2026-05-01T10:00:02.500+02:00 level=ERROR msg=\"échec de la requête\" route=/api/paiement err=\"context deadline exceeded\" trace_id=4bf92f3577b34da6a3ce929d0e0e4736")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:02.5Z')
+              assert_eq!(.log.level, "ERROR")
+              assert_eq!(.message, "échec de la requête")
+              assert_eq!(.trace.id, "4bf92f3577b34da6a3ce929d0e0e4736")
+              assert_eq!(.error.message, "context deadline exceeded")
+              assert_eq!(.route, "/api/paiement")

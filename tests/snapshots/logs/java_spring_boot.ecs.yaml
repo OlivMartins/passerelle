@@ -1,0 +1,128 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Java Spring Boot (format par défaut))
+# Tests : vector test <fichier> rejoue les 3 lignes de l’échantillon et vérifie chaque champ
+# Essai : placez l’échantillon dans ./echantillon.log, créez /var/lib/vector, puis vector --config <fichier>
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+data_dir: /var/lib/vector
+sources:
+  journaux:
+    type: file
+    include: [./echantillon.log]
+    read_from: beginning
+    multiline:
+      start_pattern: '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
+      mode: halt_before
+      condition_pattern: '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}'
+      timeout_ms: 1000
+transforms:
+  analyse_java_spring_boot:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Java Spring Boot (format par défaut) »
+      # Écrit à partir d’un échantillon de 3 événements (3 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^(?P<time>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[.,]\d+(?:Z|[+-]\d{2}:?\d{2})?) +(?P<level>TRACE|DEBUG|INFO|WARN|ERROR|FATAL) +(?P<pid>\d+) +--- +(?:\[(?P<app>[^\]]*)\] +)?\[ *(?P<thread>[^\]]*?) *\] +(?P<logger>\S+) +: (?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Java Spring Boot (format par défaut) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%Y-%m-%dT%H:%M:%S%.f%#z")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        niveau2 = string!(champs.level)
+        .log.level = niveau2
+        .process.pid = to_int(champs.pid) ?? null
+        if champs.app != null && champs.app != "-" && champs.app != "" {
+          .service.name = champs.app
+        }
+        .process.thread.name = champs.thread
+        .log.logger = champs.logger
+        lignes4 = split(string!(champs.msg), "\n", limit: 2)
+        message3 = string(lignes4[0]) ?? ""
+        .message = message3
+        if length(lignes4) > 1 {
+          trace5 = string(lignes4[1]) ?? ""
+          .error.stack_trace = trace5
+          exception6, exception_erreur6 = parse_regex(trace5, r'(?m)^(?:Caused by: )?(?P<type>(?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*(?:Exception|Error|Throwable|Interrupt|Exit))(?::[ \t]*(?P<message>.*))?')
+          if exception_erreur6 == null {
+            .error.type = exception6.type
+            if exception6.message != null {
+              .error.message = exception6.message
+            }
+          }
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_java_spring_boot]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 2026-05-01T10:00:00.123+02:00  INFO 4321 --- [boutique] [   …'
+    inputs:
+      - insert_at: analyse_java_spring_boot
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:00.123+02:00  INFO 4321 --- [boutique] [           main] c.e.boutique.BoutiqueApplication         : Started BoutiqueApplication in 3.512 seconds (process running for 3.9)'
+    outputs:
+      - extract_from: analyse_java_spring_boot
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T10:00:00.123+02:00  INFO 4321 --- [boutique] [           main] c.e.boutique.BoutiqueApplication         : Started BoutiqueApplication in 3.512 seconds (process running for 3.9)")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:00.123Z')
+              assert_eq!(.log.level, "INFO")
+              assert_eq!(.log.logger, "c.e.boutique.BoutiqueApplication")
+              assert_eq!(.process.pid, 4321)
+              assert_eq!(.process.thread.name, "main")
+              assert_eq!(.service.name, "boutique")
+              assert_eq!(.message, "Started BoutiqueApplication in 3.512 seconds (process running for 3.9)")
+  - name: 'reconnue : 2026-05-01T10:00:05.001+02:00  WARN 4321 --- [boutique] [nio…'
+    inputs:
+      - insert_at: analyse_java_spring_boot
+        type: log
+        log_fields:
+          message: '2026-05-01T10:00:05.001+02:00  WARN 4321 --- [boutique] [nio-8080-exec-2] o.s.w.s.PageNotFound                     : No mapping for GET /favicon.ico'
+    outputs:
+      - extract_from: analyse_java_spring_boot
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T10:00:05.001+02:00  WARN 4321 --- [boutique] [nio-8080-exec-2] o.s.w.s.PageNotFound                     : No mapping for GET /favicon.ico")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:05.001Z')
+              assert_eq!(.log.level, "WARN")
+              assert_eq!(.log.logger, "o.s.w.s.PageNotFound")
+              assert_eq!(.process.pid, 4321)
+              assert_eq!(.process.thread.name, "nio-8080-exec-2")
+              assert_eq!(.service.name, "boutique")
+              assert_eq!(.message, "No mapping for GET /favicon.ico")
+  - name: 'reconnue : 2026-05-01T10:00:09.777+02:00 ERROR 4321 --- [boutique] [nio…'
+    inputs:
+      - insert_at: analyse_java_spring_boot
+        type: log
+        log_fields:
+          message: |-
+            2026-05-01T10:00:09.777+02:00 ERROR 4321 --- [boutique] [nio-8080-exec-4] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : Servlet.service() for servlet [dispatcherServlet] threw exception
+            java.lang.NullPointerException: Cannot invoke "String.length()" because "nom" is null
+            	at com.example.boutique.web.ClientController.creer(ClientController.java:27)
+    outputs:
+      - extract_from: analyse_java_spring_boot
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "2026-05-01T10:00:09.777+02:00 ERROR 4321 --- [boutique] [nio-8080-exec-4] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : Servlet.service() for servlet [dispatcherServlet] threw exception\njava.lang.NullPointerException: Cannot invoke \"String.length()\" because \"nom\" is null\n\tat com.example.boutique.web.ClientController.creer(ClientController.java:27)")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:09.777Z')
+              assert_eq!(.log.level, "ERROR")
+              assert_eq!(.log.logger, "o.a.c.c.C.[.[.[/].[dispatcherServlet]")
+              assert_eq!(.process.pid, 4321)
+              assert_eq!(.process.thread.name, "nio-8080-exec-4")
+              assert_eq!(.service.name, "boutique")
+              assert_eq!(.message, "Servlet.service() for servlet [dispatcherServlet] threw exception")
+              assert_eq!(.error.stack_trace, "java.lang.NullPointerException: Cannot invoke \"String.length()\" because \"nom\" is null\n\tat com.example.boutique.web.ClientController.creer(ClientController.java:27)")
+              assert_eq!(.error.type, "java.lang.NullPointerException")
+              assert_eq!(.error.message, "Cannot invoke \"String.length()\" because \"nom\" is null")

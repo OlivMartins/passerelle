@@ -1,0 +1,2 @@
+{"level":"info","ts":1777622400.1234567,"caller":"server/http.go:58","msg":"requête traitée","method":"GET","path":"/api/stock","status":200,"duration":0.0123}
+{"level":"error","ts":1777622401.5,"caller":"server/http.go:61","msg":"requête en erreur","method":"POST","path":"/api/paiement","status":502,"error":"upstream indisponible","stacktrace":"main.handler\n\t/app/server/http.go:61"}

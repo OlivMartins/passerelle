@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.8.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.8.0"></a>
+  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.9.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.9.0"></a>
   <a href="https://github.com/OlivMartins/passerelle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/OlivMartins/passerelle/ci.yml?branch=main&style=flat-square&label=tests&labelColor=1B2A33" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache%202.0-1E7A68?style=flat-square&labelColor=1B2A33" alt="Licence Apache 2.0"></a>
   <img src="https://img.shields.io/badge/Linux-x86__64-53636B?style=flat-square&labelColor=1B2A33" alt="Linux x86_64">
@@ -31,7 +31,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/demo-dark.gif">
-  <img src="docs/assets/demo-light.gif" width="100%" alt="Démonstration : un fichier de requête déposé dans Passerelle est traduit instantanément en SQL ClickHouse, avec remarques d’optimisation et lecture en langage clair ; puis, dans « Ingestion », la topologie d’un pipeline Logstash traduit pour Vector (le sélecteur passe des pipelines Elasticsearch à ceux de Logstash), et, dans « Autres sources », un export Kibana dont chaque panneau donne ses requêtes SQL">
+  <img src="docs/assets/demo-light.gif" width="100%" alt="Démonstration : un fichier de requête déposé dans Passerelle est traduit instantanément en SQL ClickHouse, avec remarques d’optimisation et lecture en langage clair ; puis, dans « Log vers Vector », un journal Java déposé devient un pipeline VRL, ses champs et l’événement produit, trace de pile comprise ; dans « Ingestion », la topologie d’un pipeline Logstash traduit pour Vector ; et, dans « Autres sources », un export Kibana dont chaque panneau donne ses requêtes SQL">
 </picture>
 
 <br>
@@ -263,6 +263,21 @@ transforms:
 
 </details>
 
+## Un journal, son pipeline VRL
+
+Pas de pipeline Logstash à traduire, seulement des journaux ? Collez quelques lignes dans la section **Log vers Vector** : Passerelle reconnaît le format, écrit le VRL qui découpe chaque ligne en champs typés, nommés selon **OpenTelemetry** ou **ECS**, et une configuration Vector dont les tests unitaires rejouent vos lignes.
+
+- **Une vingtaine de formats reconnus** : accès et erreurs nginx et Apache, Java (Logback, Log4j 2, Spring Boot), Python (logging, Gunicorn), Go (log, klog, zap), Elasticsearch, Kafka, ClickHouse, Nomad, Vault et Consul (hclog), le collecteur OpenTelemetry, syslog BSD et RFC 5424, journald, `dmesg`, auditd, JSON (ECS, zap, pino, Logback, journald, Docker, audit de Vault…) et logfmt. Un repli lit l’horodatage et le niveau de ce qui reste.
+- **Des champs pertinents**, pas une ligne coupée en morceaux : statut et taille en entiers, chemin et chaîne de requête séparés, horodatage converti en UTC, niveau et numéro de sévérité, traces de pile Java et Python rattachées à leur événement et lues en exception, connexions `sshd` et commandes `sudo` détaillées.
+- **Vérifiable** : chaque ligne de l’échantillon devient un test de `vector test`, qui vérifie chaque valeur annoncée. Une ligne d’un autre format passe, marquée, sans être perdue.
+
+```bash
+passerelle log2vector journaux/java.log --convention otel --timezone Europe/Paris --out vector/
+vector test vector/java.yaml
+```
+
+Les formats, les champs de chaque convention et la marche à suivre pour vérifier un pipeline avec les échantillons fournis : [docs/LOG-VERS-VECTOR.md](docs/LOG-VERS-VECTOR.md).
+
 ## Prouver l’équivalence sur vos données
 
 Le banc différentiel de Passerelle prouve la traduction sur un jeu de données de test. `passerelle verify` rejoue la même preuve sur **vos** données : chaque requête est jouée sur votre Elasticsearch, sa traduction sur votre ClickHouse, sur une fenêtre de temps close, et les deux résultats sont comparés ligne à ligne (clés, comptes, mesures, ordre).
@@ -414,8 +429,8 @@ Téléchargez [`passerelle.html`](https://github.com/OlivMartins/passerelle/rele
 ### Sur un serveur Linux
 
 ```bash
-curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.8.0/passerelle-1.8.0-linux-x86_64.tar.gz
-tar xzf passerelle-1.8.0-linux-x86_64.tar.gz && cd passerelle-1.8.0-linux-x86_64
+curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.9.0/passerelle-1.9.0-linux-x86_64.tar.gz
+tar xzf passerelle-1.9.0-linux-x86_64.tar.gz && cd passerelle-1.9.0-linux-x86_64
 sudo ./install.sh
 ```
 
@@ -448,6 +463,7 @@ curl -sS -X POST "http://127.0.0.1:8080/v1/translate/dsl?index=logs-*" \
 |---|---|
 | `POST /v1/translate/dsl` | Requête DSL (JSON ou format console Kibana) vers SQL, avec verdict, paramètres, remarques et couverture |
 | `POST /v1/translate/logstash` | Pipeline `.conf` vers configuration Vector, en YAML ou TOML, avec verdict |
+| `POST /v1/translate/log` | Échantillon de journal vers VRL et configuration Vector avec tests unitaires (`convention`, `timezone`, `log_format`) |
 | `POST /v1/validate/sql` | `EXPLAIN indexes = 1` sur votre ClickHouse, en lecture seule, après contrôle des tables lues |
 | `POST /v1/validate/vector` | Compilation complète de la configuration et du VRL par `vector validate` |
 
@@ -517,6 +533,7 @@ Le SQL généré vise ClickHouse 26.9 et les versions suivantes. Un [banc diffé
 | Filtres Logstash | `grok` (60 motifs intégrés et motifs personnalisés), `dissect`, `date`, `mutate` (15 opérations), `json`, `kv`, `csv`, `xml`, `useragent`, `geoip`, `translate`, `fingerprint`, `uuid`, `urldecode`, `split`, `truncate`, `cidr`, `drop`, `prune`, `de_dot`, `syslog_pri`, `clone`, `throttle`, `environment`, `bytes` |
 | Pipelines d’ingestion Elasticsearch | `append`, `bytes`, `community_id`, `convert`, `csv`, `date`, `dissect`, `dot_expander`, `drop`, `fail`, `fingerprint`, `foreach`, `geoip`, `grok`, `gsub`, `html_strip`, `join`, `json`, `kv`, `lowercase`, `pipeline`, `registered_domain`, `remove`, `rename`, `reroute`, `script`, `set`, `sort`, `split`, `terminate`, `trim`, `uppercase`, `uri_parts`, `urldecode`, `user_agent` |
 | Analyseurs | char_filters, tokenizers et filtres listés dans [docs/ANALYSEURS.md](docs/ANALYSEURS.md) |
+| Journaux (Log vers Vector) | accès `combined` et `common`, erreurs nginx et Apache, Logback, Log4j 2, Spring Boot, Python `logging` et Gunicorn, Go `log`, klog, zap, Elasticsearch 7, Kafka, ClickHouse, hclog (Nomad, Vault, Consul), syslog BSD, RFC 5424 et ISO 8601, `dmesg`, auditd, JSON, logfmt ; voir [docs/LOG-VERS-VECTOR.md](docs/LOG-VERS-VECTOR.md) |
 | Entrées et sorties | Kafka en entrée et en sortie (SASL, TLS, clés de message, compression) ; aussi `beats`, `tcp`, `udp`, `http`, `file`, `elasticsearch`, `stdout` |
 | Conditions Logstash | `if` / `else if` / `else`, `and`, `or`, `xor`, `nand`, `not`, `in`, `not in`, `=~`, `!~`, comparaisons |
 
@@ -532,9 +549,11 @@ npm test                 # traduit chaque exemple et vérifie le résultat
 npm run check            # mise en forme et lint (Biome), comme la CI ; « npm run format » corrige la mise en forme
 npm run test:diff        # compare les résultats de ClickHouse à ceux d’Elasticsearch (voir tests/README.md)
 npm run test:pipelines   # compare les événements de Vector à ceux de Logstash (voir tests/README.md)
+npm run test:logs        # rejoue chaque échantillon de journal dans Vector (vector test, événements complets)
 npm run build:ui         # dist/passerelle.html : l’interface autonome
 npm run build:server     # interface et dist/passerelle.cjs, sans binaire (image conteneur)
 npm run build            # interface, binaire Linux x86_64 et archive de release
+npm run demo             # GIF de démonstration du README, clair et sombre (Playwright et ffmpeg)
 ```
 
 Il faut Node.js 24. La construction du binaire se fait sous Linux x86_64. Le code est organisé ainsi : `src/engine/` pour le moteur de traduction (des modules ES, réunis par la façade `src/engine/index.js` ; il n’importe rien de Node.js ni du navigateur), `src/node/` pour les entrées-sorties de la ligne de commande, `src/server.js` pour le serveur et la CLI, `src/ui/` pour l’interface, `packaging/` pour l’unité systemd et l’installeur. `scripts/bundle.mjs` (esbuild) réunit ces modules en un seul fichier pour la page, le binaire et l’image conteneur. `node scripts/couverture.mjs --ecrire` réécrit le bloc de chiffres de la section « Ce que Passerelle sait traduire » (`npm run couverture` en donne le bilan). `npm run check` lance Biome (formatage sur 120 colonnes et règles de lint : variable non déclarée, import ou variable inutilisés, code mort) ; la CI le lance avant les tests.

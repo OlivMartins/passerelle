@@ -1,0 +1,118 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Journal d’erreurs Apache httpd)
+# Tests : vector test <fichier> rejoue les 3 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_apache_erreur:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Journal d’erreurs Apache httpd »
+      # Écrit à partir d’un échantillon de 3 événements (3 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^\[(?P<time>[A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d{2}:\d{2}:\d{2}(?:\.\d+)? \d{4})\] \[(?:(?P<module>[^:\]]+):)?(?P<level>[a-z]+\d?)\](?: \[pid (?P<pid>\d+)(?::tid (?P<tid>\d+))?\])?(?: \[client (?P<client>[^\]]+?)(?::(?P<cport>\d+))?\])? (?:(?P<code>AH\d{5}): )?(?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Journal d’erreurs Apache httpd » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%a %b %e %H:%M:%S%.f %Y", timezone: "UTC")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        if champs.module != null {
+          .apache.error.module = champs.module
+        }
+        niveau2 = string!(champs.level)
+        .log.level = niveau2
+        if champs.pid != null {
+          .process.pid = to_int(champs.pid) ?? null
+        }
+        if champs.tid != null {
+          .process.thread.id = to_int(champs.tid) ?? null
+        }
+        if champs.client != null {
+          .source.address = champs.client
+        }
+        if champs.cport != null {
+          .source.port = to_int(champs.cport) ?? null
+        }
+        if champs.code != null {
+          .error.code = champs.code
+        }
+        message3 = string!(champs.msg)
+        .message = message3
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_apache_erreur]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : [Fri May 01 10:00:00.123456 2026] [core:error] [pid 4242:tid…'
+    inputs:
+      - insert_at: analyse_apache_erreur
+        type: log
+        log_fields:
+          message: '[Fri May 01 10:00:00.123456 2026] [core:error] [pid 4242:tid 140234] [client 203.0.113.10:51234] AH00124: Request exceeded the limit of 10 internal redirects due to probable configuration error.'
+    outputs:
+      - extract_from: analyse_apache_erreur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "[Fri May 01 10:00:00.123456 2026] [core:error] [pid 4242:tid 140234] [client 203.0.113.10:51234] AH00124: Request exceeded the limit of 10 internal redirects due to probable configuration error.")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.123456Z')
+              assert_eq!(.apache.error.module, "core")
+              assert_eq!(.log.level, "error")
+              assert_eq!(.process.pid, 4242)
+              assert_eq!(.process.thread.id, 140234)
+              assert_eq!(.source.address, "203.0.113.10")
+              assert_eq!(.source.port, 51234)
+              assert_eq!(.error.code, "AH00124")
+              assert_eq!(.message, "Request exceeded the limit of 10 internal redirects due to probable configuration error.")
+  - name: 'reconnue : [Fri May 01 10:00:01.000001 2026] [mpm_event:notice] [pid 42…'
+    inputs:
+      - insert_at: analyse_apache_erreur
+        type: log
+        log_fields:
+          message: '[Fri May 01 10:00:01.000001 2026] [mpm_event:notice] [pid 4241:tid 140200] AH00489: Apache/2.4.62 (Unix) configured -- resuming normal operations'
+    outputs:
+      - extract_from: analyse_apache_erreur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "[Fri May 01 10:00:01.000001 2026] [mpm_event:notice] [pid 4241:tid 140200] AH00489: Apache/2.4.62 (Unix) configured -- resuming normal operations")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:01.000001Z')
+              assert_eq!(.apache.error.module, "mpm_event")
+              assert_eq!(.log.level, "notice")
+              assert_eq!(.process.pid, 4241)
+              assert_eq!(.process.thread.id, 140200)
+              assert_eq!(.error.code, "AH00489")
+              assert_eq!(.message, "Apache/2.4.62 (Unix) configured -- resuming normal operations")
+  - name: 'reconnue : [Fri May 01 10:00:02.500000 2026] [authz_core:error] [pid 42…'
+    inputs:
+      - insert_at: analyse_apache_erreur
+        type: log
+        log_fields:
+          message: '[Fri May 01 10:00:02.500000 2026] [authz_core:error] [pid 4243:tid 140235] [client 198.51.100.9:40022] AH01630: client denied by server configuration: /srv/www/prive'
+    outputs:
+      - extract_from: analyse_apache_erreur
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "[Fri May 01 10:00:02.500000 2026] [authz_core:error] [pid 4243:tid 140235] [client 198.51.100.9:40022] AH01630: client denied by server configuration: /srv/www/prive")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:02.5Z')
+              assert_eq!(.apache.error.module, "authz_core")
+              assert_eq!(.log.level, "error")
+              assert_eq!(.process.pid, 4243)
+              assert_eq!(.process.thread.id, 140235)
+              assert_eq!(.source.address, "198.51.100.9")
+              assert_eq!(.source.port, 40022)
+              assert_eq!(.error.code, "AH01630")
+              assert_eq!(.message, "client denied by server configuration: /srv/www/prive")

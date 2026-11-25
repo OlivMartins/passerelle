@@ -1,0 +1,2 @@
+{"log":"Serveur prêt sur le port 3000\n","stream":"stdout","time":"2026-05-01T10:00:00.123456789Z"}
+{"log":"Erreur : connexion Redis refusée\n","stream":"stderr","time":"2026-05-01T10:00:01.000000001Z"}

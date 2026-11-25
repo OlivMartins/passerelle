@@ -1,0 +1,6 @@
+[2026-05-01 10:00:00,123] INFO [KafkaServer id=1] started (kafka.server.KafkaServer)
+[2026-05-01 10:00:01,456] INFO [Partition commandes-0 broker=1] ISR updated to 1,2,3 and version updated to 7 (kafka.cluster.Partition)
+[2026-05-01 10:00:02,789] WARN [ReplicaFetcher replicaId=1, leaderId=2, fetcherId=0] Error in response for fetch request (kafka.server.ReplicaFetcherThread)
+[2026-05-01 10:00:03,000] ERROR Uncaught exception in scheduled task 'flush-log' (org.apache.kafka.server.util.KafkaScheduler)
+java.io.IOException: No space left on device
+	at java.base/sun.nio.ch.FileDispatcherImpl.write0(Native Method)

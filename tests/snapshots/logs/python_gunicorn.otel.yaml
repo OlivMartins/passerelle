@@ -1,0 +1,111 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Python Gunicorn)
+# Tests : vector test <fichier> rejoue les 4 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_python_gunicorn:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Python Gunicorn »
+      # Écrit à partir d’un échantillon de 4 événements (4 reconnus). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      ligne = string(.message) ?? ""
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      champs, erreur = parse_regex(ligne, r'^\[(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4})\] \[(?P<pid>\d+)\] \[(?P<level>[A-Z]+)\] (?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .attributes."log.parse.error" = "ligne non reconnue : format « Python Gunicorn » attendu"
+      } else {
+        .attributes."log.record.original" = ligne
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%Y-%m-%d %H:%M:%S%.f %z")
+        if erreur_horodatage1 == null {
+          .timestamp = horodatage1
+        }
+        .resources."process.pid" = to_int(champs.pid) ?? null
+        niveau2 = string!(champs.level)
+        .severity_text = niveau2
+        niveau_min3 = downcase(niveau2)
+        .severity_number = if includes(["trace", "finest", "finer", "trace1", "trace2", "trace3", "trace4", "trace5", "trace6", "trace7", "trace8"], niveau_min3) { 1 } else if includes(["debug", "fine", "dbg", "config", "verbose"], niveau_min3) { 5 } else if includes(["info", "information", "informational"], niveau_min3) { 9 } else if includes(["notice"], niveau_min3) { 10 } else if includes(["warn", "warning"], niveau_min3) { 13 } else if includes(["error", "err", "severe"], niveau_min3) { 17 } else if includes(["fatal", "critical", "crit", "alert", "emerg", "emergency", "panic", "dpanic"], niveau_min3) { 21 } else { 0 }
+        message4 = string!(champs.msg)
+        .message = message4
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_python_gunicorn]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : [2026-05-01 10:00:00 +0000] [1] [INFO] Starting gunicorn 23.…'
+    inputs:
+      - insert_at: analyse_python_gunicorn
+        type: log
+        log_fields:
+          message: '[2026-05-01 10:00:00 +0000] [1] [INFO] Starting gunicorn 23.0.0'
+    outputs:
+      - extract_from: analyse_python_gunicorn
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "[2026-05-01 10:00:00 +0000] [1] [INFO] Starting gunicorn 23.0.0")
+              assert_eq!(.resources."process.pid", 1)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:00Z')
+              assert_eq!(.severity_text, "INFO")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.message, "Starting gunicorn 23.0.0")
+  - name: 'reconnue : [2026-05-01 10:00:00 +0000] [1] [INFO] Listening at: http://…'
+    inputs:
+      - insert_at: analyse_python_gunicorn
+        type: log
+        log_fields:
+          message: '[2026-05-01 10:00:00 +0000] [1] [INFO] Listening at: http://0.0.0.0:8000 (1)'
+    outputs:
+      - extract_from: analyse_python_gunicorn
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "[2026-05-01 10:00:00 +0000] [1] [INFO] Listening at: http://0.0.0.0:8000 (1)")
+              assert_eq!(.resources."process.pid", 1)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:00Z')
+              assert_eq!(.severity_text, "INFO")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.message, "Listening at: http://0.0.0.0:8000 (1)")
+  - name: 'reconnue : [2026-05-01 10:00:00 +0000] [7] [INFO] Booting worker with p…'
+    inputs:
+      - insert_at: analyse_python_gunicorn
+        type: log
+        log_fields:
+          message: '[2026-05-01 10:00:00 +0000] [7] [INFO] Booting worker with pid: 7'
+    outputs:
+      - extract_from: analyse_python_gunicorn
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "[2026-05-01 10:00:00 +0000] [7] [INFO] Booting worker with pid: 7")
+              assert_eq!(.resources."process.pid", 7)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:00Z')
+              assert_eq!(.severity_text, "INFO")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.message, "Booting worker with pid: 7")
+  - name: 'reconnue : [2026-05-01 10:02:13 +0000] [1] [CRITICAL] WORKER TIMEOUT (p…'
+    inputs:
+      - insert_at: analyse_python_gunicorn
+        type: log
+        log_fields:
+          message: '[2026-05-01 10:02:13 +0000] [1] [CRITICAL] WORKER TIMEOUT (pid:7)'
+    outputs:
+      - extract_from: analyse_python_gunicorn
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "[2026-05-01 10:02:13 +0000] [1] [CRITICAL] WORKER TIMEOUT (pid:7)")
+              assert_eq!(.resources."process.pid", 1)
+              assert_eq!(.timestamp, t'2026-05-01T10:02:13Z')
+              assert_eq!(.severity_text, "CRITICAL")
+              assert_eq!(.severity_number, 21)
+              assert_eq!(.message, "WORKER TIMEOUT (pid:7)")

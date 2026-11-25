@@ -1,0 +1,3 @@
+[2026-05-01T10:00:00,123][INFO ][o.e.n.Node               ] [es-node-1] started
+[2026-05-01T10:00:05,456][WARN ][o.e.c.r.a.DiskThresholdMonitor] [es-node-1] high disk watermark [90%] exceeded on [XyZ123][es-node-1][/var/lib/elasticsearch] free: 9.8gb[9.1%], shards will be relocated away from this node
+[2026-05-01T10:00:09,789][ERROR][o.e.b.ElasticsearchUncaughtExceptionHandler] [es-node-1] fatal error in thread [main], exiting

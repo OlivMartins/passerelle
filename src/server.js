@@ -21,6 +21,8 @@ import {
   inventorySQLFiles,
   isObj,
   kibanaInventory,
+  eventJSON,
+  logToVRL,
   pipelinesFromYML,
   profilesFromSystem,
   schemaFromElastic,
@@ -584,6 +586,35 @@ function serve(opts) {
             pipelines: r.pipelines.map(({ vrl, ...p }) => p)
           });
         }
+        case '/v1/translate/log': {
+          // Corps : quelques lignes d’un journal. Paramètres : convention (otel, ecs), timezone, log_format (auto ou un
+          // format), name (nom du journal), keep_original=false, format (yaml, toml) de la configuration renvoyée
+          const fmt = url.searchParams.get('format') === 'toml' ? 'toml' : 'yaml';
+          const r = logToVRL(body, cfg, {
+            convention: url.searchParams.get('convention') || 'otel',
+            timezone: url.searchParams.get('timezone') || 'UTC',
+            format: url.searchParams.get('log_format') || 'auto',
+            name: url.searchParams.get('name') || 'journal',
+            keepOriginal: url.searchParams.get('keep_original') !== 'false'
+          });
+          if (r.empty) return json(res, 400, { error: 'aucune ligne de journal', verdict: 'unrecognized' });
+          if (r.error) return json(res, 400, { error: r.error });
+          return json(res, 200, {
+            verdict: verdictOf(r),
+            log_format: r.format,
+            convention: r.convention,
+            format: fmt,
+            config: r[fmt],
+            vrl: r.vrl,
+            transform: r.transform,
+            fields: r.fields,
+            events: r.events.map(e => ({ text: e.text, recognized: e.recognized, event: eventJSON(e.event) })),
+            tests: r.tests,
+            notes: r.notes,
+            coverage: coverage(r.stats),
+            summary: r.sentence
+          });
+        }
         case '/v1/inventory/kibana': {
           const fmt = url.searchParams.get('format') || 'json';
           if (!['json', 'md', 'html', 'csv'].includes(fmt))
@@ -773,6 +804,7 @@ Utilisation :
   passerelle dsl2sql     <fichier|dossier>... [--config FICHIER] [--index MOTIF] [--out DOSSIER] [--fail-on todo|review] [--verbose]
   passerelle ls2vector   <fichier|dossier|pipelines.yml>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review] [--verbose]
   passerelle ingest      <fichier|dossier>... [--config FICHIER] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review] [--verbose]
+  passerelle log2vector  <journal.log|dossier>... [--convention otel|ecs] [--timezone FUSEAU] [--log-format FORMAT] [--no-original] [--format yaml|toml] [--out DOSSIER] [--fail-on todo|review] [--verbose]
   passerelle schema ddl  <fichier|dossier>... [--config FICHIER] [--preset otel|otel-json] [--compact] [--json] [--table NOM] [--format sql|yaml] [--out DOSSIER]
   passerelle schema pull [--config FICHIER] [--table NOM]...
   passerelle schema analyzers <fichier|dossier>... [--config FICHIER] [--text TEXTE] [--field CHAMP] [--format md|json|sql] [--out DOSSIER] [--fail-on todo|review]
@@ -815,6 +847,9 @@ const OPTIONS = {
   json: { type: 'boolean' },
   table: { type: 'string', multiple: true },
   timezone: { type: 'string' },
+  convention: { type: 'string' },
+  'log-format': { type: 'string' },
+  'no-original': { type: 'boolean' },
   text: { type: 'string' },
   field: { type: 'string' },
   from: { type: 'string' },
@@ -1082,6 +1117,50 @@ function ingestConvert(o) {
   const shown = r.notes.filter(n => o.verbose || n.level === 'err' || n.level === 'warn');
   shown.forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`));
   if (o['fail-on'] && VERDICT_RANK[verdict] >= VERDICT_RANK[o['fail-on']]) process.exit(2);
+}
+
+/* ---------- Journaux vers pipelines VRL (passerelle log2vector) ---------- */
+function logConvert(o) {
+  if (!o._.length) fail('aucun journal à lire. Exemple : passerelle log2vector journaux/nginx.log --out vector/');
+  formatFor(o, ['yaml', 'toml'], 'log2vector');
+  const cfg = loadCfgOrFail(o);
+  const fmt = o.format || cfg.vector.format;
+  const files = collect(o._, /\.(log|txt|out|json|ndjson)$/i);
+  if (!files.length) fail('aucun fichier .log, .txt, .out, .json ou .ndjson trouvé');
+  const MARK = { ready: '✓', review: '~', todo: '!', unrecognized: '✗' };
+  const threshold = o['fail-on'] ? VERDICT_RANK[o['fail-on']] : Infinity;
+  let failing = 0;
+  if (o.out) outDir(o.out);
+  for (const f of files) {
+    const r = logToVRL(fs.readFileSync(f, 'utf8'), cfg, {
+      convention: o.convention || 'otel',
+      timezone: o.timezone || 'UTC',
+      format: o['log-format'] || 'auto',
+      keepOriginal: !o['no-original'],
+      name: path.basename(f)
+    });
+    if (r.error) fail(r.error);
+    if (r.empty) {
+      process.stderr.write(`✗ ${f} : fichier vide\n`);
+      failing++;
+      continue;
+    }
+    const verdict = verdictOf(r);
+    if (VERDICT_RANK[verdict] >= threshold) failing++;
+    const summary = `${VERDICTS[verdict]} : ${r.format.label}, ${r.fields.length} champ(s), ${r.tests} test(s)${r.stats.approx ? `, ${r.stats.approx} à vérifier` : ''}`;
+    if (o.out) {
+      const b = path.join(o.out, path.basename(f).replace(/\.[^.]+$/, ''));
+      fs.writeFileSync(`${b}.${fmt}`, r[fmt]);
+      fs.writeFileSync(`${b}.vrl`, r.vrl);
+      process.stderr.write(`${MARK[verdict]} ${f} → ${b}.${fmt} et ${b}.vrl (${summary})\n`);
+    } else {
+      process.stdout.write(r[fmt] + (files.length > 1 ? '\n' : ''));
+      process.stderr.write(`${MARK[verdict]} ${f} (${summary})\n`);
+    }
+    const shown = r.notes.filter(n => o.verbose || n.level === 'err' || n.level === 'warn');
+    shown.forEach(n => process.stderr.write(`    [${n.level}] ${n.title}${n.detail ? ' — ' + n.detail : ''}\n`));
+  }
+  if (failing) process.exit(2);
 }
 
 /* ---------- Schéma (passerelle schema ddl | pull) ---------- */
@@ -1482,6 +1561,10 @@ function main(argv) {
       return batch('ls', o);
     case 'ingest':
       return ingestConvert(o);
+    case 'log2vector':
+      if (o.convention !== undefined && !['otel', 'ecs'].includes(o.convention))
+        fail(`--convention attend otel ou ecs, pas « ${o.convention} »`);
+      return logConvert(o);
     case 'kibana':
       return kibanaReport(o);
     case 'grafana':
