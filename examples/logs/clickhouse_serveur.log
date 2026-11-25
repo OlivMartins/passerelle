@@ -1,0 +1,4 @@
+2026.05.01 10:00:00.123456 [ 4242 ] {} <Information> Application: Ready for connections.
+2026.05.01 10:00:01.234567 [ 4250 ] {9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f} <Debug> executeQuery: (from 10.0.3.7:51522, user: lecteur) SELECT count() FROM logs.events
+2026.05.01 10:00:01.345678 [ 4250 ] {9f1c2d3e-0a4b-4c5d-8e6f-7a8b9c0d1e2f} <Error> executeQuery: Code: 60. DB::Exception: Table logs.evenements does not exist. (UNKNOWN_TABLE)
+2026.05.01 10:00:02.000001 [ 4261 ] {} <Warning> MergeTreeBackgroundExecutor: Pool size is too small

@@ -1,0 +1,4 @@
+2026-05-01T10:00:00.123+0200 [INFO]  agent: detected plugin: name=docker type=driver plugin_version=0.1.0
+2026-05-01T10:00:01.456+0200 [INFO]  client.alloc_runner.task_runner: Task event: alloc_id=1b2c3d4e-5f60-7182-93a4-b5c6d7e8f901 task=redis type=Started msg="Task started by client" failed=false
+2026-05-01T10:00:02.789+0200 [WARN]  client.driver_mgr.docker: RemoveImage on non-referenced counted image id: driver=docker image_id=sha256:0123abcd
+2026-05-01T10:00:03.000+0200 [ERROR] nomad.rpc: yamux: keepalive failed: i/o deadline reached

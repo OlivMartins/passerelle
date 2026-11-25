@@ -1,0 +1,113 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (JSON — Go zap)
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_go_zap_json:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « JSON — Go zap »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      objet, erreur = parse_json(ligne)
+      if erreur != null || !is_object(objet) {
+        .error.message = "ligne non reconnue : un objet JSON attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        champs = flatten(object!(objet))
+        # Horodatage : clé "ts"
+        if exists(champs."ts") {
+          horodatage1, erreur_horodatage1 = from_unix_timestamp(to_int((to_float(champs."ts") ?? 0.0) * 1000000.0), unit: "microseconds")
+          if erreur_horodatage1 == null {
+            ."@timestamp" = horodatage1
+            del(.timestamp)
+          }
+          del(champs."ts")
+        }
+        # Niveau : clé "level"
+        if exists(champs."level") {
+          niveau2 = string(champs."level") ?? ""
+          .log.level = niveau2
+          del(champs."level")
+        }
+        # Message : clé "msg"
+        if exists(champs."msg") {
+          .message = champs."msg"
+          del(champs."msg")
+        }
+        # Rôle caller : clé "caller"
+        if exists(champs."caller") {
+          appelant3 = parse_regex(string(champs."caller") ?? "", r'^(?P<fichier>.+):(?P<ligne>\d+)\z') ?? {}
+          .log.origin.file.name = appelant3.fichier
+          .log.origin.file.line = to_int(appelant3.ligne) ?? null
+          del(champs."caller")
+        }
+        # Rôle exc_message : clé "error"
+        if exists(champs."error") {
+          .error.message = champs."error"
+          del(champs."error")
+        }
+        # Rôle exc_stack : clé "stacktrace"
+        if exists(champs."stacktrace") {
+          .error.stack_trace = champs."stacktrace"
+          del(champs."stacktrace")
+        }
+        # Les autres clés sont recopiées à la racine de l’événement
+        . = merge(., unflatten(champs), deep: true)
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_go_zap_json]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : {"level":"info","ts":1777622400.1234567,"caller":"server/htt…'
+    inputs:
+      - insert_at: analyse_go_zap_json
+        type: log
+        log_fields:
+          message: '{"level":"info","ts":1777622400.1234567,"caller":"server/http.go:58","msg":"requête traitée","method":"GET","path":"/api/stock","status":200,"duration":0.0123}'
+    outputs:
+      - extract_from: analyse_go_zap_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "{\"level\":\"info\",\"ts\":1777622400.1234567,\"caller\":\"server/http.go:58\",\"msg\":\"requête traitée\",\"method\":\"GET\",\"path\":\"/api/stock\",\"status\":200,\"duration\":0.0123}")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:00.123456Z')
+              assert_eq!(.log.level, "info")
+              assert_eq!(.log.origin.file.name, "server/http.go")
+              assert_eq!(.log.origin.file.line, 58)
+              assert_eq!(.message, "requête traitée")
+              assert_eq!(.method, "GET")
+              assert_eq!(.path, "/api/stock")
+              assert_eq!(.status, 200)
+              assert_eq!(.duration, 0.0123)
+  - name: 'reconnue : {"level":"error","ts":1777622401.5,"caller":"server/http.go:…'
+    inputs:
+      - insert_at: analyse_go_zap_json
+        type: log
+        log_fields:
+          message: '{"level":"error","ts":1777622401.5,"caller":"server/http.go:61","msg":"requête en erreur","method":"POST","path":"/api/paiement","status":502,"error":"upstream indisponible","stacktrace":"main.handler\n\t/app/server/http.go:61"}'
+    outputs:
+      - extract_from: analyse_go_zap_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "{\"level\":\"error\",\"ts\":1777622401.5,\"caller\":\"server/http.go:61\",\"msg\":\"requête en erreur\",\"method\":\"POST\",\"path\":\"/api/paiement\",\"status\":502,\"error\":\"upstream indisponible\",\"stacktrace\":\"main.handler\\n\\t/app/server/http.go:61\"}")
+              assert_eq!(."@timestamp", t'2026-05-01T08:00:01.5Z')
+              assert_eq!(.log.level, "error")
+              assert_eq!(.log.origin.file.name, "server/http.go")
+              assert_eq!(.log.origin.file.line, 61)
+              assert_eq!(.message, "requête en erreur")
+              assert_eq!(.error.message, "upstream indisponible")
+              assert_eq!(.error.stack_trace, "main.handler\n\t/app/server/http.go:61")
+              assert_eq!(.method, "POST")
+              assert_eq!(.path, "/api/paiement")
+              assert_eq!(.status, 502)

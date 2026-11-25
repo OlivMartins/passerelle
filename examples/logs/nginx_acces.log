@@ -1,0 +1,4 @@
+203.0.113.10 - - [01/May/2026:10:00:00 +0200] "GET /index.html HTTP/1.1" 200 5320 "-" "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+198.51.100.7 - alice [01/May/2026:10:00:01 +0200] "POST /api/v1/commandes?source=mobile&lang=fr HTTP/2.0" 201 87 "https://shop.example.com/panier" "okhttp/4.12.0"
+203.0.113.25 - - [01/May/2026:10:00:02 +0200] "GET /favicon.ico HTTP/1.1" 404 153 "https://shop.example.com/" "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+192.0.2.44 - - [01/May/2026:10:00:03 +0200] "-" 400 0 "-" "-"

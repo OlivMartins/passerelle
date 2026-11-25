@@ -3569,7 +3569,10 @@ export function toYAML(obj, ind) {
         });
       }
     } else if (typeof v === 'string' && v.includes('\n')) {
-      L.push(key + ' |');
+      // Bloc littéral : « | » garde un saut de ligne final, « |- » n’en garde aucun ; une première ligne qui
+      // commence par une espace demande l’indentation explicite (2)
+      const chomp = /\n$/.test(v) ? '' : '-';
+      L.push(key + ' |' + (/^[ \t]/.test(v) ? '2' : '') + chomp);
       v.replace(/\n+$/, '')
         .split('\n')
         .forEach(l => L.push(l ? pad + '  ' + l : ''));
@@ -3583,9 +3586,11 @@ function tomlKey(k) {
 function tomlVal(v) {
   if (typeof v === 'string') {
     if (v.includes('\n'))
-      return v.includes("'''")
+      return v.includes("'''") || /[\x00-\x08\x0b-\x1f\x7f]/.test(v)
         ? '"""\n' + v.replace(/\\/g, '\\\\').replace(/"""/g, '\\"""') + '"""'
-        : "'''\n" + v.replace(/\n+$/, '') + "\n'''";
+        : /\n$/.test(v)
+          ? "'''\n" + v.replace(/\n+$/, '') + "\n'''"
+          : "'''\n" + v + "'''";
     return JSON.stringify(v);
   }
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
@@ -3600,7 +3605,7 @@ function tomlVal(v) {
     );
   return '""';
 }
-function toTOML(obj) {
+export function toTOML(obj) {
   const out = [];
   (function table(path, o) {
     const simple = Object.entries(o).filter(([, x]) => !isObj(x) && x !== undefined);

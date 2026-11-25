@@ -1,0 +1,10 @@
+2026-05-01 10:00:00.123 [main] INFO  com.example.boutique.Application - Démarrage de l’application en 4.2 s
+2026-05-01 10:00:01.456 [http-nio-8080-exec-1] WARN  com.example.boutique.web.PanierController - Panier 8812 introuvable pour la session 3fa2
+2026-05-01 10:00:02.789 [http-nio-8080-exec-3] ERROR com.example.boutique.service.PaiementService - Échec du paiement de la commande 1042
+java.lang.IllegalStateException: Solde insuffisant pour la commande 1042
+	at com.example.boutique.service.PaiementService.debiter(PaiementService.java:88)
+	at com.example.boutique.web.CommandeController.payer(CommandeController.java:41)
+Caused by: java.net.SocketTimeoutException: Read timed out
+	at java.base/sun.nio.ch.NioSocketImpl.timedRead(NioSocketImpl.java:288)
+	... 42 more
+2026-05-01 10:00:03.001 [scheduler-1] DEBUG com.example.boutique.batch.Purge - 12 paniers expirés supprimés

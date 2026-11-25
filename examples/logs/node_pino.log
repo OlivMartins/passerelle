@@ -1,0 +1,2 @@
+{"level":30,"time":1777629600123,"pid":42,"hostname":"api-7c9f","reqId":"req-1","req":{"method":"GET","url":"/api/stock"},"msg":"requête reçue"}
+{"level":50,"time":1777629601456,"pid":42,"hostname":"api-7c9f","reqId":"req-2","err":{"type":"Error","message":"stock négatif","stack":"Error: stock négatif\n    at verifier (/app/stock.js:12:11)"},"msg":"requête en erreur"}

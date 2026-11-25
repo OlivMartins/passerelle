@@ -1,0 +1,135 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Syslog RFC 5424)
+# Tests : vector test <fichier> rejoue les 3 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_syslog_rfc5424:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Syslog RFC 5424 »
+      # Écrit à partir d’un échantillon de 3 événements (3 reconnus). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      ligne = string(.message) ?? ""
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      champs, erreur = parse_regex(ligne, r'^<(?P<pri>\d{1,3})>(?P<version>\d{1,2}) (?P<time>\S+) (?P<host>\S+) (?P<app>\S+) (?P<procid>\S+) (?P<msgid>\S+) (?P<sd>-|(?:\[(?:[^\]"\\]|"(?:[^"\\]|\\.)*"|\\.)*\])+)(?: (?P<msg>[\s\S]*))?\z')
+      if erreur != null {
+        .attributes."log.parse.error" = "ligne non reconnue : format « Syslog RFC 5424 » attendu"
+      } else {
+        .attributes."log.record.original" = ligne
+        priorite1 = to_int(champs.pri) ?? 0
+        .attributes."syslog.priority" = priorite1
+        .attributes."syslog.facility" = get(["kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv", "ftp", "ntp", "security", "console", "solaris-cron", "local0", "local1", "local2", "local3", "local4", "local5", "local6", "local7"], [to_int(floor(priorite1 / 8))]) ?? null
+        severite2 = get(["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"], [mod(priorite1, 8)]) ?? null
+        .attributes."syslog.severity" = severite2
+        .severity_text = severite2
+        .severity_number = get([21, 21, 21, 17, 13, 10, 9, 5], [mod(priorite1, 8)]) ?? 0
+        .attributes."syslog.version" = to_int(champs.version) ?? null
+        if champs.time != "-" && champs.time != "" {
+          horodatage3, erreur_horodatage3 = parse_timestamp(string!(champs.time), "%Y-%m-%dT%H:%M:%S%.f%#z")
+          if erreur_horodatage3 == null {
+            .timestamp = horodatage3
+          }
+        }
+        if champs.host != "-" && champs.host != "" {
+          .resources."host.name" = champs.host
+        }
+        if champs.app != "-" && champs.app != "" {
+          .resources."service.name" = champs.app
+        }
+        if champs.procid != "-" && champs.procid != "" && match(string!(champs.procid), r'^\d+\z') {
+          .resources."process.pid" = to_int(champs.procid) ?? null
+        }
+        if champs.msgid != "-" && champs.msgid != "" {
+          .attributes."syslog.msgid" = champs.msgid
+        }
+        if champs.sd != "-" && champs.sd != "" {
+          .attributes."syslog.structured_data" = champs.sd
+        }
+        if champs.msg != null {
+          message4 = string!(champs.msg)
+          .message = message4
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_syslog_rfc5424]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : <34>1 2026-05-01T10:00:00.003Z mymachine.example.com su - ID…'
+    inputs:
+      - insert_at: analyse_syslog_rfc5424
+        type: log
+        log_fields:
+          message: <34>1 2026-05-01T10:00:00.003Z mymachine.example.com su - ID47 - 'su root' failed for lonvick on /dev/pts/8
+    outputs:
+      - extract_from: analyse_syslog_rfc5424
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "<34>1 2026-05-01T10:00:00.003Z mymachine.example.com su - ID47 - 'su root' failed for lonvick on /dev/pts/8")
+              assert_eq!(.attributes."syslog.priority", 34)
+              assert_eq!(.attributes."syslog.facility", "auth")
+              assert_eq!(.attributes."syslog.severity", "crit")
+              assert_eq!(.attributes."syslog.version", 1)
+              assert_eq!(.attributes."syslog.msgid", "ID47")
+              assert_eq!(.resources."host.name", "mymachine.example.com")
+              assert_eq!(.resources."service.name", "su")
+              assert_eq!(.severity_text, "crit")
+              assert_eq!(.severity_number, 21)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:00.003Z')
+              assert_eq!(.message, "'su root' failed for lonvick on /dev/pts/8")
+  - name: 'reconnue : <165>1 2026-05-01T10:00:01.000+02:00 mymachine.example.com e…'
+    inputs:
+      - insert_at: analyse_syslog_rfc5424
+        type: log
+        log_fields:
+          message: '<165>1 2026-05-01T10:00:01.000+02:00 mymachine.example.com evntslog - ID47 [exampleSDID@32473 iut="3" eventSource="Application" eventID="1011"] An application event log entry'
+    outputs:
+      - extract_from: analyse_syslog_rfc5424
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "<165>1 2026-05-01T10:00:01.000+02:00 mymachine.example.com evntslog - ID47 [exampleSDID@32473 iut=\"3\" eventSource=\"Application\" eventID=\"1011\"] An application event log entry")
+              assert_eq!(.attributes."syslog.priority", 165)
+              assert_eq!(.attributes."syslog.facility", "local4")
+              assert_eq!(.attributes."syslog.severity", "notice")
+              assert_eq!(.attributes."syslog.version", 1)
+              assert_eq!(.attributes."syslog.msgid", "ID47")
+              assert_eq!(.attributes."syslog.structured_data", "[exampleSDID@32473 iut=\"3\" eventSource=\"Application\" eventID=\"1011\"]")
+              assert_eq!(.resources."host.name", "mymachine.example.com")
+              assert_eq!(.resources."service.name", "evntslog")
+              assert_eq!(.severity_text, "notice")
+              assert_eq!(.severity_number, 10)
+              assert_eq!(.timestamp, t'2026-05-01T08:00:01Z')
+              assert_eq!(.message, "An application event log entry")
+  - name: 'reconnue : <14>1 2026-05-01T10:00:02Z host2 app 4242 - - message sans d…'
+    inputs:
+      - insert_at: analyse_syslog_rfc5424
+        type: log
+        log_fields:
+          message: <14>1 2026-05-01T10:00:02Z host2 app 4242 - - message sans données structurées
+    outputs:
+      - extract_from: analyse_syslog_rfc5424
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "<14>1 2026-05-01T10:00:02Z host2 app 4242 - - message sans données structurées")
+              assert_eq!(.attributes."syslog.priority", 14)
+              assert_eq!(.attributes."syslog.facility", "user")
+              assert_eq!(.attributes."syslog.severity", "info")
+              assert_eq!(.attributes."syslog.version", 1)
+              assert_eq!(.resources."host.name", "host2")
+              assert_eq!(.resources."service.name", "app")
+              assert_eq!(.resources."process.pid", 4242)
+              assert_eq!(.severity_text, "info")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:02Z')
+              assert_eq!(.message, "message sans données structurées")

@@ -1,0 +1,3 @@
+2026-05-01T10:00:00.123456+02:00 web01 systemd[1]: Started session-42.scope - Session 42 of User deploy.
+2026-05-01T10:00:01.000000+02:00 web01 sshd[2211]: Accepted publickey for deploy from 198.51.100.20 port 52344 ssh2
+2026-05-01T10:00:02.500000+02:00 web01 kernel: [ 3605.123456] eth0: Link is Up - 10Gbps Full Duplex

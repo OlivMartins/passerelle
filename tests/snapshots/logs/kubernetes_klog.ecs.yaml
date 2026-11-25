@@ -1,0 +1,113 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Go klog ou glog (Kubernetes))
+# Tests : vector test <fichier> rejoue les 3 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_kubernetes_klog:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Go klog ou glog (Kubernetes) »
+      # Écrit à partir d’un échantillon de 3 événements (3 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      # Le journal ne donne pas l’année : celle du jour, ou la précédente pour une date dans le futur
+      annee = format_timestamp!(now(), "%Y", timezone: "UTC")
+      champs, erreur = parse_regex(ligne, r'^(?P<level>[IWEF])(?P<time>\d{4} \d{2}:\d{2}:\d{2}\.\d+) +(?P<tid>\d+) (?P<file>[^:\s\]]+):(?P<line>\d+)\] (?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Go klog ou glog (Kubernetes) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        niveau1 = if champs.level == "I" { "INFO" } else if champs.level == "W" { "WARN" } else if champs.level == "E" { "ERROR" } else if champs.level == "F" { "FATAL" } else if champs.level == "D" { "DEBUG" } else if champs.level == "T" { "TRACE" } else { string!(champs.level) }
+        .log.level = niveau1
+        horodatage2, erreur_horodatage2 = parse_timestamp(annee + " " + string!(champs.time), "%Y %m%d %H:%M:%S%.f", timezone: "UTC")
+        if erreur_horodatage2 == null && to_unix_timestamp(horodatage2) > to_unix_timestamp(now()) + 86400 {
+          # Date à plus d’un jour dans le futur : elle est de l’année précédente (journal de décembre lu en janvier)
+          horodatage2 = parse_timestamp(to_string((to_int(annee) ?? 0) - 1) + " " + string!(champs.time), "%Y %m%d %H:%M:%S%.f", timezone: "UTC") ?? horodatage2
+        }
+        if erreur_horodatage2 == null {
+          ."@timestamp" = horodatage2
+          del(.timestamp)
+        }
+        .process.thread.id = to_int(champs.tid) ?? null
+        .log.origin.file.name = champs.file
+        .log.origin.file.line = to_int(champs.line) ?? null
+        message3 = string!(champs.msg)
+        .message = message3
+        # Enrichissement : klog structuré ("message" clé=valeur…)
+        detail4, detail_erreur4 = parse_regex(message3, r'^"(?P<m>(?:[^"\\]|\\.)*)"(?: (?P<kv>[\s\S]+))?\z')
+        if detail_erreur4 == null {
+          .message = parse_json("\"" + string!(detail4.m) + "\"") ?? detail4.m
+          if detail4.kv != null {
+            paires5 = parse_key_value(string!(detail4.kv), field_delimiter: " ", key_value_delimiter: "=") ?? {}
+            . = merge(., { "labels": paires5 }, deep: true)
+          }
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_kubernetes_klog]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : I0501 10:00:00.123456       1 controller.go:211] "Synchronis…'
+    inputs:
+      - insert_at: analyse_kubernetes_klog
+        type: log
+        log_fields:
+          message: 'I0501 10:00:00.123456       1 controller.go:211] "Synchronisation du déploiement" deployment="boutique/api" replicas=3'
+    outputs:
+      - extract_from: analyse_kubernetes_klog
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "I0501 10:00:00.123456       1 controller.go:211] \"Synchronisation du déploiement\" deployment=\"boutique/api\" replicas=3")
+              assert_eq!(.log.level, "INFO")
+              assert_eq!(.log.origin.file.name, "controller.go")
+              assert_eq!(.log.origin.file.line, 211)
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-01T10:00:00.123456000")
+              assert_eq!(.process.thread.id, 1)
+              assert_eq!(.message, "Synchronisation du déploiement")
+              assert_eq!(.labels.deployment, "boutique/api")
+              assert_eq!(.labels.replicas, "3")
+  - name: 'reconnue : W0501 10:00:01.654321       1 reflector.go:539] client-go/in…'
+    inputs:
+      - insert_at: analyse_kubernetes_klog
+        type: log
+        log_fields:
+          message: 'W0501 10:00:01.654321       1 reflector.go:539] client-go/informers: failed to list *v1.Pod: the server is currently unable to handle the request'
+    outputs:
+      - extract_from: analyse_kubernetes_klog
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "W0501 10:00:01.654321       1 reflector.go:539] client-go/informers: failed to list *v1.Pod: the server is currently unable to handle the request")
+              assert_eq!(.log.level, "WARN")
+              assert_eq!(.log.origin.file.name, "reflector.go")
+              assert_eq!(.log.origin.file.line, 539)
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-01T10:00:01.654321000")
+              assert_eq!(.process.thread.id, 1)
+              assert_eq!(.message, "client-go/informers: failed to list *v1.Pod: the server is currently unable to handle the request")
+  - name: 'reconnue : E0501 10:00:02.000001      17 leaderelection.go:340] error r…'
+    inputs:
+      - insert_at: analyse_kubernetes_klog
+        type: log
+        log_fields:
+          message: 'E0501 10:00:02.000001      17 leaderelection.go:340] error retrieving resource lock kube-system/kube-scheduler: context deadline exceeded'
+    outputs:
+      - extract_from: analyse_kubernetes_klog
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "E0501 10:00:02.000001      17 leaderelection.go:340] error retrieving resource lock kube-system/kube-scheduler: context deadline exceeded")
+              assert_eq!(.log.level, "ERROR")
+              assert_eq!(.log.origin.file.name, "leaderelection.go")
+              assert_eq!(.log.origin.file.line, 340)
+              assert_eq!(format_timestamp!(."@timestamp", "%m-%dT%H:%M:%S%.9f", timezone: "UTC"), "05-01T10:00:02.000001000")
+              assert_eq!(.process.thread.id, 17)
+              assert_eq!(.message, "error retrieving resource lock kube-system/kube-scheduler: context deadline exceeded")

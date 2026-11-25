@@ -1,0 +1,114 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (JSON — Elasticsearch 8 et ECS)
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_elasticsearch_json:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « JSON — Elasticsearch 8 et ECS »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      objet, erreur = parse_json(ligne)
+      if erreur != null || !is_object(objet) {
+        .error.message = "ligne non reconnue : un objet JSON attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        champs = flatten(object!(objet))
+        # Horodatage : clé "@timestamp"
+        if exists(champs."@timestamp") {
+          horodatage1, erreur_horodatage1 = parse_timestamp(string(champs."@timestamp") ?? "", "%Y-%m-%dT%H:%M:%S%.f%#z")
+          if erreur_horodatage1 == null {
+            ."@timestamp" = horodatage1
+            del(.timestamp)
+          }
+          del(champs."@timestamp")
+        }
+        # Niveau : clé "log.level"
+        if exists(champs."log.level") {
+          niveau2 = string(champs."log.level") ?? ""
+          .log.level = niveau2
+          del(champs."log.level")
+        }
+        # Message : clé "message"
+        if exists(champs."message") {
+          .message = champs."message"
+          del(champs."message")
+        }
+        # Rôle logger : clé "log.logger"
+        if exists(champs."log.logger") {
+          .log.logger = champs."log.logger"
+          del(champs."log.logger")
+        }
+        # Rôle thread : clé "process.thread.name"
+        if exists(champs."process.thread.name") {
+          .process.thread.name = champs."process.thread.name"
+          del(champs."process.thread.name")
+        }
+        # Rôle service : clé "service.name"
+        if exists(champs."service.name") {
+          .service.name = champs."service.name"
+          del(champs."service.name")
+        }
+        # Les autres clés sont recopiées à la racine de l’événement
+        . = merge(., unflatten(champs), deep: true)
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_elasticsearch_json]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : {"@timestamp":"2026-05-01T10:00:00.123Z", "log.level": "INFO…'
+    inputs:
+      - insert_at: analyse_elasticsearch_json
+        type: log
+        log_fields:
+          message: '{"@timestamp":"2026-05-01T10:00:00.123Z", "log.level": "INFO", "message":"started {es-node-1}{XyZ123}{abc}{es-node-1}{10.0.1.5}{10.0.1.5:9300}{cdfhilmrstw}", "ecs.version": "1.2.0","service.name":"ES_ECS","event.dataset":"elasticsearch.server","process.thread.name":"main","log.logger":"org.elasticsearch.node.Node","elasticsearch.node.name":"es-node-1","elasticsearch.cluster.name":"production"}'
+    outputs:
+      - extract_from: analyse_elasticsearch_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "{\"@timestamp\":\"2026-05-01T10:00:00.123Z\", \"log.level\": \"INFO\", \"message\":\"started {es-node-1}{XyZ123}{abc}{es-node-1}{10.0.1.5}{10.0.1.5:9300}{cdfhilmrstw}\", \"ecs.version\": \"1.2.0\",\"service.name\":\"ES_ECS\",\"event.dataset\":\"elasticsearch.server\",\"process.thread.name\":\"main\",\"log.logger\":\"org.elasticsearch.node.Node\",\"elasticsearch.node.name\":\"es-node-1\",\"elasticsearch.cluster.name\":\"production\"}")
+              assert_eq!(.event.dataset, "elasticsearch.server")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:00.123Z')
+              assert_eq!(.log.level, "INFO")
+              assert_eq!(.log.logger, "org.elasticsearch.node.Node")
+              assert_eq!(.message, "started {es-node-1}{XyZ123}{abc}{es-node-1}{10.0.1.5}{10.0.1.5:9300}{cdfhilmrstw}")
+              assert_eq!(.process.thread.name, "main")
+              assert_eq!(.service.name, "ES_ECS")
+              assert_eq!(.ecs.version, "1.2.0")
+              assert_eq!(.elasticsearch.node.name, "es-node-1")
+              assert_eq!(.elasticsearch.cluster.name, "production")
+  - name: 'reconnue : {"@timestamp":"2026-05-01T10:00:05.456Z", "log.level": "WARN…'
+    inputs:
+      - insert_at: analyse_elasticsearch_json
+        type: log
+        log_fields:
+          message: '{"@timestamp":"2026-05-01T10:00:05.456Z", "log.level": "WARN", "message":"high disk watermark [90%] exceeded on [XyZ123][es-node-1][/var/lib/elasticsearch] free: 9.8gb[9.1%], shards will be relocated away from this node", "ecs.version": "1.2.0","service.name":"ES_ECS","event.dataset":"elasticsearch.server","process.thread.name":"elasticsearch[es-node-1][generic][T#3]","log.logger":"org.elasticsearch.cluster.routing.allocation.DiskThresholdMonitor","elasticsearch.cluster.uuid":"Hn3kd8Q0Rr2lMaPDn1cX0A","elasticsearch.node.id":"XyZ123","elasticsearch.node.name":"es-node-1","elasticsearch.cluster.name":"production"}'
+    outputs:
+      - extract_from: analyse_elasticsearch_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "{\"@timestamp\":\"2026-05-01T10:00:05.456Z\", \"log.level\": \"WARN\", \"message\":\"high disk watermark [90%] exceeded on [XyZ123][es-node-1][/var/lib/elasticsearch] free: 9.8gb[9.1%], shards will be relocated away from this node\", \"ecs.version\": \"1.2.0\",\"service.name\":\"ES_ECS\",\"event.dataset\":\"elasticsearch.server\",\"process.thread.name\":\"elasticsearch[es-node-1][generic][T#3]\",\"log.logger\":\"org.elasticsearch.cluster.routing.allocation.DiskThresholdMonitor\",\"elasticsearch.cluster.uuid\":\"Hn3kd8Q0Rr2lMaPDn1cX0A\",\"elasticsearch.node.id\":\"XyZ123\",\"elasticsearch.node.name\":\"es-node-1\",\"elasticsearch.cluster.name\":\"production\"}")
+              assert_eq!(.event.dataset, "elasticsearch.server")
+              assert_eq!(."@timestamp", t'2026-05-01T10:00:05.456Z')
+              assert_eq!(.log.level, "WARN")
+              assert_eq!(.log.logger, "org.elasticsearch.cluster.routing.allocation.DiskThresholdMonitor")
+              assert_eq!(.message, "high disk watermark [90%] exceeded on [XyZ123][es-node-1][/var/lib/elasticsearch] free: 9.8gb[9.1%], shards will be relocated away from this node")
+              assert_eq!(.process.thread.name, "elasticsearch[es-node-1][generic][T#3]")
+              assert_eq!(.service.name, "ES_ECS")
+              assert_eq!(.ecs.version, "1.2.0")
+              assert_eq!(.elasticsearch.cluster.uuid, "Hn3kd8Q0Rr2lMaPDn1cX0A")
+              assert_eq!(.elasticsearch.cluster.name, "production")
+              assert_eq!(.elasticsearch.node.id, "XyZ123")
+              assert_eq!(.elasticsearch.node.name, "es-node-1")

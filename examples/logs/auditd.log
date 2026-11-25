@@ -1,0 +1,2 @@
+type=USER_START msg=audit(1777629600.123:4521): pid=2211 uid=0 auid=1001 ses=12 subj=unconfined msg='op=PAM:session_open grantors=pam_selinux,pam_loginuid acct="deploy" exe="/usr/sbin/sshd" hostname=198.51.100.20 addr=198.51.100.20 terminal=ssh res=success'
+type=SYSCALL msg=audit(1777629601.456:4522): arch=c000003e syscall=59 success=yes exit=0 a0=55d0 a1=55d1 a2=55d2 a3=8 items=2 ppid=2300 pid=2301 auid=1001 uid=0 gid=0 euid=0 comm="systemctl" exe="/usr/bin/systemctl" key="privileged"

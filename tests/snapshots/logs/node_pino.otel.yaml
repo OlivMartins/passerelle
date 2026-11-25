@@ -1,0 +1,125 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (JSON — Node.js pino ou bunyan)
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_node_pino:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « JSON — Node.js pino ou bunyan »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      ligne = string(.message) ?? ""
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      objet, erreur = parse_json(ligne)
+      if erreur != null || !is_object(objet) {
+        .attributes."log.parse.error" = "ligne non reconnue : un objet JSON attendu"
+      } else {
+        .attributes."log.record.original" = ligne
+        champs = flatten(object!(objet))
+        # Horodatage : clé "time"
+        if exists(champs."time") {
+          horodatage1, erreur_horodatage1 = from_unix_timestamp(to_int(champs."time") ?? 0, unit: "milliseconds")
+          if erreur_horodatage1 == null {
+            .timestamp = horodatage1
+          }
+          del(champs."time")
+        }
+        # Niveau : clé "level"
+        if exists(champs."level") {
+          code3 = to_int(champs."level") ?? 0
+          niveau2 = if code3 <= 10 { "trace" } else if code3 <= 20 { "debug" } else if code3 <= 30 { "info" } else if code3 <= 40 { "warn" } else if code3 <= 50 { "error" } else if code3 <= 60 { "fatal" } else { "fatal" }
+          .severity_text = niveau2
+          niveau_min4 = downcase(niveau2)
+          .severity_number = if includes(["trace", "finest", "finer", "trace1", "trace2", "trace3", "trace4", "trace5", "trace6", "trace7", "trace8"], niveau_min4) { 1 } else if includes(["debug", "fine", "dbg", "config", "verbose"], niveau_min4) { 5 } else if includes(["info", "information", "informational"], niveau_min4) { 9 } else if includes(["notice"], niveau_min4) { 10 } else if includes(["warn", "warning"], niveau_min4) { 13 } else if includes(["error", "err", "severe"], niveau_min4) { 17 } else if includes(["fatal", "critical", "crit", "alert", "emerg", "emergency", "panic", "dpanic"], niveau_min4) { 21 } else { 0 }
+          del(champs."level")
+        }
+        # Message : clé "msg"
+        if exists(champs."msg") {
+          .message = champs."msg"
+          del(champs."msg")
+        }
+        # Rôle exc_type : clé "err.type"
+        if exists(champs."err.type") {
+          .attributes."exception.type" = champs."err.type"
+          del(champs."err.type")
+        }
+        # Rôle exc_message : clé "err.message"
+        if exists(champs."err.message") {
+          .attributes."exception.message" = champs."err.message"
+          del(champs."err.message")
+        }
+        # Rôle exc_stack : clé "err.stack"
+        if exists(champs."err.stack") {
+          .attributes."exception.stacktrace" = champs."err.stack"
+          del(champs."err.stack")
+        }
+        # Rôle host : clé "hostname"
+        if exists(champs."hostname") {
+          .resources."host.name" = champs."hostname"
+          del(champs."hostname")
+        }
+        # Rôle pid : clé "pid"
+        if exists(champs."pid") {
+          .resources."process.pid" = to_int(champs."pid") ?? null
+          del(champs."pid")
+        }
+        # Les autres clés deviennent des attributs
+        .attributes = merge(.attributes, champs)
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_node_pino]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : {"level":30,"time":1777629600123,"pid":42,"hostname":"api-7c…'
+    inputs:
+      - insert_at: analyse_node_pino
+        type: log
+        log_fields:
+          message: '{"level":30,"time":1777629600123,"pid":42,"hostname":"api-7c9f","reqId":"req-1","req":{"method":"GET","url":"/api/stock"},"msg":"requête reçue"}'
+    outputs:
+      - extract_from: analyse_node_pino
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "{\"level\":30,\"time\":1777629600123,\"pid\":42,\"hostname\":\"api-7c9f\",\"reqId\":\"req-1\",\"req\":{\"method\":\"GET\",\"url\":\"/api/stock\"},\"msg\":\"requête reçue\"}")
+              assert_eq!(.attributes."reqId", "req-1")
+              assert_eq!(.attributes."req.method", "GET")
+              assert_eq!(.attributes."req.url", "/api/stock")
+              assert_eq!(.resources."host.name", "api-7c9f")
+              assert_eq!(.resources."process.pid", 42)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:00.123Z')
+              assert_eq!(.severity_text, "info")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.message, "requête reçue")
+  - name: 'reconnue : {"level":50,"time":1777629601456,"pid":42,"hostname":"api-7c…'
+    inputs:
+      - insert_at: analyse_node_pino
+        type: log
+        log_fields:
+          message: '{"level":50,"time":1777629601456,"pid":42,"hostname":"api-7c9f","reqId":"req-2","err":{"type":"Error","message":"stock négatif","stack":"Error: stock négatif\n    at verifier (/app/stock.js:12:11)"},"msg":"requête en erreur"}'
+    outputs:
+      - extract_from: analyse_node_pino
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "{\"level\":50,\"time\":1777629601456,\"pid\":42,\"hostname\":\"api-7c9f\",\"reqId\":\"req-2\",\"err\":{\"type\":\"Error\",\"message\":\"stock négatif\",\"stack\":\"Error: stock négatif\\n    at verifier (/app/stock.js:12:11)\"},\"msg\":\"requête en erreur\"}")
+              assert_eq!(.attributes."exception.type", "Error")
+              assert_eq!(.attributes."exception.message", "stock négatif")
+              assert_eq!(.attributes."exception.stacktrace", "Error: stock négatif\n    at verifier (/app/stock.js:12:11)")
+              assert_eq!(.attributes."reqId", "req-2")
+              assert_eq!(.resources."host.name", "api-7c9f")
+              assert_eq!(.resources."process.pid", 42)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:01.456Z')
+              assert_eq!(.severity_text, "error")
+              assert_eq!(.severity_number, 17)
+              assert_eq!(.message, "requête en erreur")

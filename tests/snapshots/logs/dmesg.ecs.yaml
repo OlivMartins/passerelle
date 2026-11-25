@@ -1,0 +1,75 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Noyau Linux (dmesg))
+# Tests : vector test <fichier> rejoue les 3 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_dmesg:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Noyau Linux (dmesg) »
+      # Écrit à partir d’un échantillon de 3 événements (3 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^\[ *(?P<uptime>\d+\.\d+)\] (?P<msg>[\s\S]*)\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Noyau Linux (dmesg) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        .host.uptime = to_float(champs.uptime) ?? null
+        message1 = string!(champs.msg)
+        .message = message1
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_dmesg]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : [    0.000000] Linux version 6.8.0-45-generic (buildd@lcy02-…'
+    inputs:
+      - insert_at: analyse_dmesg
+        type: log
+        log_fields:
+          message: '[    0.000000] Linux version 6.8.0-45-generic (buildd@lcy02-amd64-075) (x86_64-linux-gnu-gcc-13)'
+    outputs:
+      - extract_from: analyse_dmesg
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "[    0.000000] Linux version 6.8.0-45-generic (buildd@lcy02-amd64-075) (x86_64-linux-gnu-gcc-13)")
+              assert_eq!(.host.uptime, 0.0)
+              assert_eq!(.message, "Linux version 6.8.0-45-generic (buildd@lcy02-amd64-075) (x86_64-linux-gnu-gcc-13)")
+  - name: 'reconnue : [    1.234567] ACPI: Added _OSI(Module Device)'
+    inputs:
+      - insert_at: analyse_dmesg
+        type: log
+        log_fields:
+          message: '[    1.234567] ACPI: Added _OSI(Module Device)'
+    outputs:
+      - extract_from: analyse_dmesg
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "[    1.234567] ACPI: Added _OSI(Module Device)")
+              assert_eq!(.host.uptime, 1.234567)
+              assert_eq!(.message, "ACPI: Added _OSI(Module Device)")
+  - name: 'reconnue : [ 7211.654321] Out of memory: Killed process 4242 (java) tot…'
+    inputs:
+      - insert_at: analyse_dmesg
+        type: log
+        log_fields:
+          message: '[ 7211.654321] Out of memory: Killed process 4242 (java) total-vm:8123456kB, anon-rss:4123456kB'
+    outputs:
+      - extract_from: analyse_dmesg
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "[ 7211.654321] Out of memory: Killed process 4242 (java) total-vm:8123456kB, anon-rss:4123456kB")
+              assert_eq!(.host.uptime, 7211.654321)
+              assert_eq!(.message, "Out of memory: Killed process 4242 (java) total-vm:8123456kB, anon-rss:4123456kB")

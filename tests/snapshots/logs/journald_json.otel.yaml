@@ -1,0 +1,123 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (JSON — journald (journalctl -o json))
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_journald_json:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « JSON — journald (journalctl -o json) »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      ligne = string(.message) ?? ""
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      objet, erreur = parse_json(ligne)
+      if erreur != null || !is_object(objet) {
+        .attributes."log.parse.error" = "ligne non reconnue : un objet JSON attendu"
+      } else {
+        .attributes."log.record.original" = ligne
+        champs = flatten(object!(objet))
+        # Horodatage : clé "__REALTIME_TIMESTAMP"
+        if exists(champs."__REALTIME_TIMESTAMP") {
+          horodatage1, erreur_horodatage1 = from_unix_timestamp(to_int(string(champs."__REALTIME_TIMESTAMP") ?? "") ?? 0, unit: "microseconds")
+          if erreur_horodatage1 == null {
+            .timestamp = horodatage1
+          }
+          del(champs."__REALTIME_TIMESTAMP")
+        }
+        # Niveau : clé "PRIORITY"
+        if exists(champs."PRIORITY") {
+          niveau2 = string(get(["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"], [to_int(champs."PRIORITY") ?? 6]) ?? "info") ?? "info"
+          .severity_text = niveau2
+          niveau_min3 = downcase(niveau2)
+          .severity_number = if includes(["trace", "finest", "finer", "trace1", "trace2", "trace3", "trace4", "trace5", "trace6", "trace7", "trace8"], niveau_min3) { 1 } else if includes(["debug", "fine", "dbg", "config", "verbose"], niveau_min3) { 5 } else if includes(["info", "information", "informational"], niveau_min3) { 9 } else if includes(["notice"], niveau_min3) { 10 } else if includes(["warn", "warning"], niveau_min3) { 13 } else if includes(["error", "err", "severe"], niveau_min3) { 17 } else if includes(["fatal", "critical", "crit", "alert", "emerg", "emergency", "panic", "dpanic"], niveau_min3) { 21 } else { 0 }
+          del(champs."PRIORITY")
+        }
+        # Message : clé "MESSAGE"
+        if exists(champs."MESSAGE") {
+          .message = champs."MESSAGE"
+          del(champs."MESSAGE")
+        }
+        # Rôle host : clé "_HOSTNAME"
+        if exists(champs."_HOSTNAME") {
+          .resources."host.name" = champs."_HOSTNAME"
+          del(champs."_HOSTNAME")
+        }
+        # Rôle service : clé "SYSLOG_IDENTIFIER"
+        if exists(champs."SYSLOG_IDENTIFIER") {
+          .resources."service.name" = champs."SYSLOG_IDENTIFIER"
+          del(champs."SYSLOG_IDENTIFIER")
+        }
+        # Rôle pid : clé "_PID"
+        if exists(champs."_PID") {
+          .resources."process.pid" = to_int(champs."_PID") ?? null
+          del(champs."_PID")
+        }
+        # Les autres clés deviennent des attributs
+        .attributes = merge(.attributes, champs)
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_journald_json]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : {"__CURSOR":"s=7f1e;i=1a2b","__REALTIME_TIMESTAMP":"17776296…'
+    inputs:
+      - insert_at: analyse_journald_json
+        type: log
+        log_fields:
+          message: '{"__CURSOR":"s=7f1e;i=1a2b","__REALTIME_TIMESTAMP":"1777629600123456","__MONOTONIC_TIMESTAMP":"3605123456","_BOOT_ID":"0f1e2d3c4b5a69788796a5b4c3d2e1f0","PRIORITY":"6","SYSLOG_FACILITY":"3","SYSLOG_IDENTIFIER":"systemd","_PID":"1","_UID":"0","_COMM":"systemd","_EXE":"/usr/lib/systemd/systemd","_SYSTEMD_UNIT":"init.scope","_HOSTNAME":"web01","MESSAGE":"Started nginx.service - A high performance web server and a reverse proxy server.","UNIT":"nginx.service"}'
+    outputs:
+      - extract_from: analyse_journald_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "{\"__CURSOR\":\"s=7f1e;i=1a2b\",\"__REALTIME_TIMESTAMP\":\"1777629600123456\",\"__MONOTONIC_TIMESTAMP\":\"3605123456\",\"_BOOT_ID\":\"0f1e2d3c4b5a69788796a5b4c3d2e1f0\",\"PRIORITY\":\"6\",\"SYSLOG_FACILITY\":\"3\",\"SYSLOG_IDENTIFIER\":\"systemd\",\"_PID\":\"1\",\"_UID\":\"0\",\"_COMM\":\"systemd\",\"_EXE\":\"/usr/lib/systemd/systemd\",\"_SYSTEMD_UNIT\":\"init.scope\",\"_HOSTNAME\":\"web01\",\"MESSAGE\":\"Started nginx.service - A high performance web server and a reverse proxy server.\",\"UNIT\":\"nginx.service\"}")
+              assert_eq!(.attributes."__CURSOR", "s=7f1e;i=1a2b")
+              assert_eq!(.attributes."__MONOTONIC_TIMESTAMP", "3605123456")
+              assert_eq!(.attributes."_BOOT_ID", "0f1e2d3c4b5a69788796a5b4c3d2e1f0")
+              assert_eq!(.attributes."SYSLOG_FACILITY", "3")
+              assert_eq!(.attributes."_UID", "0")
+              assert_eq!(.attributes."_COMM", "systemd")
+              assert_eq!(.attributes."_EXE", "/usr/lib/systemd/systemd")
+              assert_eq!(.attributes."_SYSTEMD_UNIT", "init.scope")
+              assert_eq!(.attributes."UNIT", "nginx.service")
+              assert_eq!(.resources."host.name", "web01")
+              assert_eq!(.resources."service.name", "systemd")
+              assert_eq!(.resources."process.pid", 1)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:00.123456Z')
+              assert_eq!(.severity_text, "info")
+              assert_eq!(.severity_number, 9)
+              assert_eq!(.message, "Started nginx.service - A high performance web server and a reverse proxy server.")
+  - name: 'reconnue : {"__CURSOR":"s=7f1e;i=1a2c","__REALTIME_TIMESTAMP":"17776296…'
+    inputs:
+      - insert_at: analyse_journald_json
+        type: log
+        log_fields:
+          message: '{"__CURSOR":"s=7f1e;i=1a2c","__REALTIME_TIMESTAMP":"1777629601500000","PRIORITY":"3","SYSLOG_FACILITY":"10","SYSLOG_IDENTIFIER":"sshd","_PID":"2215","_UID":"0","_COMM":"sshd","_SYSTEMD_UNIT":"ssh.service","_HOSTNAME":"web01","MESSAGE":"error: kex_exchange_identification: Connection closed by remote host"}'
+    outputs:
+      - extract_from: analyse_journald_json
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.record.original", "{\"__CURSOR\":\"s=7f1e;i=1a2c\",\"__REALTIME_TIMESTAMP\":\"1777629601500000\",\"PRIORITY\":\"3\",\"SYSLOG_FACILITY\":\"10\",\"SYSLOG_IDENTIFIER\":\"sshd\",\"_PID\":\"2215\",\"_UID\":\"0\",\"_COMM\":\"sshd\",\"_SYSTEMD_UNIT\":\"ssh.service\",\"_HOSTNAME\":\"web01\",\"MESSAGE\":\"error: kex_exchange_identification: Connection closed by remote host\"}")
+              assert_eq!(.attributes."__CURSOR", "s=7f1e;i=1a2c")
+              assert_eq!(.attributes."SYSLOG_FACILITY", "10")
+              assert_eq!(.attributes."_UID", "0")
+              assert_eq!(.attributes."_COMM", "sshd")
+              assert_eq!(.attributes."_SYSTEMD_UNIT", "ssh.service")
+              assert_eq!(.resources."host.name", "web01")
+              assert_eq!(.resources."service.name", "sshd")
+              assert_eq!(.resources."process.pid", 2215)
+              assert_eq!(.timestamp, t'2026-05-01T10:00:01.5Z')
+              assert_eq!(.severity_text, "err")
+              assert_eq!(.severity_number, 17)
+              assert_eq!(.message, "error: kex_exchange_identification: Connection closed by remote host")

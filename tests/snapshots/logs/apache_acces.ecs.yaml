@@ -1,0 +1,113 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (Journal d’accès HTTP (combined ou common : nginx, Apache))
+# Tests : vector test <fichier> rejoue les 2 lignes de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_apache_acces:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « Journal d’accès HTTP (combined ou common : nginx, Apache) »
+      # Écrit à partir d’un échantillon de 2 événements (2 reconnus). Convention : ECS (Elastic Common Schema).
+      ligne = string(.message) ?? ""
+      champs, erreur = parse_regex(ligne, r'^(?P<client>\S+) (?P<ident>\S+) (?P<user>\S+) \[(?P<time>[^\]]+)\] "(?:(?P<method>[A-Z]+) (?P<path>[^\s?"]*)(?:\?(?P<query>[^\s"]*))?(?: (?P<protocol>[A-Za-z]+)/(?P<pver>[0-9.]+))?|(?P<request>(?:[^"\\]|\\.)*))" (?P<status>\d{3}) (?P<bytes>\d+|-)(?: "(?P<referrer>(?:[^"\\]|\\.)*)" "(?P<agent>(?:[^"\\]|\\.)*)"(?: "(?P<xff>(?:[^"\\]|\\.)*)")?)?(?: (?P<duration>\d+\.\d+))?\z')
+      if erreur != null {
+        .error.message = "ligne non reconnue : format « Journal d’accès HTTP (combined ou common : nginx, Apache) » attendu"
+        .tags = push(array(.tags) ?? [], "_vrl_parse_failure")
+      } else {
+        .event.original = ligne
+        .source.address = champs.client
+        if champs.user != "-" && champs.user != "" {
+          .user.name = champs.user
+        }
+        horodatage1, erreur_horodatage1 = parse_timestamp(string!(champs.time), "%d/%b/%Y:%H:%M:%S%.f %z")
+        if erreur_horodatage1 == null {
+          ."@timestamp" = horodatage1
+          del(.timestamp)
+        }
+        if champs.method != null {
+          .http.request.method = champs.method
+        }
+        if champs.path != null {
+          .url.path = champs.path
+        }
+        if champs.query != null && champs.query != "-" && champs.query != "" {
+          .url.query = champs.query
+        }
+        if champs.protocol != null {
+          .network.protocol = downcase(string!(champs.protocol))
+        }
+        if champs.pver != null {
+          .http.version = champs.pver
+        }
+        if champs.request != null && champs.request != "-" && champs.request != "" {
+          .http.request.line = champs.request
+        }
+        .http.response.status_code = to_int(champs.status) ?? null
+        if champs.bytes != "-" && champs.bytes != "" {
+          .http.response.body.bytes = to_int(champs.bytes) ?? null
+        }
+        if champs.referrer != null && champs.referrer != "-" && champs.referrer != "" {
+          .http.request.referrer = champs.referrer
+        }
+        if champs.agent != null && champs.agent != "-" && champs.agent != "" {
+          .user_agent.original = champs.agent
+        }
+        if champs.xff != null && champs.xff != "-" && champs.xff != "" {
+          .network.forwarded_ip = champs.xff
+        }
+        if champs.duration != null {
+          .event.duration = to_int((to_float(champs.duration) ?? 0.0) * 1000000000.0)
+        }
+      }
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_apache_acces]
+    encoding:
+      codec: json
+tests:
+  - name: 'reconnue : 192.0.2.1 - frank [10/Oct/2025:13:55:36 -0700] "GET /apache_…'
+    inputs:
+      - insert_at: analyse_apache_acces
+        type: log
+        log_fields:
+          message: '192.0.2.1 - frank [10/Oct/2025:13:55:36 -0700] "GET /apache_pb.gif HTTP/1.0" 200 2326'
+    outputs:
+      - extract_from: analyse_apache_acces
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "192.0.2.1 - frank [10/Oct/2025:13:55:36 -0700] \"GET /apache_pb.gif HTTP/1.0\" 200 2326")
+              assert_eq!(.source.address, "192.0.2.1")
+              assert_eq!(.user.name, "frank")
+              assert_eq!(."@timestamp", t'2025-10-10T20:55:36Z')
+              assert_eq!(.http.request.method, "GET")
+              assert_eq!(.http.version, "1.0")
+              assert_eq!(.http.response.status_code, 200)
+              assert_eq!(.http.response.body.bytes, 2326)
+              assert_eq!(.url.path, "/apache_pb.gif")
+              assert_eq!(.network.protocol, "http")
+  - name: 'reconnue : 192.0.2.2 - - [10/Oct/2025:13:55:37 -0700] "GET /icons/blank…'
+    inputs:
+      - insert_at: analyse_apache_acces
+        type: log
+        log_fields:
+          message: '192.0.2.2 - - [10/Oct/2025:13:55:37 -0700] "GET /icons/blank.gif HTTP/1.1" 304 -'
+    outputs:
+      - extract_from: analyse_apache_acces
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.event.original, "192.0.2.2 - - [10/Oct/2025:13:55:37 -0700] \"GET /icons/blank.gif HTTP/1.1\" 304 -")
+              assert_eq!(.source.address, "192.0.2.2")
+              assert_eq!(."@timestamp", t'2025-10-10T20:55:37Z')
+              assert_eq!(.http.request.method, "GET")
+              assert_eq!(.http.version, "1.1")
+              assert_eq!(.http.response.status_code, 304)
+              assert_eq!(.url.path, "/icons/blank.gif")
+              assert_eq!(.network.protocol, "http")

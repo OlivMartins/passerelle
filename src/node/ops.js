@@ -229,6 +229,7 @@ const OPS_ROUTES = new Set([
   '/v1/translate/logstash',
   '/v1/translate/logstash/pipelines',
   '/v1/translate/ingest',
+  '/v1/translate/log',
   '/v1/translate/grafana',
   '/v1/translate/watcher',
   '/v1/inventory/kibana',

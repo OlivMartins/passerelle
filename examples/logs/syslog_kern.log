@@ -1,0 +1,4 @@
+May  1 10:00:00 web01 kernel: [    0.000000] Linux version 6.8.0-45-generic (buildd@lcy02-amd64-075) (x86_64-linux-gnu-gcc-13)
+May  1 10:00:10 web01 kernel: [ 3605.123456] eth0: Link is Up - 10Gbps Full Duplex, Flow Control: None
+May  1 10:00:20 web01 kernel: [ 7211.654321] Out of memory: Killed process 4242 (java) total-vm:8123456kB, anon-rss:4123456kB
+May  1 10:00:30 web01 kernel: [ 7300.000001] [UFW BLOCK] IN=eth0 OUT= MAC=00:11:22:33:44:55 SRC=203.0.113.5 DST=10.0.0.4 PROTO=TCP SPT=51515 DPT=22

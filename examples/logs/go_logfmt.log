@@ -1,0 +1,3 @@
+time=2026-05-01T10:00:00.000+02:00 level=INFO msg="serveur démarré" addr=:8080 version=1.4.2
+time=2026-05-01T10:00:01.250+02:00 level=WARN msg="latence élevée" route=/api/stock duree_ms=812 tentative=2
+time=2026-05-01T10:00:02.500+02:00 level=ERROR msg="échec de la requête" route=/api/paiement err="context deadline exceeded" trace_id=4bf92f3577b34da6a3ce929d0e0e4736

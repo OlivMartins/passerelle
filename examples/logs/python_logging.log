@@ -1,0 +1,10 @@
+2026-05-01 10:00:00,123 - facturation.worker - INFO - Traitement du lot 77 (120 factures)
+2026-05-01 10:00:00,456 - facturation.worker - WARNING - Facture 9001 sans adresse de livraison
+2026-05-01 10:00:01,002 - facturation.export - ERROR - Export PDF impossible pour la facture 9002
+Traceback (most recent call last):
+  File "/app/facturation/export.py", line 54, in rendre
+    pdf = moteur.rendre(facture)
+  File "/app/facturation/moteur.py", line 12, in rendre
+    raise ValueError("gabarit introuvable : facture_v3")
+ValueError: gabarit introuvable : facture_v3
+2026-05-01 10:00:02,000 - facturation.worker - DEBUG - Lot 77 terminé

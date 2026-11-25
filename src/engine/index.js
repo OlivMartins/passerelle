@@ -19,3 +19,4 @@ export * from './pipelines.js';
 export * from './ingest.js';
 export * from './equivalence.js';
 export * from './replay.js';
+export * from './logvrl.js';

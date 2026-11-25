@@ -1,0 +1,4 @@
+2026-05-01T10:00:00.123Z	info	service@v0.120.0/service.go:186	Starting otelcol-contrib...	{"Version": "0.120.0", "NumCPU": 8}
+2026-05-01T10:00:00.456Z	info	extensions/extensions.go:39	Starting extensions...
+2026-05-01T10:00:05.789Z	warn	batchprocessor@v0.120.0/batch_processor.go:263	Sender failed	{"kind": "processor", "name": "batch", "pipeline": "logs", "error": "sending queue is full"}
+2026-05-01T10:00:06.001Z	error	exporterhelper/queue_sender.go:128	Exporting failed. Dropping data.	{"kind": "exporter", "data_type": "logs", "name": "clickhouse", "error": "dial tcp 10.0.3.7:9000: connect: connection refused", "dropped_items": 512}

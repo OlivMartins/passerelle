@@ -1,0 +1,5 @@
+2026-05-01T10:00:00.123+02:00  INFO 4321 --- [boutique] [           main] c.e.boutique.BoutiqueApplication         : Started BoutiqueApplication in 3.512 seconds (process running for 3.9)
+2026-05-01T10:00:05.001+02:00  WARN 4321 --- [boutique] [nio-8080-exec-2] o.s.w.s.PageNotFound                     : No mapping for GET /favicon.ico
+2026-05-01T10:00:09.777+02:00 ERROR 4321 --- [boutique] [nio-8080-exec-4] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : Servlet.service() for servlet [dispatcherServlet] threw exception
+java.lang.NullPointerException: Cannot invoke "String.length()" because "nom" is null
+	at com.example.boutique.web.ClientController.creer(ClientController.java:27)

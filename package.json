@@ -1,6 +1,6 @@
 {
   "name": "passerelle",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "type": "module",
   "private": true,
   "description": "Traduction des requêtes DSL Elasticsearch en SQL ClickHouse et des pipelines Logstash en configurations Vector",
@@ -15,11 +15,13 @@
     "test:watcher": "node tests/differential/watcher.mjs",
     "test:assist": "node tests/assist/ruby.mjs --require",
     "test:pipelines": "node tests/pipelines/run.mjs",
+    "test:logs": "node tests/logs/vector.mjs --require",
     "test:attributes": "node tests/attributes/run.mjs",
     "test:clickhouse": "node tests/clickhouse/run.mjs",
     "test:ui": "node tests/ui/run.mjs",
     "test:ingest": "node tests/ingest/valider.mjs && node tests/ingest/valider.mjs --clickhouse && node tests/ingest/tls.mjs && node tests/ingest/painless.mjs",
     "couverture": "node scripts/couverture.mjs",
+    "demo": "node scripts/demo.mjs",
     "check": "biome ci",
     "lint": "biome lint",
     "format": "biome format --write"

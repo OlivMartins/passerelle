@@ -1,0 +1,39 @@
+# Configuration Vector générée par Passerelle depuis un échantillon de journaux (non reconnu)
+# Tests : vector test <fichier> rejoue les 1 ligne de l’échantillon et vérifie chaque champ
+# Essai : vector --config <fichier> < echantillon.log
+# En production : remplacez la source « journaux » (file, kafka, journald, opentelemetry…) et la sortie « sortie »
+
+sources:
+  journaux:
+    type: stdin
+transforms:
+  analyse_inconnu:
+    type: remap
+    inputs: [journaux]
+    source: |
+      # Passerelle — analyse des lignes au format « non reconnu »
+      # Écrit à partir d’un échantillon de 3 événements (0 reconnu). Convention : OpenTelemetry.
+      # Forme des événements de la source opentelemetry de Vector : .message (corps), .attributes, .resources, .severity_text.
+      .attributes = object(.attributes) ?? {}
+      .resources = object(.resources) ?? {}
+      # Format non reconnu : la ligne reste dans .message. À compléter avec parse_regex ou parse_grok.
+      .attributes."log.parse.error" = "format non reconnu par Passerelle"
+sinks:
+  sortie:
+    type: console
+    inputs: [analyse_inconnu]
+    encoding:
+      codec: json
+tests:
+  - name: 'non reconnue : ***** démarrage du traitement nocturne *****'
+    inputs:
+      - insert_at: analyse_inconnu
+        type: log
+        log_fields:
+          message: '***** démarrage du traitement nocturne *****'
+    outputs:
+      - extract_from: analyse_inconnu
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.attributes."log.parse.error", "format non reconnu par Passerelle")

@@ -1,0 +1,3 @@
+I0501 10:00:00.123456       1 controller.go:211] "Synchronisation du déploiement" deployment="boutique/api" replicas=3
+W0501 10:00:01.654321       1 reflector.go:539] client-go/informers: failed to list *v1.Pod: the server is currently unable to handle the request
+E0501 10:00:02.000001      17 leaderelection.go:340] error retrieving resource lock kube-system/kube-scheduler: context deadline exceeded
