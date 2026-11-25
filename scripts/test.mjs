@@ -146,7 +146,7 @@ for (const c of PIPELINE_CASES) {
     withHeader(r, '#') + (Object.keys(own).length ? E.toYAML({ transforms: own }) : r.yaml).trimEnd() + '\n'
   );
 }
-// Inventaire Kibana des exemples : le rapport complet (verdicts, effort, SQL de chaque objet) est figé ici ;
+// Inventaire Kibana des exemples : le rapport complet (verdicts, SQL de chaque objet) est figé ici ;
 // le banc ClickHouse (npm run test:clickhouse) exécute chacune de ses requêtes et contrôle des valeurs
 const kibanaCfg = E.mergeConfig(E.DEFAULT_CONFIG, E.parseYAMLConfig(rd('examples/kibana/passerelle.yaml')));
 const kibanaFiles = readdirSync(join(ROOT, 'examples/kibana'))
@@ -1269,9 +1269,16 @@ check(
     /`?url\.path`? != '\/health'/.test(byValue.queries[0].sql),
   'panneau par valeur : requête et filtres du tableau de bord inclus'
 );
+// Les estimations d’effort ont été retirées : ni dans les données (JSON), ni dans les rapports
 check(
-  kibanaInv.summary.effort.hours === kibanaInv.entries.reduce((n, x) => n + x.effort, 0),
-  'effort total : somme des objets, chaque objet compté une fois'
+  !('effort' in kibanaInv.summary) &&
+    !('effortScale' in kibanaInv) &&
+    kibanaInv.entries.every(x => !('effort' in x) && !('effortDetail' in x) && !('effortTotal' in x)) &&
+    kibanaInv.blockers.every(b => !('hours' in b)) &&
+    ![E.inventoryMarkdown(kibanaInv), E.inventoryHTML(kibanaInv), E.inventoryCSV(kibanaInv)].some(t =>
+      /\b[Ee]ffort\b/.test(t)
+    ),
+  'inventaire Kibana : aucune estimation d’effort, ni dans les données ni dans les rapports'
 );
 const kbTsvb = kbEntry('Débit sortant par hôte (TSVB)');
 check(
@@ -1380,13 +1387,12 @@ const kbSig = text =>
     E.kibanaInventory(text, kibanaCfg, {}).entries.map(x => [
       x.key,
       x.verdict,
-      x.effort,
       x.queries.map(q => [q.title, q.verdict, q.sql])
     ])
   );
 const kbRef = kbSig(kbWeb);
 check(
-  JSON.parse(kbRef).reduce((n, x) => n + x[3].length, 0) >= 19,
+  JSON.parse(kbRef).reduce((n, x) => n + x[2].length, 0) >= 19,
   'panneaux 9.4+ : la comparaison porte sur toutes les requêtes de l’exemple'
 );
 // Lens : un terms trié sur une colonne « comptage filtré » trie sur « filtre » (« filtre._count » est refusé dans un tri)
@@ -1438,10 +1444,7 @@ check(
     ['visualization', 'lens', 'search'].every(t => !kbPanelTypes.has(t)),
   'panneaux 9.4+ : le tableau de bord de test ne porte plus que les nouveaux noms'
 );
-check(
-  kbSig(kbStored) === kbRef,
-  'panneaux 9.4+ (nouveaux noms) : SQL, verdicts et effort identiques à ceux de l’export 8.x'
-);
+check(kbSig(kbStored) === kbRef, 'panneaux 9.4+ (nouveaux noms) : SQL et verdicts identiques à ceux de l’export 8.x');
 // Forme de l’API : { type, grid, id, config }, références dans config.ref_id, une section qui range des panneaux
 const kbApi = kbWebWith((o, panels) => {
   const refs = o.references;
@@ -3026,8 +3029,14 @@ check(
     'watches, modèle de recherche stocké : à reprendre ; ?active=false lu'
   );
   check(
-    watcherRep.summary.effort.hours === watcherRep.entries.reduce((n, e) => n + e.effort, 0),
-    'watches, effort total : somme des watches'
+    !('effort' in watcherRep.summary) &&
+      !('effortScale' in watcherRep) &&
+      watcherRep.entries.every(e => !('effort' in e) && !('effortDetail' in e)) &&
+      watcherRep.blockers.every(b => !('hours' in b)) &&
+      ![E.watcherReportMarkdown(watcherRep), E.watcherReportHTML(watcherRep), E.watcherReportCSV(watcherRep)].some(t =>
+        /\b[Ee]ffort\b/.test(t)
+      ),
+    'watches, aucune estimation d’effort, ni dans les données ni dans les rapports'
   );
 
   // Secrets : jamais dans le rapport, masqués dans un export

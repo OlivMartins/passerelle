@@ -1,21 +1,17 @@
 /* Passerelle — moteur : watches Elasticsearch (Watcher) → SQL ClickHouse et rapport de migration */
-import { chStr, coverage, escRe, isObj, verdictOf, VERDICTS } from './base.js';
+import { chStr, coverage, escRe, isObj, verdictOf } from './base.js';
 import { preprocessDSL, rawAlias, translateDSL } from './dsl.js';
 import {
   addQuery,
   blockerLabel,
   decisionWrap,
-  frHours,
   frNum,
   KB_CSS,
-  KB_EFFORT,
   KB_PREREQ,
   KB_PREREQ_SHOWN,
   kbFlat,
   kbHtml,
   kbVerdict,
-  quarter,
-  todoHours,
   worstVerdict
 } from './kibana.js';
 import { mapFieldOf } from './grafana.js';
@@ -65,7 +61,6 @@ const WATCH_KINDS = {
   threshold: 'seuil (interface Watcher de Kibana)',
   monitoring: 'Stack Monitoring'
 };
-const WATCH_EFFORT = { base: 1, action: 0.25 };
 const WATCH_TOTAL_CAP = 10000;
 const WATCH_METRICS = new Set([
   'avg',
@@ -1244,9 +1239,7 @@ function watchEntry(id, title) {
     children: [],
     usedBy: [],
     fields: new Set(),
-    verdict: 'ready',
-    effort: 0,
-    effortDetail: []
+    verdict: 'ready'
   };
 }
 function analyzeWatch(item, cfg) {
@@ -1407,8 +1400,7 @@ function analyzeWatch(item, cfg) {
     x.issues.push({
       kind: 'info',
       label: `${x.actions.length} action${x.actions.length > 1 ? 's' : ''} à recréer`,
-      detail: `${detail}. Les comptes (e-mail, Slack, PagerDuty, Jira) sont déclarés dans elasticsearch.yml, pas dans la watch.`,
-      hours: WATCH_EFFORT.action * x.actions.length
+      detail: `${detail}. Les comptes (e-mail, Slack, PagerDuty, Jira) sont déclarés dans elasticsearch.yml, pas dans la watch.`
     });
     for (const a of x.actions) {
       if (a.type === 'index')
@@ -1464,7 +1456,7 @@ function analyzeWatch(item, cfg) {
     });
   return x;
 }
-// Verdict et effort d’une watch
+// Verdict d’une watch
 function watchScore(x) {
   const seen = new Set();
   x.issues = x.issues.filter(i => {
@@ -1475,30 +1467,8 @@ function watchScore(x) {
   });
   if (x.skipped) {
     x.verdict = 'ready';
-    x.effort = 0;
-    x.effortDetail = [];
     return;
   }
-  const lines = [{ label: 'Recréer l’alerte (planification, condition, notifications)', hours: WATCH_EFFORT.base }];
-  for (const q of x.queries.filter(y => !y.derived)) {
-    if (KB_EFFORT.query[q.verdict])
-      lines.push({ label: `Vérifier « ${q.title} » (${VERDICTS[q.verdict]})`, hours: KB_EFFORT.query[q.verdict] });
-    let warn = 0;
-    for (const n of q.notes) {
-      if (KB_PREREQ.test(n.title)) continue;
-      if (n.level === 'err') lines.push({ label: n.title, hours: todoHours(n.title) });
-      else if (n.level === 'warn') warn += KB_EFFORT.warn;
-    }
-    if (warn) lines.push({ label: `Points à vérifier de « ${q.title} »`, hours: Math.min(warn, KB_EFFORT.warnCap) });
-  }
-  for (const i of x.issues)
-    if (i.kind !== 'info' || i.hours)
-      lines.push({
-        label: i.label,
-        hours: i.hours !== undefined ? i.hours : i.kind === 'todo' ? todoHours(i.label) : KB_EFFORT.review
-      });
-  x.effortDetail = lines.filter(l => l.hours > 0);
-  x.effort = quarter(x.effortDetail.reduce((n, l) => n + l.hours, 0));
   const verdicts = x.queries
     .filter(q => !q.derived)
     .map(q => (q.verdict === 'unrecognized' ? 'todo' : q.verdict))
@@ -1546,16 +1516,13 @@ export function watcherTranslate(text, cfg, opts) {
   const live = entries.filter(x => !x.skipped);
   const byVerdict = { ready: 0, review: 0, todo: 0, unrecognized: 0 };
   for (const x of live) byVerdict[x.verdict]++;
-  const hours = quarter(live.reduce((n, x) => n + x.effort, 0));
   const blockers = new Map();
   const prereq = new Map();
   const guessed = new Map();
   const bump = (label, key) => {
     const k = blockerLabel(label);
-    if (!blockers.has(k)) blockers.set(k, { label: k, kind: 'todo', objects: new Set(), hours: 0 });
-    const b = blockers.get(k);
-    b.objects.add(key);
-    b.hours += todoHours(label);
+    if (!blockers.has(k)) blockers.set(k, { label: k, kind: 'todo', objects: new Set() });
+    blockers.get(k).objects.add(key);
   };
   for (const x of live) {
     for (const i of x.issues) if (i.kind === 'todo') bump(i.label, x.key);
@@ -1580,7 +1547,6 @@ export function watcherTranslate(text, cfg, opts) {
       skipped: entries.length - live.length,
       inactive: live.filter(x => !x.active).length,
       byVerdict,
-      effort: { hours, days: Math.round((hours / KB_EFFORT.hoursPerDay) * 10) / 10 },
       queries: live.reduce((n, x) => n + x.queries.filter(q => !q.derived && q.sql).length, 0),
       conditions: live.filter(x => x.queries.some(q => q.derived)).length,
       actions
@@ -1599,19 +1565,10 @@ export function watcherTranslate(text, cfg, opts) {
           : []
       ),
     blockers: [...blockers.values()]
-      .map(b => ({ label: b.label, kind: b.kind, objects: b.objects.size, hours: quarter(b.hours) }))
-      .sort((p, q) => q.hours - p.hours || q.objects - p.objects)
+      .map(b => ({ label: b.label, kind: b.kind, objects: b.objects.size }))
+      .sort((p, q) => q.objects - p.objects || p.label.localeCompare(q.label, 'fr'))
       .slice(0, 20),
-    entries: entries.map(x => Object.assign({}, x, { fields: [...x.fields].sort() })),
-    effortScale: {
-      hoursPerDay: KB_EFFORT.hoursPerDay,
-      base: WATCH_EFFORT.base,
-      action: WATCH_EFFORT.action,
-      query: KB_EFFORT.query,
-      review: KB_EFFORT.review,
-      todo: KB_EFFORT.todo.map(([re, h, label]) => ({ label, match: re.source, hours: h })),
-      todoDefault: KB_EFFORT.todoDefault
-    }
+    entries: entries.map(x => Object.assign({}, x, { fields: [...x.fields].sort() }))
   };
 }
 
@@ -1650,7 +1607,7 @@ export function watcherReportMarkdown(rep) {
   L.push('# Migration des watches Elasticsearch vers ClickHouse', '');
   if (rep.source.origin) L.push(`Source : ${kbFlat(rep.source.origin)}.`, '');
   L.push(
-    `${s.watches} watch${s.watches > 1 ? 'es' : ''} à migrer${s.inactive ? ` (dont ${s.inactive} désactivée${s.inactive > 1 ? 's' : ''})` : ''}, ${s.queries} requête${s.queries > 1 ? 's' : ''} traduite${s.queries > 1 ? 's' : ''}, ${s.conditions} condition${s.conditions > 1 ? 's' : ''} traduite${s.conditions > 1 ? 's' : ''} en décision SQL. Effort estimé : **${frHours(s.effort.hours)}**, soit **${frNum(s.effort.days)} jour${s.effort.days > 1 ? 's' : ''}** à ${rep.effortScale.hoursPerDay} h.`,
+    `${s.watches} watch${s.watches > 1 ? 'es' : ''} à migrer${s.inactive ? ` (dont ${s.inactive} désactivée${s.inactive > 1 ? 's' : ''})` : ''}, ${s.queries} requête${s.queries > 1 ? 's' : ''} traduite${s.queries > 1 ? 's' : ''}, ${s.conditions} condition${s.conditions > 1 ? 's' : ''} traduite${s.conditions > 1 ? 's' : ''} en décision SQL.`,
     ''
   );
   if (s.skipped)
@@ -1666,11 +1623,11 @@ export function watcherReportMarkdown(rep) {
   L.push(
     '## Synthèse',
     '',
-    '| Watches | Prêtes | À vérifier | À reprendre | Non reconnues | Effort |',
-    '|---:|---:|---:|---:|---:|---:|'
+    '| Watches | Prêtes | À vérifier | À reprendre | Non reconnues |',
+    '|---:|---:|---:|---:|---:|'
   );
   L.push(
-    `| ${s.watches} | ${s.byVerdict.ready} | ${s.byVerdict.review} | ${s.byVerdict.todo} | ${s.byVerdict.unrecognized} | ${frHours(s.effort.hours)} |`,
+    `| ${s.watches} | ${s.byVerdict.ready} | ${s.byVerdict.review} | ${s.byVerdict.todo} | ${s.byVerdict.unrecognized} |`,
     ''
   );
   L.push(
@@ -1686,19 +1643,19 @@ export function watcherReportMarkdown(rep) {
     L.push('');
   }
   if (rep.blockers.length) {
-    L.push('## Principaux points à reprendre', '', '| Point | Watches | Effort |', '|---|---:|---:|');
-    for (const b of rep.blockers) L.push(`| ${cell(b.label)} | ${b.objects} | ${frHours(b.hours)} |`);
+    L.push('## Principaux points à reprendre', '', '| Point | Watches |', '|---|---:|');
+    for (const b of rep.blockers) L.push(`| ${cell(b.label)} | ${b.objects} |`);
     L.push('');
   }
   L.push(
     '## Watches',
     '',
-    '| Watch | État | Planification | Condition | Actions | Verdict | Effort |',
-    '|---|---|---|---|---|---|---:|'
+    '| Watch | État | Planification | Condition | Actions | Verdict |',
+    '|---|---|---|---|---|---|'
   );
   for (const x of rep.entries)
     L.push(
-      `| ${cell(x.title)} | ${watchState(x)} | ${cell(x.schedule ? x.schedule.text : '')} | ${cell(x.condition)} | ${cell(x.actions.map(a => a.label).join(', ') || '—')} | ${x.skipped ? 'sans objet' : kbVerdict(x.verdict)} | ${frHours(x.effort)} |`
+      `| ${cell(x.title)} | ${watchState(x)} | ${cell(x.schedule ? x.schedule.text : '')} | ${cell(x.condition)} | ${cell(x.actions.map(a => a.label).join(', ') || '—')} | ${x.skipped ? 'sans objet' : kbVerdict(x.verdict)} |`
     );
   L.push('');
   const help = watchRunHelp(rep);
@@ -1707,7 +1664,7 @@ export function watcherReportMarkdown(rep) {
   for (const x of rep.entries) {
     L.push(`### ${kbFlat(x.title)}`, '');
     L.push(
-      `${x.skipped ? 'Sans objet' : `${kbVerdict(x.verdict).replace(/^./, c => c.toUpperCase())}, ${frHours(x.effort)}`}. ${x.kindLabel.replace(/^./, c => c.toUpperCase())}, ${watchState(x)}. Identifiant : \`${x.id}\`.${x.views.length ? ` Index : ${x.views.join(', ')}.` : ''}${x.tables.length ? ` Table : ${x.tables.join(', ')}.` : ''}`,
+      `${x.skipped ? 'Sans objet' : kbVerdict(x.verdict).replace(/^./, c => c.toUpperCase())}. ${x.kindLabel.replace(/^./, c => c.toUpperCase())}, ${watchState(x)}. Identifiant : \`${x.id}\`.${x.views.length ? ` Index : ${x.views.join(', ')}.` : ''}${x.tables.length ? ` Table : ${x.tables.join(', ')}.` : ''}`,
       ''
     );
     if (x.schedule)
@@ -1745,19 +1702,7 @@ export function watcherReportMarkdown(rep) {
       if (q.sql) L.push('```sql', q.sql, '```', '');
       else if (q.error) L.push(`> ${kbFlat(q.error)}`, '');
     }
-    if (x.effortDetail.length > 1)
-      L.push(
-        `<details><summary>Calcul de l’effort</summary>\n\n${x.effortDetail.map(l => `- ${kbFlat(l.label)} : ${frHours(l.hours)}`).join('\n')}\n\n</details>`,
-        ''
-      );
   }
-  const sc = rep.effortScale;
-  L.push(
-    '## Barème de l’effort',
-    '',
-    `Recréer une alerte (planification, condition, notifications) : ${frHours(sc.base)}, plus ${frHours(sc.action)} par action. Vérifier une requête : ${frHours(sc.query.review)} si elle est à vérifier, ${frHours(sc.query.todo)} si elle est à reprendre, plus ${frHours(sc.review)} par point à vérifier. Point à reprendre : ${sc.todo.map(t => `${t.label} ${frHours(t.hours)}`).join(' ; ')} ; ${frHours(sc.todoDefault)} pour une clause ou un paramètre. Total arrondi au quart d’heure supérieur par watch ; un jour vaut ${sc.hoursPerDay} h.`,
-    ''
-  );
   return L.join('\n');
 }
 export function watcherReportCSV(rep) {
@@ -1778,7 +1723,6 @@ export function watcherReportCSV(rep) {
       'Condition',
       'Actions',
       'Verdict',
-      'Effort (h)',
       'Points à reprendre',
       'Points à vérifier'
     ]
@@ -1797,7 +1741,6 @@ export function watcherReportCSV(rep) {
       x.condition,
       x.actions.map(a => `${a.label}${a.target ? ` (${a.target})` : ''}`).join(', '),
       x.skipped ? 'sans objet' : kbVerdict(x.verdict),
-      frNum(x.effort),
       x.issues
         .filter(i => i.kind === 'todo')
         .map(i => i.label)
@@ -1830,7 +1773,7 @@ export function watcherReportHTML(rep, title) {
   const rows = rep.entries
     .map(
       x =>
-        `<tr data-v="${x.skipped ? 'skipped' : x.verdict}"><td><a href="#${anchor(x)}">${h(x.title)}</a></td><td>${h(watchState(x))}</td><td>${h(x.schedule ? x.schedule.text : '')}</td><td>${h(x.condition)}</td><td>${h(x.actions.map(a => a.label).join(', ') || '—')}</td><td>${badge(x)}</td><td class="n">${h(frHours(x.effort))}</td></tr>`
+        `<tr data-v="${x.skipped ? 'skipped' : x.verdict}"><td><a href="#${anchor(x)}">${h(x.title)}</a></td><td>${h(watchState(x))}</td><td>${h(x.schedule ? x.schedule.text : '')}</td><td>${h(x.condition)}</td><td>${h(x.actions.map(a => a.label).join(', ') || '—')}</td><td>${badge(x)}</td></tr>`
     )
     .join('');
   const list = (items, cls) =>
@@ -1852,9 +1795,6 @@ export function watcherReportHTML(rep, title) {
             }${q.sql ? `<pre><code>${h(q.sql)}</code></pre>` : q.error ? `<p class="err">${h(q.error)}</p>` : ''}</div>`
         )
         .join('');
-      const eff = x.effortDetail.length
-        ? `<details class="eff"><summary>Effort : ${h(frHours(x.effort))}</summary><ul>${x.effortDetail.map(l => `<li>${h(l.label)} : ${h(frHours(l.hours))}</li>`).join('')}</ul></details>`
-        : '';
       const facts = `<ul><li><b>Planification</b> : ${h(x.schedule ? x.schedule.text : '')}${x.schedule && x.schedule.cron.length ? ` — cron <code>${h(x.schedule.cron.join(' ; '))}</code>` : ''}</li>${x.skipped ? '' : `<li><b>Entrée</b> : ${h(x.inputs.join(', ') || 'aucune')}</li><li><b>Condition</b> : ${h(x.condition)}</li>`}</ul>`;
       return `<section class="obj" id="${anchor(x)}"><h3>${h(x.title)} ${badge(x)}</h3><p class="muted">${h(x.kindLabel)}, ${h(watchState(x))} — <code>${h(x.id)}</code>${x.views.length ? ` — index ${h(x.views.join(', '))}` : ''}${x.tables.length ? ` → ${h(x.tables.join(', '))}` : ''}</p>${facts}${list(
         x.issues.filter(i => i.kind === 'todo'),
@@ -1865,14 +1805,14 @@ export function watcherReportHTML(rep, title) {
       )}${list(
         x.issues.filter(i => i.kind === 'info'),
         'info'
-      )}${qs}${eff}</section>`;
+      )}${qs}</section>`;
     })
     .join('');
   const prereq = rep.prerequisites.length
     ? `<h2>Prérequis</h2><ul>${rep.prerequisites.map(p => `<li><b>${h(p.label)}</b> (${p.objects}) : ${h(p.detail)}</li>`).join('')}</ul>`
     : '';
   const blockers = rep.blockers.length
-    ? `<h2>Principaux points à reprendre</h2><div class="tw"><table><thead><tr><th>Point</th><th class="n">Watches</th><th class="n">Effort</th></tr></thead><tbody>${rep.blockers.map(b => `<tr><td>${h(b.label)}</td><td class="n">${b.objects}</td><td class="n">${h(frHours(b.hours))}</td></tr>`).join('')}</tbody></table></div>`
+    ? `<h2>Principaux points à reprendre</h2><div class="tw"><table><thead><tr><th>Point</th><th class="n">Watches</th></tr></thead><tbody>${rep.blockers.map(b => `<tr><td>${h(b.label)}</td><td class="n">${b.objects}</td></tr>`).join('')}</tbody></table></div>`
     : '';
   const help = watchRunHelp(rep);
   return `<!doctype html>
@@ -1883,11 +1823,11 @@ ${KB_CSS}
 </style></head><body><main>
 <h1>Migration des watches Elasticsearch vers ClickHouse</h1>
 <p class="muted">${rep.source.origin ? `${h(rep.source.origin)}. ` : ''}${s.watches} watches à migrer, ${s.queries} requêtes et ${s.conditions} conditions traduites.${s.skipped ? ` ${s.skipped} watch(es) de Stack Monitoring, sans objet.` : ''}</p>
-<div class="tiles"><div class="tile"><b>${h(frHours(s.effort.hours))}</b><span class="muted">effort estimé, ${h(frNum(s.effort.days))} j à ${rep.effortScale.hoursPerDay} h</span></div><div class="tile"><b class="v-ready">${s.byVerdict.ready}</b><span class="muted">prêtes</span></div><div class="tile"><b class="v-review">${s.byVerdict.review}</b><span class="muted">à vérifier</span></div><div class="tile"><b class="v-todo">${s.byVerdict.todo}</b><span class="muted">à reprendre</span></div></div>
+<div class="tiles"><div class="tile"><b class="v-ready">${s.byVerdict.ready}</b><span class="muted">prêtes</span></div><div class="tile"><b class="v-review">${s.byVerdict.review}</b><span class="muted">à vérifier</span></div><div class="tile"><b class="v-todo">${s.byVerdict.todo}</b><span class="muted">à reprendre</span></div></div>
 <div class="bar" aria-label="Répartition des verdicts sur ${s.watches || 1} watches">${bar}</div>
 ${prereq}${blockers}
 <h2>Watches</h2><div class="filters" role="group" aria-label="Filtrer par verdict"><button data-f="all" aria-pressed="true">Toutes</button><button data-f="ready" aria-pressed="false">Prêtes</button><button data-f="review" aria-pressed="false">À vérifier</button><button data-f="todo" aria-pressed="false">À reprendre</button></div>
-<div class="tw"><table id="objs"><thead><tr><th>Watch</th><th>État</th><th>Planification</th><th>Condition</th><th>Actions</th><th>Verdict</th><th class="n">Effort</th></tr></thead><tbody>${rows}</tbody></table></div>
+<div class="tw"><table id="objs"><thead><tr><th>Watch</th><th>État</th><th>Planification</th><th>Condition</th><th>Actions</th><th>Verdict</th></tr></thead><tbody>${rows}</tbody></table></div>
 ${help ? `<h2>Exécuter les requêtes</h2><p>${h(help).replace(/`([^`]+)`/g, '<code>$1</code>')}</p>` : ''}
 <h2>Détail par watch</h2>${details}
 </main><script>
@@ -1914,7 +1854,7 @@ export function watcherSQLFiles(rep) {
     let i = 2;
     while (used.has(name)) name = `${base}-${i++}`;
     used.add(name);
-    const head = `-- Watch : ${kbFlat(x.title)} (${x.id})\n-- Verdict : ${kbVerdict(x.verdict)}, effort estimé ${frHours(x.effort)}\n-- Planification : ${kbFlat(x.schedule ? x.schedule.text : '')}${watchCron(x) ? ` — cron ${watchCron(x)}` : ''}\n-- Condition : ${kbFlat(x.condition)}\n`;
+    const head = `-- Watch : ${kbFlat(x.title)} (${x.id})\n-- Verdict : ${kbVerdict(x.verdict)}\n-- Planification : ${kbFlat(x.schedule ? x.schedule.text : '')}${watchCron(x) ? ` — cron ${watchCron(x)}` : ''}\n-- Condition : ${kbFlat(x.condition)}\n`;
     files.push({
       name: `${name}.sql`,
       content:

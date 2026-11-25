@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.7.4-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.7.4"></a>
+  <a href="https://github.com/OlivMartins/passerelle/releases/latest"><img src="https://img.shields.io/badge/version-1.8.0-F2C230?style=flat-square&labelColor=1B2A33" alt="Version 1.8.0"></a>
   <a href="https://github.com/OlivMartins/passerelle/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/OlivMartins/passerelle/ci.yml?branch=main&style=flat-square&label=tests&labelColor=1B2A33" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-Apache%202.0-1E7A68?style=flat-square&labelColor=1B2A33" alt="Licence Apache 2.0"></a>
   <img src="https://img.shields.io/badge/Linux-x86__64-53636B?style=flat-square&labelColor=1B2A33" alt="Linux x86_64">
@@ -304,7 +304,7 @@ Une migration ne se limite pas aux requêtes. Passerelle lit aussi ce qui les en
 
 - **Inventaire Kibana** (`passerelle kibana export.ndjson`) : le catalogue des objets sauvegardés (index patterns, recherches, visualisations, Lens, cartes, tableaux de bord, alertes, règles de sécurité, connecteurs, canvas, graphes), objet par objet, en Markdown, HTML, CSV ou JSON. Les requêtes KQL, Lucene et DSL qu’ils portent sont traduites en SQL.
 - **Tableaux de bord Grafana** (`passerelle grafana tableau.json`) : les panneaux dont la source est Elasticsearch deviennent des requêtes ClickHouse, avec un rapport par panneau.
-- **Watches Elasticsearch** (`passerelle watcher watches.json`, ou `passerelle watcher pull` sur le cluster) : requête et condition en SQL, planification en cron, actions à recréer, verdict et effort par watch ([détails](#watches-elasticsearch)).
+- **Watches Elasticsearch** (`passerelle watcher watches.json`, ou `passerelle watcher pull` sur le cluster) : requête et condition en SQL, planification en cron, actions à recréer, verdict par watch ([détails](#watches-elasticsearch)).
 - **Schéma** (`passerelle schema ddl mapping.json`) : le `CREATE TABLE` ClickHouse déduit d’un mapping Elasticsearch, y compris les préréglages OpenTelemetry `otel` (attributs en `Map`) et `otel-json` (colonnes `JSON` typées). `passerelle schema pull` lit les tables déjà créées pour que les traductions s’y adaptent.
 - **Pipelines d’ingestion Elasticsearch** (`passerelle ingest pipeline.yml`) : chaque processeur devient une étape VRL pour Vector (`append`, `convert`, `date`, `dissect`, `dot_expander`, `foreach`, `geoip`, `grok`, `gsub`, `json`, `kv`, `pipeline`, `rename`, `script` Painless, `set`, `user_agent`, et une vingtaine d’autres). Vector refuse toute la configuration si un seul VRL ne compile pas : la CI compile donc les traductions avec `vector validate`.
 - **Sortie ClickHouse** : avec `vector.elasticsearch_output: clickhouse`, la sortie `elasticsearch` d’un pipeline Logstash devient un puits ClickHouse. Il écrit avec son propre compte, `clickhouse.sink_user` ([compte de la sortie Vector](docs/INSTALL.md)).
@@ -414,8 +414,8 @@ Téléchargez [`passerelle.html`](https://github.com/OlivMartins/passerelle/rele
 ### Sur un serveur Linux
 
 ```bash
-curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.7.4/passerelle-1.7.4-linux-x86_64.tar.gz
-tar xzf passerelle-1.7.4-linux-x86_64.tar.gz && cd passerelle-1.7.4-linux-x86_64
+curl -LO https://github.com/OlivMartins/passerelle/releases/download/v1.8.0/passerelle-1.8.0-linux-x86_64.tar.gz
+tar xzf passerelle-1.8.0-linux-x86_64.tar.gz && cd passerelle-1.8.0-linux-x86_64
 sudo ./install.sh
 ```
 

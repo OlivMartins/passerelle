@@ -1996,56 +1996,10 @@ const KB_IGNORED = new Set([
   'legacy-url-alias',
   'event_loop_delays_daily'
 ]);
-/*
- * Barème de l’effort, en heures : recréer l’objet dans l’outil cible, vérifier ses requêtes, reprendre ce qui ne se
- * traduit pas. Les poids d’un point à reprendre dépendent de sa nature (un panneau Vega se réécrit, un filtre se corrige).
- */
-export const KB_EFFORT = {
-  base: {
-    'index-pattern': 0.25,
-    search: 0.25,
-    query: 0.1,
-    visualization: 0.5,
-    lens: 0.5,
-    map: 0.5,
-    links: 0.25,
-    dashboard: 0.5,
-    alert: 1,
-    'security-rule': 1,
-    action: 0.25,
-    'canvas-workpad': 0.5,
-    'graph-workspace': 0.5,
-    other: 0.5
-  },
-  panel: 0.1,
-  control: 0.25,
-  action: 0.25,
-  query: { ready: 0, review: 0.25, todo: 0.5, unrecognized: 1 },
-  review: 0.25,
-  warn: 0.25,
-  warnCap: 1,
-  todo: [
-    [/Vega/, 6, 'visualisation Vega'],
-    [/Canvas/, 6, 'classeur Canvas'],
-    [/[Cc]arte|Maps/, 4, 'carte'],
-    [/TSVB|Timelion/, 3, 'TSVB ou Timelion'],
-    [/ES\|QL|EQL/, 3, 'requête ES|QL ou EQL'],
-    [/détection/, 4, 'logique de détection'],
-    [/Painless|script|runtime/i, 2, 'script Painless'],
-    [/agrégation|mesure|pipeline|regroupement|opération|colonne|formule/i, 1.5, 'agrégation, mesure ou formule']
-  ],
-  todoDefault: 1,
-  hoursPerDay: 7
-};
 // Remarques qui relèvent de la configuration (une fois pour tout le parc), pas d’un objet
 export const KB_PREREQ = /^(Index sans correspondance|Schéma des colonnes non fourni)/;
 // Index sans correspondance : repris par la liste des tables à déclarer
 export const KB_PREREQ_SHOWN = /^Schéma des colonnes non fourni/;
-export const todoHours = label => {
-  for (const [re, h] of KB_EFFORT.todo) if (re.test(label)) return h;
-  return KB_EFFORT.todoDefault;
-};
-export const quarter = h => Math.ceil(h * 4 - 1e-9) / 4;
 export const worstVerdict = list => list.reduce((w, v) => (VERDICT_RANK[v] > VERDICT_RANK[w] ? v : w), 'ready');
 // Champs cités par un corps de recherche, pour le bilan par vue de données
 function dslFields(dsl, out) {
@@ -2108,9 +2062,7 @@ function makeEntry(type, id, title, extra) {
       children: [],
       usedBy: [],
       fields: new Set(),
-      verdict: 'ready',
-      effort: 0,
-      effortDetail: []
+      verdict: 'ready'
     },
     extra || {}
   );
@@ -2497,8 +2449,7 @@ function analyzeRule(o, ctx) {
     e.issues.push({
       kind: 'info',
       label: `${actions.length} action${actions.length > 1 ? 's' : ''} à recréer`,
-      detail: `Notifications (${kinds.join(', ')}) à recréer dans l’outil d’alerte cible${iv ? `, avec la planification « toutes les ${iv} »` : ''}.`,
-      hours: KB_EFFORT.action * actions.length
+      detail: `Notifications (${kinds.join(', ')}) à recréer dans l’outil d’alerte cible${iv ? `, avec la planification « toutes les ${iv} »` : ''}.`
     });
   } else if (iv)
     e.issues.push({
@@ -2727,7 +2678,7 @@ function analyzeDashboard(o, ctx) {
         e.issues.push({
           kind: 'review',
           label: 'panneau absent de l’export',
-          detail: `Le panneau${ptitle ? ` « ${ptitle} »` : ''} (${ref.type || type} ${ref.id}) n’est pas dans le fichier : son effort n’est pas compté. Exportez les objets avec leurs objets liés.`
+          detail: `Le panneau${ptitle ? ` « ${ptitle} »` : ''} (${ref.type || type} ${ref.id}) n’est pas dans le fichier. Exportez les objets avec leurs objets liés.`
         });
       return;
     }
@@ -2780,8 +2731,7 @@ function analyzeDashboard(o, ctx) {
       e.issues.push({
         kind: 'review',
         label: `panneau ${p.type}`,
-        detail: 'Contenu statique (texte, image, liens) à recréer.',
-        hours: 0.1
+        detail: 'Contenu statique (texte, image, liens) à recréer.'
       });
       return;
     } else if (PANEL_CONTENT.has(type)) {
@@ -2965,8 +2915,7 @@ export function kibanaInventory(text, cfg, opts) {
         m.issues.push({
           kind: 'info',
           label: 'connecteur à recréer',
-          detail: `Le connecteur ${o.attributes.actionTypeId || ''} (destination des notifications) se recrée dans l’outil d’alerte cible ; ses secrets ne sont pas exportés.`,
-          hours: 0
+          detail: `Le connecteur ${o.attributes.actionTypeId || ''} (destination des notifications) se recrée dans l’outil d’alerte cible ; ses secrets ne sont pas exportés.`
         });
         list = [m];
       } else if (KB_IGNORED.has(t)) {
@@ -2999,13 +2948,12 @@ export function kibanaInventory(text, cfg, opts) {
     const x = byEntry.get(k);
     if (x) x.usedBy = v.dashboards.slice();
   }
-  // Verdict et effort de chaque objet
+  // Verdict de chaque objet
   for (const x of entries) scoreEntry(x);
-  // Un tableau de bord vaut son plus mauvais panneau ; son effort propre reste l’assemblage
+  // Un tableau de bord vaut son plus mauvais panneau
   for (const x of entries.filter(y => y.type === 'dashboard')) {
     const kids = x.children.map(k => byEntry.get(k)).filter(Boolean);
     x.verdict = worstVerdict([x.verdict].concat(kids.map(k => k.verdict)));
-    x.effortTotal = quarter(x.effort + kids.reduce((n, k) => n + k.effort, 0));
   }
   entries.sort(
     (p, q) =>
@@ -3023,37 +2971,6 @@ function scoreEntry(x) {
     seen.add(k);
     return true;
   });
-  const lines = [];
-  const typeLabel = (KB_TYPES[x.type] || 'objet').toLowerCase();
-  const baseH = KB_EFFORT.base[x.type] || 0.5;
-  lines.push({
-    label:
-      x.type === 'index-pattern'
-        ? 'Déclarer la table et vérifier les champs'
-        : `Recréer ${x.type === 'dashboard' ? 'le tableau de bord' : `l’objet (${typeLabel})`}`,
-    hours: baseH
-  });
-  if (x.type === 'dashboard' && x.panels)
-    lines.push({ label: `Disposer ${x.panels} panneau${x.panels > 1 ? 'x' : ''}`, hours: KB_EFFORT.panel * x.panels });
-  for (const q of x.queries) {
-    if (KB_EFFORT.query[q.verdict])
-      lines.push({ label: `Vérifier « ${q.title} » (${VERDICTS[q.verdict]})`, hours: KB_EFFORT.query[q.verdict] });
-    let warn = 0;
-    for (const n of q.notes) {
-      if (KB_PREREQ.test(n.title)) continue;
-      if (n.level === 'err') lines.push({ label: n.title, hours: todoHours(n.title) });
-      else if (n.level === 'warn') warn += KB_EFFORT.warn;
-    }
-    if (warn) lines.push({ label: `Points à vérifier de « ${q.title} »`, hours: Math.min(warn, KB_EFFORT.warnCap) });
-  }
-  for (const i of x.issues)
-    if (i.kind !== 'info' || i.hours)
-      lines.push({
-        label: i.label,
-        hours: i.hours !== undefined ? i.hours : i.kind === 'todo' ? todoHours(i.label) : KB_EFFORT.review
-      });
-  x.effortDetail = lines.filter(l => l.hours > 0);
-  x.effort = quarter(x.effortDetail.reduce((n, l) => n + l.hours, 0));
   const verdicts = x.queries
     .map(q => (q.verdict === 'unrecognized' ? 'todo' : q.verdict))
     .concat(x.issues.filter(i => i.kind !== 'info').map(i => (i.kind === 'todo' ? 'todo' : 'review')));
@@ -3077,27 +2994,21 @@ function summarize(read, entries, ignored, cfg, opts) {
         ready: 0,
         review: 0,
         todo: 0,
-        unrecognized: 0,
-        effort: 0
+        unrecognized: 0
       });
     t.total++;
     t[x.verdict]++;
-    t.effort += x.effort;
   }
-  for (const t of Object.values(byType)) t.effort = quarter(t.effort);
-  const hours = quarter(entries.reduce((n, x) => n + x.effort, 0));
-  // Obstacles : ce qui ne se traduit pas, regroupé par nature, du plus coûteux au moins coûteux
+  // Obstacles : ce qui ne se traduit pas, regroupé par nature, du plus fréquent au moins fréquent
   const blockers = new Map();
-  const bump = (label, kind, key, h) => {
+  const bump = (label, kind, key) => {
     const k = `${kind}|${blockerLabel(label)}`;
-    if (!blockers.has(k)) blockers.set(k, { label: blockerLabel(label), kind, objects: new Set(), hours: 0 });
-    const b = blockers.get(k);
-    b.objects.add(key);
-    b.hours += h;
+    if (!blockers.has(k)) blockers.set(k, { label: blockerLabel(label), kind, objects: new Set() });
+    blockers.get(k).objects.add(key);
   };
   const prereq = new Map();
   for (const x of entries) {
-    for (const i of x.issues) if (i.kind === 'todo') bump(i.label, 'todo', x.key, todoHours(i.label));
+    for (const i of x.issues) if (i.kind === 'todo') bump(i.label, 'todo', x.key);
     for (const q of x.queries)
       for (const n of q.notes) {
         if (KB_PREREQ.test(n.title)) {
@@ -3105,7 +3016,7 @@ function summarize(read, entries, ignored, cfg, opts) {
           const k = n.title.replace(/ «.*$/, '');
           if (!prereq.has(k)) prereq.set(k, { label: k, detail: n.detail, objects: new Set() });
           prereq.get(k).objects.add(x.key);
-        } else if (n.level === 'err') bump(n.title, 'todo', x.key, todoHours(n.title));
+        } else if (n.level === 'err') bump(n.title, 'todo', x.key);
       }
   }
   // Tables à déclarer : motifs d’index sans correspondance dans clickhouse.index_mapping
@@ -3148,7 +3059,6 @@ function summarize(read, entries, ignored, cfg, opts) {
       objects: entries.length,
       byVerdict,
       byType,
-      effort: { hours, days: Math.round((hours / KB_EFFORT.hoursPerDay) * 10) / 10 },
       queries: entries.reduce((n, x) => n + x.queries.length, 0)
     },
     prerequisites: [...prereq.values()]
@@ -3177,27 +3087,17 @@ function summarize(read, entries, ignored, cfg, opts) {
           : []
       ),
     blockers: [...blockers.values()]
-      .map(b => ({ label: b.label, kind: b.kind, objects: b.objects.size, hours: quarter(b.hours) }))
-      .sort((p, q) => q.hours - p.hours || q.objects - p.objects)
+      .map(b => ({ label: b.label, kind: b.kind, objects: b.objects.size }))
+      .sort((p, q) => q.objects - p.objects || p.label.localeCompare(q.label, 'fr'))
       .slice(0, 20),
     dataViews,
-    entries: entries.map(x => Object.assign({}, x, { fields: [...x.fields].sort() })),
-    effortScale: {
-      hoursPerDay: KB_EFFORT.hoursPerDay,
-      base: KB_EFFORT.base,
-      query: KB_EFFORT.query,
-      review: KB_EFFORT.review,
-      panel: KB_EFFORT.panel,
-      todo: KB_EFFORT.todo.map(([re, h, label]) => ({ label, match: re.source, hours: h })),
-      todoDefault: KB_EFFORT.todoDefault
-    }
+    entries: entries.map(x => Object.assign({}, x, { fields: [...x.fields].sort() }))
   };
   return out;
 }
 
 /* ---------- Rapports ---------- */
 export const frNum = n => (Math.round(n * 100) / 100).toString().replace('.', ',');
-export const frHours = h => `${frNum(h)} h`;
 export const kbVerdict = v => VERDICTS[v] || v;
 export function kbFlat(s) {
   return String(s === undefined || s === null ? '' : s)
@@ -3210,7 +3110,7 @@ export function inventoryMarkdown(inv) {
   const cell = v => kbFlat(v).replace(/\|/g, '\\|');
   L.push('# Inventaire de migration Kibana vers ClickHouse', '');
   L.push(
-    `${s.objects} objet${s.objects > 1 ? 's' : ''} à migrer, ${s.queries} requête${s.queries > 1 ? 's' : ''} traduite${s.queries > 1 ? 's' : ''}. Effort estimé : **${frHours(s.effort.hours)}**, soit **${frNum(s.effort.days)} jour${s.effort.days > 1 ? 's' : ''}** à ${inv.effortScale.hoursPerDay} h.`,
+    `${s.objects} objet${s.objects > 1 ? 's' : ''} à migrer, ${s.queries} requête${s.queries > 1 ? 's' : ''} traduite${s.queries > 1 ? 's' : ''}.`,
     ''
   );
   const ign = Object.entries(inv.source.ignored);
@@ -3223,18 +3123,15 @@ export function inventoryMarkdown(inv) {
   L.push(
     '## Synthèse',
     '',
-    '| Type | Objets | Prêts | À vérifier | À reprendre | Non reconnus | Effort |',
-    '|---|---:|---:|---:|---:|---:|---:|'
+    '| Type | Objets | Prêts | À vérifier | À reprendre | Non reconnus |',
+    '|---|---:|---:|---:|---:|---:|'
   );
   for (const t of KB_ORDER) {
     const x = s.byType[t];
-    if (x)
-      L.push(
-        `| ${x.label} | ${x.total} | ${x.ready} | ${x.review} | ${x.todo} | ${x.unrecognized} | ${frHours(x.effort)} |`
-      );
+    if (x) L.push(`| ${x.label} | ${x.total} | ${x.ready} | ${x.review} | ${x.todo} | ${x.unrecognized} |`);
   }
   L.push(
-    `| **Total** | **${s.objects}** | **${s.byVerdict.ready}** | **${s.byVerdict.review}** | **${s.byVerdict.todo}** | **${s.byVerdict.unrecognized}** | **${frHours(s.effort.hours)}** |`,
+    `| **Total** | **${s.objects}** | **${s.byVerdict.ready}** | **${s.byVerdict.review}** | **${s.byVerdict.todo}** | **${s.byVerdict.unrecognized}** |`,
     ''
   );
   L.push(
@@ -3248,33 +3145,21 @@ export function inventoryMarkdown(inv) {
     L.push('');
   }
   if (inv.blockers.length) {
-    L.push('## Principaux points à reprendre', '', '| Point | Objets | Effort |', '|---|---:|---:|');
-    for (const b of inv.blockers) L.push(`| ${cell(b.label)} | ${b.objects} | ${frHours(b.hours)} |`);
+    L.push('## Principaux points à reprendre', '', '| Point | Objets |', '|---|---:|');
+    for (const b of inv.blockers) L.push(`| ${cell(b.label)} | ${b.objects} |`);
     L.push('');
   }
   const dashes = inv.entries.filter(x => x.type === 'dashboard');
   if (dashes.length) {
-    L.push(
-      '## Tableaux de bord',
-      '',
-      '| Tableau de bord | Panneaux | Verdict | Effort, panneaux compris |',
-      '|---|---:|---|---:|'
-    );
-    for (const d of dashes)
-      L.push(
-        `| ${cell(d.title)} | ${d.panels || 0} | ${kbVerdict(d.verdict)} | ${frHours(d.effortTotal || d.effort)} |`
-      );
-    L.push(
-      '',
-      'L’effort d’un tableau de bord compte ses panneaux ; un objet partagé par plusieurs tableaux de bord est compté dans chacun ici, une seule fois dans le total.',
-      ''
-    );
+    L.push('## Tableaux de bord', '', '| Tableau de bord | Panneaux | Verdict |', '|---|---:|---|');
+    for (const d of dashes) L.push(`| ${cell(d.title)} | ${d.panels || 0} | ${kbVerdict(d.verdict)} |`);
+    L.push('');
   }
-  L.push('## Objets', '', '| Type | Objet | Nature | Verdict | Effort |', '|---|---|---|---|---:|');
+  L.push('## Objets', '', '| Type | Objet | Nature | Verdict |', '|---|---|---|---|');
   const byKey = new Map(inv.entries.map(x => [x.key, x]));
   for (const x of inv.entries)
     L.push(
-      `| ${KB_TYPES[x.type]} | ${cell(x.parent ? `${byKey.get(x.parent) ? byKey.get(x.parent).title : '?'} › ${x.title}` : x.title)} | ${cell(x.kind)} | ${kbVerdict(x.verdict)} | ${frHours(x.effort)} |`
+      `| ${KB_TYPES[x.type]} | ${cell(x.parent ? `${byKey.get(x.parent) ? byKey.get(x.parent).title : '?'} › ${x.title}` : x.title)} | ${cell(x.kind)} | ${kbVerdict(x.verdict)} |`
     );
   L.push('');
   if (inv.dataViews.length) {
@@ -3296,7 +3181,7 @@ export function inventoryMarkdown(inv) {
       ''
     );
     L.push(
-      `${kbVerdict(x.verdict).replace(/^./, c => c.toUpperCase())}, ${frHours(x.effort)}. ${kbFlat(x.kind)}. Identifiant : \`${x.id}\`.${x.views.length ? ` Vue de données : ${x.views.join(', ')}.` : ''}${x.tables.length ? ` Table : ${x.tables.join(', ')}.` : ''}${x.usedBy.length ? ` Utilisé par ${x.usedBy.length} tableau${x.usedBy.length > 1 ? 'x' : ''} de bord.` : ''}`,
+      `${kbVerdict(x.verdict).replace(/^./, c => c.toUpperCase())}. ${kbFlat(x.kind)}. Identifiant : \`${x.id}\`.${x.views.length ? ` Vue de données : ${x.views.join(', ')}.` : ''}${x.tables.length ? ` Table : ${x.tables.join(', ')}.` : ''}${x.usedBy.length ? ` Utilisé par ${x.usedBy.length} tableau${x.usedBy.length > 1 ? 'x' : ''} de bord.` : ''}`,
       ''
     );
     for (const [kind, head] of [
@@ -3323,22 +3208,7 @@ export function inventoryMarkdown(inv) {
       if (q.sql) L.push('```sql', q.sql, '```', '');
       else if (q.error) L.push(`> ${kbFlat(q.error)}`, '');
     }
-    if (x.effortDetail.length > 1)
-      L.push(
-        `<details><summary>Calcul de l’effort</summary>\n\n${x.effortDetail.map(l => `- ${kbFlat(l.label)} : ${frHours(l.hours)}`).join('\n')}\n\n</details>`,
-        ''
-      );
   }
-  L.push('## Barème de l’effort', '');
-  L.push(
-    `Recréer un objet : ${Object.entries(inv.effortScale.base)
-      .filter(([t]) => KB_TYPES[t])
-      .map(([t, h]) => `${KB_TYPES[t].toLowerCase()} ${frHours(h)}`)
-      .join(
-        ', '
-      )} ; ${frHours(inv.effortScale.panel)} par panneau de tableau de bord. Vérifier une requête : ${frHours(inv.effortScale.query.review)} si elle est à vérifier, ${frHours(inv.effortScale.query.todo)} si elle est à reprendre, plus ${frHours(inv.effortScale.review)} par point à vérifier. Point à reprendre : ${inv.effortScale.todo.map(t => `${t.label} ${frHours(t.hours)}`).join(' ; ')} ; ${frHours(inv.effortScale.todoDefault)} pour une clause ou un paramètre. Total arrondi au quart d’heure supérieur par objet ; un jour vaut ${inv.effortScale.hoursPerDay} h.`,
-    ''
-  );
   return L.join('\n');
 }
 export function inventoryCSV(inv) {
@@ -3357,7 +3227,6 @@ export function inventoryCSV(inv) {
       'Vue de données',
       'Table',
       'Verdict',
-      'Effort (h)',
       'Requêtes',
       'Points à reprendre',
       'Points à vérifier'
@@ -3374,7 +3243,6 @@ export function inventoryCSV(inv) {
       x.views.join(', '),
       x.tables.join(', '),
       kbVerdict(x.verdict),
-      frNum(x.effort),
       x.queries.length,
       x.issues
         .filter(i => i.kind === 'todo')
@@ -3408,7 +3276,7 @@ a{color:inherit}.v{display:inline-block;font-size:12px;font-weight:600;padding:1
 ul.todo li::marker,li.err::marker{color:var(--todo)}ul.review li::marker,li.warn::marker{color:var(--review)}
 .q{border-top:1px dashed var(--line);margin-top:10px;padding-top:10px}pre{background:var(--code);border-radius:8px;padding:10px 12px;overflow-x:auto;font-size:12.5px;line-height:1.45}
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.filters button{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:999px;padding:3px 12px;cursor:pointer}.filters button[aria-pressed="true"]{border-color:var(--fg)}
-.eff summary{cursor:pointer;color:var(--muted);font-size:13px}p.err{color:var(--todo)}`;
+p.err{color:var(--todo)}`;
 export const kbHtml = s =>
   String(s === undefined || s === null ? '' : s)
     .replace(/&/g, '&amp;')
@@ -3432,13 +3300,13 @@ export function inventoryHTML(inv, title) {
   const typeRows = KB_ORDER.filter(t => s.byType[t])
     .map(t => {
       const x = s.byType[t];
-      return `<tr><td>${h(x.label)}</td><td class="n">${x.total}</td><td class="n">${x.ready}</td><td class="n">${x.review}</td><td class="n">${x.todo}</td><td class="n">${x.unrecognized}</td><td class="n">${h(frHours(x.effort))}</td></tr>`;
+      return `<tr><td>${h(x.label)}</td><td class="n">${x.total}</td><td class="n">${x.ready}</td><td class="n">${x.review}</td><td class="n">${x.todo}</td><td class="n">${x.unrecognized}</td></tr>`;
     })
     .join('');
   const objRows = inv.entries
     .map(
       x =>
-        `<tr data-v="${x.verdict}"><td>${h(KB_TYPES[x.type])}</td><td><a href="#o-${h(x.key.replace(/[^A-Za-z0-9_-]/g, '-'))}">${h(name(x))}</a></td><td>${h(x.kind)}</td><td>${badge(x.verdict)}</td><td class="n">${h(frHours(x.effort))}</td></tr>`
+        `<tr data-v="${x.verdict}"><td>${h(KB_TYPES[x.type])}</td><td><a href="#o-${h(x.key.replace(/[^A-Za-z0-9_-]/g, '-'))}">${h(name(x))}</a></td><td>${h(x.kind)}</td><td>${badge(x.verdict)}</td></tr>`
     )
     .join('');
   const issueList = (list, cls) =>
@@ -3453,9 +3321,6 @@ export function inventoryHTML(inv, title) {
           return `<div class="q"><div class="qh"><b>${h(q.title)}</b> ${badge(q.verdict)}${q.coverage ? ` <span class="muted">couverture ${q.coverage.percent} %</span>` : ''}</div>${q.sentence ? `<p class="muted">${h(q.sentence)}</p>` : ''}${notes.length ? `<ul>${notes.map(n => `<li class="${n.level}"><b>${h(n.title)}</b> : ${h(n.detail)}</li>`).join('')}</ul>` : ''}${q.sql ? `<pre><code>${h(q.sql)}</code></pre>` : q.error ? `<p class="err">${h(q.error)}</p>` : ''}</div>`;
         })
         .join('');
-      const eff = x.effortDetail.length
-        ? `<details class="eff"><summary>Effort : ${h(frHours(x.effort))}</summary><ul>${x.effortDetail.map(l => `<li>${h(l.label)} : ${h(frHours(l.hours))}</li>`).join('')}</ul></details>`
-        : '';
       return `<section class="obj" id="o-${h(x.key.replace(/[^A-Za-z0-9_-]/g, '-'))}"><h3>${h(KB_TYPES[x.type])} · ${h(name(x))} ${badge(x.verdict)}</h3><p class="muted">${h(x.kind)} — <code>${h(x.id)}</code>${x.views.length ? ` — vue de données ${h(x.views.join(', '))}` : ''}${x.tables.length ? ` → ${h(x.tables.join(', '))}` : ''}</p>${issueList(
         x.issues.filter(i => i.kind === 'todo'),
         'todo'
@@ -3465,18 +3330,18 @@ export function inventoryHTML(inv, title) {
       )}${issueList(
         x.issues.filter(i => i.kind === 'info'),
         'info'
-      )}${qs}${eff}</section>`;
+      )}${qs}</section>`;
     })
     .join('');
   const prereq = inv.prerequisites.length
     ? `<h2>Prérequis</h2><ul>${inv.prerequisites.map(p => `<li><b>${h(p.label)}</b> (${p.objects}) : ${h(p.detail)}</li>`).join('')}</ul>`
     : '';
   const blockers = inv.blockers.length
-    ? `<h2>Principaux points à reprendre</h2><div class="tw"><table><thead><tr><th>Point</th><th class="n">Objets</th><th class="n">Effort</th></tr></thead><tbody>${inv.blockers.map(b => `<tr><td>${h(b.label)}</td><td class="n">${b.objects}</td><td class="n">${h(frHours(b.hours))}</td></tr>`).join('')}</tbody></table></div>`
+    ? `<h2>Principaux points à reprendre</h2><div class="tw"><table><thead><tr><th>Point</th><th class="n">Objets</th></tr></thead><tbody>${inv.blockers.map(b => `<tr><td>${h(b.label)}</td><td class="n">${b.objects}</td></tr>`).join('')}</tbody></table></div>`
     : '';
   const dashes = inv.entries.filter(x => x.type === 'dashboard');
   const dashTable = dashes.length
-    ? `<h2>Tableaux de bord</h2><div class="tw"><table><thead><tr><th>Tableau de bord</th><th class="n">Panneaux</th><th>Verdict</th><th class="n">Effort, panneaux compris</th></tr></thead><tbody>${dashes.map(d => `<tr><td><a href="#o-${h(d.key.replace(/[^A-Za-z0-9_-]/g, '-'))}">${h(d.title)}</a></td><td class="n">${d.panels || 0}</td><td>${badge(d.verdict)}</td><td class="n">${h(frHours(d.effortTotal || d.effort))}</td></tr>`).join('')}</tbody></table></div>`
+    ? `<h2>Tableaux de bord</h2><div class="tw"><table><thead><tr><th>Tableau de bord</th><th class="n">Panneaux</th><th>Verdict</th></tr></thead><tbody>${dashes.map(d => `<tr><td><a href="#o-${h(d.key.replace(/[^A-Za-z0-9_-]/g, '-'))}">${h(d.title)}</a></td><td class="n">${d.panels || 0}</td><td>${badge(d.verdict)}</td></tr>`).join('')}</tbody></table></div>`
     : '';
   return `<!doctype html>
 <html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -3494,14 +3359,13 @@ ${KB_CSS}
         )}.`
       : ''
   }</p>
-<div class="tiles"><div class="tile"><b>${h(frHours(s.effort.hours))}</b><span class="muted">effort estimé, ${h(frNum(s.effort.days))} j à ${inv.effortScale.hoursPerDay} h</span></div><div class="tile"><b class="v-ready">${s.byVerdict.ready}</b><span class="muted">prêts</span></div><div class="tile"><b class="v-review">${s.byVerdict.review}</b><span class="muted">à vérifier</span></div><div class="tile"><b class="v-todo">${s.byVerdict.todo}</b><span class="muted">à reprendre</span></div>${s.byVerdict.unrecognized ? `<div class="tile"><b class="v-unrecognized">${s.byVerdict.unrecognized}</b><span class="muted">non reconnus</span></div>` : ''}</div>
+<div class="tiles"><div class="tile"><b class="v-ready">${s.byVerdict.ready}</b><span class="muted">prêts</span></div><div class="tile"><b class="v-review">${s.byVerdict.review}</b><span class="muted">à vérifier</span></div><div class="tile"><b class="v-todo">${s.byVerdict.todo}</b><span class="muted">à reprendre</span></div>${s.byVerdict.unrecognized ? `<div class="tile"><b class="v-unrecognized">${s.byVerdict.unrecognized}</b><span class="muted">non reconnus</span></div>` : ''}</div>
 <div class="bar" aria-label="Répartition des verdicts sur ${total} objets">${bar}</div>
-<h2>Synthèse par type</h2><div class="tw"><table><thead><tr><th>Type</th><th class="n">Objets</th><th class="n">Prêts</th><th class="n">À vérifier</th><th class="n">À reprendre</th><th class="n">Non reconnus</th><th class="n">Effort</th></tr></thead><tbody>${typeRows}</tbody></table></div>
+<h2>Synthèse par type</h2><div class="tw"><table><thead><tr><th>Type</th><th class="n">Objets</th><th class="n">Prêts</th><th class="n">À vérifier</th><th class="n">À reprendre</th><th class="n">Non reconnus</th></tr></thead><tbody>${typeRows}</tbody></table></div>
 ${prereq}${blockers}${dashTable}
 <h2>Objets</h2><div class="filters" role="group" aria-label="Filtrer par verdict"><button data-f="all" aria-pressed="true">Tous</button><button data-f="ready" aria-pressed="false">Prêts</button><button data-f="review" aria-pressed="false">À vérifier</button><button data-f="todo" aria-pressed="false">À reprendre</button></div>
-<div class="tw"><table id="objs"><thead><tr><th>Type</th><th>Objet</th><th>Nature</th><th>Verdict</th><th class="n">Effort</th></tr></thead><tbody>${objRows}</tbody></table></div>
+<div class="tw"><table id="objs"><thead><tr><th>Type</th><th>Objet</th><th>Nature</th><th>Verdict</th></tr></thead><tbody>${objRows}</tbody></table></div>
 <h2>Détail par objet</h2>${details}
-<h2>Barème</h2><p class="muted">Recréer un objet, vérifier ses requêtes (${h(frHours(inv.effortScale.query.review))} si elle est à vérifier, ${h(frHours(inv.effortScale.query.todo))} si elle est à reprendre, ${h(frHours(inv.effortScale.review))} par point à vérifier), reprendre chaque point selon sa nature (de ${h(frHours(inv.effortScale.todoDefault))} pour une clause à ${h(frHours(6))} pour une visualisation Vega). Arrondi au quart d’heure supérieur par objet ; un jour vaut ${inv.effortScale.hoursPerDay} h.</p>
 </main><script>
 document.querySelectorAll('.filters button').forEach(function(b){b.addEventListener('click',function(){var f=b.getAttribute('data-f');document.querySelectorAll('.filters button').forEach(function(x){x.setAttribute('aria-pressed',x===b?'true':'false')});document.querySelectorAll('#objs tbody tr').forEach(function(r){r.style.display=f==='all'||r.getAttribute('data-v')===f?'':'none'})})});
 </script></body></html>
@@ -3526,7 +3390,7 @@ export function inventorySQLFiles(inv) {
     let i = 2;
     while (used.has(name)) name = `${base}-${i++}`;
     used.add(name);
-    const head = `-- ${KB_TYPES[x.type]} : ${kbFlat(x.title)} (${x.id})\n-- Verdict : ${kbVerdict(x.verdict)}, effort estimé ${frHours(x.effort)}\n`;
+    const head = `-- ${KB_TYPES[x.type]} : ${kbFlat(x.title)} (${x.id})\n-- Verdict : ${kbVerdict(x.verdict)}\n`;
     files.push({
       name: `${name}.sql`,
       content:

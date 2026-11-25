@@ -96,8 +96,11 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - name: Extraire le binaire ClickHouse 26.9 de son image officielle
-        run: sh tests/differential/clickhouse.sh 26.9 ./clickhouse
+      # Version épinglée : avec 26.9.38.8 (le tag 26.9 de novembre 2026), les agrégations composites sur des attributs Map
+      # échouent dans ClickHouse (« Not found column __table1.LogAttributes in block »), sans lien avec Passerelle.
+      # À remettre sur 26.9 quand ClickHouse aura corrigé.
+      - name: Extraire le binaire ClickHouse 26.9.27.3 de son image officielle
+        run: sh tests/differential/clickhouse.sh 26.9.27.3 ./clickhouse
       - name: Attributs OpenTelemetry
         env:
           CLICKHOUSE_LOCAL: ${{ github.workspace }}/clickhouse local
