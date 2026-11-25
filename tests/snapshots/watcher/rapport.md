@@ -2,15 +2,15 @@
 
 Source : watches.json, console.txt.
 
-10 watches à migrer (dont 2 désactivées), 9 requêtes traduites, 7 conditions traduites en décision SQL. Effort estimé : **16,75 h**, soit **2,4 jours** à 7 h.
+10 watches à migrer (dont 2 désactivées), 9 requêtes traduites, 7 conditions traduites en décision SQL.
 
 1 watch de Stack Monitoring, sans objet après la migration : non comptée.
 
 ## Synthèse
 
-| Watches | Prêtes | À vérifier | À reprendre | Non reconnues | Effort |
-|---:|---:|---:|---:|---:|---:|
-| 10 | 4 | 3 | 3 | 0 | 16,75 h |
+| Watches | Prêtes | À vérifier | À reprendre | Non reconnues |
+|---:|---:|---:|---:|---:|
+| 10 | 4 | 3 | 3 | 0 |
 
 *Prête* : requête et condition traduites directement. *À vérifier* : traduites, avec un écart de comportement à confirmer. *À reprendre* : une partie ne se traduit pas et s’écrit à la main. Dans tous les cas, la planification et les notifications se recréent dans l’outil d’alerte cible.
 
@@ -18,27 +18,27 @@ Actions à recréer : 1 index, 3 journal, 3 e-mail, 2 webhook, 1 Slack, 1 PagerD
 
 ## Principaux points à reprendre
 
-| Point | Watches | Effort |
-|---|---:|---:|
-| référence à une entrée précédente | 1 | 1 h |
-| modèle de recherche stocké | 1 | 1 h |
-| entrée http | 1 | 1 h |
+| Point | Watches |
+|---|---:|
+| entrée http | 1 |
+| modèle de recherche stocké | 1 |
+| référence à une entrée précédente | 1 |
 
 ## Watches
 
-| Watch | État | Planification | Condition | Actions | Verdict | Effort |
-|---|---|---|---|---|---|---:|
-| Ancien export des réponses volumineuses | désactivée | toutes les heures | au moins un des éléments de hits.hits : _source.http.response.bytes ≥ 4000 | index | à vérifier | 1,5 h |
-| Connexions refusées | active | tous les jours à 08:00, 18:30 (UTC) | hits.total.value > 0 (script) | journal | à vérifier | 1,5 h |
-| Durée maximale par hôte | active | toutes les minutes | au moins un des éléments de aggregations.bucketAgg.buckets : metricAgg.value > 800000000 (seuil de l’interface Watcher) | journal | prête | 1,25 h |
-| Échecs de connexion répétés | active | toutes les heures, à la minute 0, 30 (UTC) | taille de echecs.aggregations.utilisateurs.buckets > 0 (script) | e-mail | à reprendre | 2,25 h |
-| Erreurs lentes sur le paiement | active | cron Quartz « 0 0/5 8-19 ? * MON-FRI » (UTC) | aggregations.duree_max.value ≥ 900000000 (script) | webhook | à vérifier | 1,5 h |
-| fin-de-mois | désactivée | cron Quartz « 0 0 6 L * ? » | always (toujours vraie) | journal | à reprendre | 2,5 h |
-| Latence moyenne par service | active | cron Quartz « 0 0/10 * * * ? » (UTC) | au moins un des éléments de aggregations.services.buckets : latence.value ≥ 500000000 | webhook | prête | 1,25 h |
-| Pic d’erreurs 5xx | active | toutes les 5 minutes | hits.total > 20 | e-mail, Slack | prête | 1,5 h |
-| Rapport hebdomadaire des pages | active | chaque lundi à 07:00 (UTC) | always (toujours vraie) | e-mail | prête | 1,25 h |
-| Santé du cluster Elasticsearch | active | toutes les minutes | status ≠ « green » | PagerDuty | à reprendre | 2,25 h |
-| X-Pack Monitoring: Cluster Status | sans objet | toutes les minutes | — | — | sans objet | 0 h |
+| Watch | État | Planification | Condition | Actions | Verdict |
+|---|---|---|---|---|---|
+| Ancien export des réponses volumineuses | désactivée | toutes les heures | au moins un des éléments de hits.hits : _source.http.response.bytes ≥ 4000 | index | à vérifier |
+| Connexions refusées | active | tous les jours à 08:00, 18:30 (UTC) | hits.total.value > 0 (script) | journal | à vérifier |
+| Durée maximale par hôte | active | toutes les minutes | au moins un des éléments de aggregations.bucketAgg.buckets : metricAgg.value > 800000000 (seuil de l’interface Watcher) | journal | prête |
+| Échecs de connexion répétés | active | toutes les heures, à la minute 0, 30 (UTC) | taille de echecs.aggregations.utilisateurs.buckets > 0 (script) | e-mail | à reprendre |
+| Erreurs lentes sur le paiement | active | cron Quartz « 0 0/5 8-19 ? * MON-FRI » (UTC) | aggregations.duree_max.value ≥ 900000000 (script) | webhook | à vérifier |
+| fin-de-mois | désactivée | cron Quartz « 0 0 6 L * ? » | always (toujours vraie) | journal | à reprendre |
+| Latence moyenne par service | active | cron Quartz « 0 0/10 * * * ? » (UTC) | au moins un des éléments de aggregations.services.buckets : latence.value ≥ 500000000 | webhook | prête |
+| Pic d’erreurs 5xx | active | toutes les 5 minutes | hits.total > 20 | e-mail, Slack | prête |
+| Rapport hebdomadaire des pages | active | chaque lundi à 07:00 (UTC) | always (toujours vraie) | e-mail | prête |
+| Santé du cluster Elasticsearch | active | toutes les minutes | status ≠ « green » | PagerDuty | à reprendre |
+| X-Pack Monitoring: Cluster Status | sans objet | toutes les minutes | — | — | sans objet |
 
 ## Exécuter les requêtes
 
@@ -48,7 +48,7 @@ Les requêtes attendent {scheduled_time:String}, l’heure prévue de l’exécu
 
 ### Ancien export des réponses volumineuses
 
-À vérifier, 1,5 h. Watch JSON, désactivée. Identifiant : `ancien-export`. Index : logs-web-*. Table : logs.web.
+À vérifier. Watch JSON, désactivée. Identifiant : `ancien-export`. Index : logs-web-*. Table : logs.web.
 
 - **Planification** : toutes les heures — cron `0 * * * *`.
 - **Entrée** : search.
@@ -96,17 +96,9 @@ FROM
 );
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’alerte (planification, condition, notifications) : 1 h
-- 1 action à recréer : 0,25 h
-- action index : 0,25 h
-
-</details>
-
 ### Connexions refusées
 
-À vérifier, 1,5 h. Watch JSON, active. Identifiant : `connexions-refusees`. Index : logs-web-*. Table : logs.web.
+À vérifier. Watch JSON, active. Identifiant : `connexions-refusees`. Index : logs-web-*. Table : logs.web.
 
 - **Planification** : tous les jours à 08:00, 18:30 (UTC) — cron `0 8 * * *` ; `30 18 * * *`.
 - **Entrée** : search.
@@ -150,17 +142,9 @@ FROM
 );
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’alerte (planification, condition, notifications) : 1 h
-- hits.total.value dans une watch : 0,25 h
-- 1 action à recréer : 0,25 h
-
-</details>
-
 ### Durée maximale par hôte
 
-Prête, 1,25 h. Seuil (interface Watcher de Kibana), active. Identifiant : `6f1d0c2e-5b7a-4c1e-9e0d-3a2b1c4d5e6f`. Index : logs-web-*. Table : logs.web.
+Prête. Seuil (interface Watcher de Kibana), active. Identifiant : `6f1d0c2e-5b7a-4c1e-9e0d-3a2b1c4d5e6f`. Index : logs-web-*. Table : logs.web.
 
 - **Planification** : toutes les minutes — cron `* * * * *`.
 - **Entrée** : search.
@@ -209,16 +193,9 @@ FROM
 );
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’alerte (planification, condition, notifications) : 1 h
-- 1 action à recréer : 0,25 h
-
-</details>
-
 ### Échecs de connexion répétés
 
-À reprendre, 2,25 h. Watch JSON, active. Identifiant : `echecs-de-connexion`. Index : logs-web-*. Table : logs.web.
+À reprendre. Watch JSON, active. Identifiant : `echecs-de-connexion`. Index : logs-web-*. Table : logs.web.
 
 - **Planification** : toutes les heures, à la minute 0, 30 (UTC) — cron `0,30 * * * *`.
 - **Entrée** : echecs (search), detail (search).
@@ -282,17 +259,9 @@ FROM
 );
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’alerte (planification, condition, notifications) : 1 h
-- référence à une entrée précédente : 1 h
-- 1 action à recréer : 0,25 h
-
-</details>
-
 ### Erreurs lentes sur le paiement
 
-À vérifier, 1,5 h. Watch JSON, active. Identifiant : `erreurs-paiement`. Index : logs-web-*. Table : logs.web.
+À vérifier. Watch JSON, active. Identifiant : `erreurs-paiement`. Index : logs-web-*. Table : logs.web.
 
 - **Planification** : cron Quartz « 0 0/5 8-19 ? * MON-FRI » (UTC) — cron `*/5 8-19 * * MON-FRI`.
 - **Entrée** : search.
@@ -334,17 +303,9 @@ FROM
 );
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’alerte (planification, condition, notifications) : 1 h
-- index en date math : 0,25 h
-- 1 action à recréer : 0,25 h
-
-</details>
-
 ### fin-de-mois
 
-À reprendre, 2,5 h. Watch JSON, désactivée. Identifiant : `fin-de-mois`.
+À reprendre. Watch JSON, désactivée. Identifiant : `fin-de-mois`.
 
 - **Planification** : cron Quartz « 0 0 6 L * ? ».
 - **Entrée** : search.
@@ -361,18 +322,9 @@ FROM
 - **1 action à recréer** : journal : journal (niveau info). Les comptes (e-mail, Slack, PagerDuty, Jira) sont déclarés dans elasticsearch.yml, pas dans la watch.
 - **watch désactivée** : La watch est désactivée : migrez-la seulement si elle sert encore.
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’alerte (planification, condition, notifications) : 1 h
-- cron Quartz : 0,25 h
-- modèle de recherche stocké : 1 h
-- 1 action à recréer : 0,25 h
-
-</details>
-
 ### Latence moyenne par service
 
-Prête, 1,25 h. Watch JSON, active. Identifiant : `latence-par-service`. Index : logs-web-*. Table : logs.web.
+Prête. Watch JSON, active. Identifiant : `latence-par-service`. Index : logs-web-*. Table : logs.web.
 
 - **Planification** : cron Quartz « 0 0/10 * * * ? » (UTC) — cron `*/10 * * * *`.
 - **Entrée** : search.
@@ -420,16 +372,9 @@ FROM
 );
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’alerte (planification, condition, notifications) : 1 h
-- 1 action à recréer : 0,25 h
-
-</details>
-
 ### Pic d’erreurs 5xx
 
-Prête, 1,5 h. Watch JSON, active. Identifiant : `erreurs-5xx`. Index : logs-web-*. Table : logs.web.
+Prête. Watch JSON, active. Identifiant : `erreurs-5xx`. Index : logs-web-*. Table : logs.web.
 
 - **Planification** : toutes les 5 minutes — cron `*/5 * * * *`.
 - **Entrée** : search.
@@ -472,16 +417,9 @@ FROM
 );
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’alerte (planification, condition, notifications) : 1 h
-- 2 actions à recréer : 0,5 h
-
-</details>
-
 ### Rapport hebdomadaire des pages
 
-Prête, 1,25 h. Watch JSON, active. Identifiant : `rapport-hebdo`. Index : logs-web-*. Table : logs.web.
+Prête. Watch JSON, active. Identifiant : `rapport-hebdo`. Index : logs-web-*. Table : logs.web.
 
 - **Planification** : chaque lundi à 07:00 (UTC) — cron `0 7 * * 1`.
 - **Entrée** : search.
@@ -506,16 +444,9 @@ ORDER BY doc_count DESC, pages ASC
 LIMIT 5;
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’alerte (planification, condition, notifications) : 1 h
-- 1 action à recréer : 0,25 h
-
-</details>
-
 ### Santé du cluster Elasticsearch
 
-À reprendre, 2,25 h. Watch JSON, active. Identifiant : `sante-cluster`.
+À reprendre. Watch JSON, active. Identifiant : `sante-cluster`.
 
 - **Planification** : toutes les minutes — cron `* * * * *`.
 - **Entrée** : http.
@@ -530,14 +461,6 @@ LIMIT 5;
 - **1 action à recréer** : astreinte : PagerDuty (compte astreinte), avec cluster_name, status. Les comptes (e-mail, Slack, PagerDuty, Jira) sont déclarés dans elasticsearch.yml, pas dans la watch.
 - **throttle_period** : Une notification au plus toutes les 30m : à reproduire (Grafana : intervalle de répétition de la politique de notification).
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’alerte (planification, condition, notifications) : 1 h
-- entrée http : 1 h
-- 1 action à recréer : 0,25 h
-
-</details>
-
 ### X-Pack Monitoring: Cluster Status
 
 Sans objet. Stack Monitoring, sans objet. Identifiant : `kQ7fW3aZTGa0b1c2d3e4fA_elasticsearch_cluster_status`.
@@ -546,7 +469,3 @@ Sans objet. Stack Monitoring, sans objet. Identifiant : `kQ7fW3aZTGa0b1c2d3e4fA_
 
 À noter :
 - **alerte de Stack Monitoring** : Watch créée par la supervision d’Elasticsearch (alertes de cluster) : elle surveille le cluster Elasticsearch lui-même et disparaît avec lui. Sans objet pour la migration.
-
-## Barème de l’effort
-
-Recréer une alerte (planification, condition, notifications) : 1 h, plus 0,25 h par action. Vérifier une requête : 0,25 h si elle est à vérifier, 0,5 h si elle est à reprendre, plus 0,25 h par point à vérifier. Point à reprendre : visualisation Vega 6 h ; classeur Canvas 6 h ; carte 4 h ; TSVB ou Timelion 3 h ; requête ES|QL ou EQL 3 h ; logique de détection 4 h ; script Painless 2 h ; agrégation, mesure ou formule 1,5 h ; 1 h pour une clause ou un paramètre. Total arrondi au quart d’heure supérieur par watch ; un jour vaut 7 h.

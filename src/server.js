@@ -1269,7 +1269,7 @@ function kibanaReport(o) {
   const s = inv.summary;
   const v = s.byVerdict;
   process.stderr.write(
-    `${s.objects} objet(s) : ${v.ready} prêt(s), ${v.review} à vérifier, ${v.todo} à reprendre${v.unrecognized ? `, ${v.unrecognized} non reconnu(s)` : ''}. Effort estimé : ${String(s.effort.hours).replace('.', ',')} h (${String(s.effort.days).replace('.', ',')} j).\n`
+    `${s.objects} objet(s) : ${v.ready} prêt(s), ${v.review} à vérifier, ${v.todo} à reprendre${v.unrecognized ? `, ${v.unrecognized} non reconnu(s)` : ''}.\n`
   );
   inv.source.errors.forEach(e => process.stderr.write(`attention : ${e}\n`));
   if (o['fail-on'] && inv.entries.some(x => VERDICT_RANK[x.verdict] >= VERDICT_RANK[o['fail-on']])) process.exit(2);
@@ -1351,7 +1351,7 @@ function watcherOutput(rep, o, exportText) {
   const s = rep.summary;
   const v = s.byVerdict;
   process.stderr.write(
-    `${s.watches} watch(es) : ${v.ready} prête(s), ${v.review} à vérifier, ${v.todo} à reprendre${v.unrecognized ? `, ${v.unrecognized} non reconnue(s)` : ''}${s.skipped ? ` ; ${s.skipped} de Stack Monitoring, sans objet` : ''}. Effort estimé : ${String(s.effort.hours).replace('.', ',')} h (${String(s.effort.days).replace('.', ',')} j).\n`
+    `${s.watches} watch(es) : ${v.ready} prête(s), ${v.review} à vérifier, ${v.todo} à reprendre${v.unrecognized ? `, ${v.unrecognized} non reconnue(s)` : ''}${s.skipped ? ` ; ${s.skipped} de Stack Monitoring, sans objet` : ''}.\n`
   );
   rep.source.errors.forEach(e => process.stderr.write(`attention : ${e}\n`));
   if (o['fail-on'] && rep.entries.some(x => !x.skipped && VERDICT_RANK[x.verdict] >= VERDICT_RANK[o['fail-on']]))

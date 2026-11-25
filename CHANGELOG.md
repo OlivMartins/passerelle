@@ -2,6 +2,23 @@
 
 Toutes les évolutions notables de Passerelle sont consignées ici. Le format s’inspire de [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et les versions suivent le [versionnage sémantique](https://semver.org/lang/fr/).
 
+## [1.8.0] - 2026-11-25
+
+### Modifié
+
+- **Plus d’estimation d’effort.** Passerelle ne chiffre plus la migration en heures ni en jours : le verdict (prête, à vérifier, à reprendre, non reconnue) reste la seule mesure, par objet (inventaire Kibana) et par watch.
+  - **Inventaire Kibana et rapport des watches** (Markdown, HTML, CSV, JSON, interface, résumé de la ligne de commande) : disparaissent la phrase « Effort estimé », la colonne « Effort » de chaque tableau, le calcul détaillé de l’effort d’un objet, le barème et la tuile d’effort de la page HTML. L’en-tête des fichiers SQL ne mentionne plus l’effort.
+  - **Interface, section « Kibana »** : plus de chiffre d’effort à côté du verdict, dans le bandeau de l’arbre ni dans l’onglet « Lecture ».
+  - **« Principaux points à reprendre »** : classés par nombre d’objets (ou de watches) concernés, puis par ordre alphabétique, et non plus par heures.
+  - La remarque « panneau absent de l’export » ne précise plus que l’effort du panneau n’est pas compté.
+  - Verdicts, requêtes SQL et prérequis sont inchangés.
+
+### À savoir avant de mettre à jour
+
+- **Réponses JSON** de l’inventaire Kibana (`POST /v1/inventory/kibana`, `passerelle kibana`) et du rapport des watches (`POST /v1/translate/watcher`, `passerelle watcher`) : ces champs n’existent plus : `summary.effort`, `summary.byType.<type>.effort` (Kibana), `entries[].effort`, `entries[].effortDetail`, `entries[].effortTotal` (Kibana), `effortScale` et `blockers[].hours`. Les scripts qui les lisent sont à adapter ; `summary.byVerdict`, `entries[].verdict` et `blockers[].objects` suffisent à suivre l’avancement.
+- **CSV** : la colonne « Effort (h) » est retirée, les colonnes qui la suivent remontent d’un rang. Lisez-les par leur en-tête, non par leur position.
+- **Ligne de commande** : le résumé écrit sur la sortie d’erreur par `passerelle kibana` et `passerelle watcher` ne donne plus l’effort estimé.
+
 ## [1.7.4] - 2026-11-04
 
 ### Corrigé
@@ -467,6 +484,7 @@ Banc différentiel Elasticsearch / ClickHouse et correctifs de fiabilité, contr
 - Configuration `passerelle.yaml` versionnable, secrets par variables d’environnement.
 - Paquet Linux x86_64 : binaire unique, unité systemd durcie, script d’installation.
 
+[1.8.0]: https://github.com/OlivMartins/passerelle/compare/v1.7.4...v1.8.0
 [1.7.4]: https://github.com/OlivMartins/passerelle/compare/v1.7.3...v1.7.4
 [1.7.3]: https://github.com/OlivMartins/passerelle/compare/v1.7.2...v1.7.3
 [1.7.2]: https://github.com/OlivMartins/passerelle/compare/v1.7.1...v1.7.2

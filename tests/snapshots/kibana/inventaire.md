@@ -1,73 +1,71 @@
 # Inventaire de migration Kibana vers ClickHouse
 
-25 objets à migrer, 21 requêtes traduites. Effort estimé : **37,25 h**, soit **5,3 jours** à 7 h.
+25 objets à migrer, 21 requêtes traduites.
 
 Non comptés (sans requête à migrer) : 1 tag, 1 config.
 
 ## Synthèse
 
-| Type | Objets | Prêts | À vérifier | À reprendre | Non reconnus | Effort |
-|---|---:|---:|---:|---:|---:|---:|
-| Vue de données | 1 | 1 | 0 | 0 | 0 | 0,25 h |
-| Recherche | 2 | 1 | 0 | 1 | 0 | 3,5 h |
-| Visualisation | 7 | 4 | 2 | 1 | 0 | 11 h |
-| Lens | 5 | 2 | 2 | 1 | 0 | 4,5 h |
-| Carte | 1 | 0 | 0 | 1 | 0 | 4,5 h |
-| Tableau de bord | 1 | 0 | 0 | 1 | 0 | 2 h |
-| Règle d’alerte | 3 | 3 | 0 | 0 | 0 | 3,5 h |
-| Règle de détection | 3 | 0 | 2 | 1 | 0 | 7,5 h |
-| Connecteur | 2 | 2 | 0 | 0 | 0 | 0,5 h |
-| **Total** | **25** | **13** | **6** | **6** | **0** | **37,25 h** |
+| Type | Objets | Prêts | À vérifier | À reprendre | Non reconnus |
+|---|---:|---:|---:|---:|---:|
+| Vue de données | 1 | 1 | 0 | 0 | 0 |
+| Recherche | 2 | 1 | 0 | 1 | 0 |
+| Visualisation | 7 | 4 | 2 | 1 | 0 |
+| Lens | 5 | 2 | 2 | 1 | 0 |
+| Carte | 1 | 0 | 0 | 1 | 0 |
+| Tableau de bord | 1 | 0 | 0 | 1 | 0 |
+| Règle d’alerte | 3 | 3 | 0 | 0 | 0 |
+| Règle de détection | 3 | 0 | 2 | 1 | 0 |
+| Connecteur | 2 | 2 | 0 | 0 | 0 |
+| **Total** | **25** | **13** | **6** | **6** | **0** |
 
 *Prête* : traduction directe. *À vérifier* : traduite, avec un écart de comportement à confirmer. *À reprendre* : une partie ne se traduit pas et s’écrit à la main. *Non reconnue* : objet que Passerelle ne lit pas.
 
 ## Principaux points à reprendre
 
-| Point | Objets | Effort |
-|---|---:|---:|
-| visualisation Vega | 1 | 6 h |
-| carte (Maps) | 1 | 4 h |
-| règle de détection eql | 1 | 4 h |
-| recherche ES\|QL | 1 | 3 h |
-| décalage temporel (time shift) | 1 | 1 h |
+| Point | Objets |
+|---|---:|
+| carte (Maps) | 1 |
+| décalage temporel (time shift) | 1 |
+| recherche ES\|QL | 1 |
+| règle de détection eql | 1 |
+| visualisation Vega | 1 |
 
 ## Tableaux de bord
 
-| Tableau de bord | Panneaux | Verdict | Effort, panneaux compris |
-|---|---:|---|---:|
-| Supervision du site web | 11 | à reprendre | 10,75 h |
-
-L’effort d’un tableau de bord compte ses panneaux ; un objet partagé par plusieurs tableaux de bord est compté dans chacun ici, une seule fois dans le total.
+| Tableau de bord | Panneaux | Verdict |
+|---|---:|---|
+| Supervision du site web | 11 | à reprendre |
 
 ## Objets
 
-| Type | Objet | Nature | Verdict | Effort |
-|---|---|---|---|---:|
-| Vue de données | logs-web-* | champ de temps @timestamp | prête | 0,25 h |
-| Recherche | Enquête délais d’attente | Discover, 2 onglets | à reprendre | 3,25 h |
-| Recherche | Erreurs 5xx récentes | Discover | prête | 0,25 h |
-| Visualisation | Carte des sessions (Vega) | Vega | à reprendre | 6,5 h |
-| Visualisation | Chemins en erreur | secteurs, depuis une recherche | prête | 0,5 h |
-| Visualisation | Débit sortant par hôte (TSVB) | TSVB timeseries | à vérifier | 1,5 h |
-| Visualisation | Latence moyenne et p95 par heure | courbes | prête | 0,5 h |
-| Visualisation | Mode d’emploi | Markdown | prête | 0,5 h |
-| Visualisation | Requêtes par service | barres verticales | à vérifier | 1 h |
-| Visualisation | Supervision du site web › Panneau 11 | Markdown | prête | 0,5 h |
-| Lens | Erreurs : aujourd’hui contre hier | métrique | à reprendre | 1,5 h |
-| Lens | Requêtes par seconde et par méthode | graphique XY | à vérifier | 1,25 h |
-| Lens | Taux d’erreur (formule) | métrique | prête | 0,5 h |
-| Lens | Utilisateurs les plus actifs | tableau | à vérifier | 0,75 h |
-| Lens | Supervision du site web › Codes d’erreur | secteurs | prête | 0,5 h |
-| Carte | Origine des visiteurs | Maps | à reprendre | 4,5 h |
-| Tableau de bord | Supervision du site web | 11 panneaux, période now-24h → now | à reprendre | 2 h |
-| Règle d’alerte | Latence moyenne par service | .index-threshold | prête | 1 h |
-| Règle d’alerte | Pic d’erreurs 5xx | .es-query | prête | 1,5 h |
-| Règle d’alerte | Requête Elasticsearch : connexions refusées | .es-query, désactivée | prête | 1 h |
-| Règle de détection | Accès à l’administration | query | à vérifier | 1,25 h |
-| Règle de détection | Connexion puis export massif | eql | à reprendre | 5 h |
-| Règle de détection | Connexions refusées en rafale | threshold | à vérifier | 1,25 h |
-| Connecteur | Canal #web-ops | .slack | prête | 0,25 h |
-| Connecteur | Courriel de l’astreinte | .email | prête | 0,25 h |
+| Type | Objet | Nature | Verdict |
+|---|---|---|---|
+| Vue de données | logs-web-* | champ de temps @timestamp | prête |
+| Recherche | Enquête délais d’attente | Discover, 2 onglets | à reprendre |
+| Recherche | Erreurs 5xx récentes | Discover | prête |
+| Visualisation | Carte des sessions (Vega) | Vega | à reprendre |
+| Visualisation | Chemins en erreur | secteurs, depuis une recherche | prête |
+| Visualisation | Débit sortant par hôte (TSVB) | TSVB timeseries | à vérifier |
+| Visualisation | Latence moyenne et p95 par heure | courbes | prête |
+| Visualisation | Mode d’emploi | Markdown | prête |
+| Visualisation | Requêtes par service | barres verticales | à vérifier |
+| Visualisation | Supervision du site web › Panneau 11 | Markdown | prête |
+| Lens | Erreurs : aujourd’hui contre hier | métrique | à reprendre |
+| Lens | Requêtes par seconde et par méthode | graphique XY | à vérifier |
+| Lens | Taux d’erreur (formule) | métrique | prête |
+| Lens | Utilisateurs les plus actifs | tableau | à vérifier |
+| Lens | Supervision du site web › Codes d’erreur | secteurs | prête |
+| Carte | Origine des visiteurs | Maps | à reprendre |
+| Tableau de bord | Supervision du site web | 11 panneaux, période now-24h → now | à reprendre |
+| Règle d’alerte | Latence moyenne par service | .index-threshold | prête |
+| Règle d’alerte | Pic d’erreurs 5xx | .es-query | prête |
+| Règle d’alerte | Requête Elasticsearch : connexions refusées | .es-query, désactivée | prête |
+| Règle de détection | Accès à l’administration | query | à vérifier |
+| Règle de détection | Connexion puis export massif | eql | à reprendre |
+| Règle de détection | Connexions refusées en rafale | threshold | à vérifier |
+| Connecteur | Canal #web-ops | .slack | prête |
+| Connecteur | Courriel de l’astreinte | .email | prête |
 
 ## Champs cités, par vue de données
 
@@ -77,7 +75,7 @@ L’effort d’un tableau de bord compte ses panneaux ; un objet partagé par pl
 
 ### Vue de données : logs-web-*
 
-Prête, 0,25 h. champ de temps @timestamp. Identifiant : `9c1f0a2e-0000-4000-8000-00000000d001`. Vue de données : logs-web-*. Table : logs.web.
+Prête. champ de temps @timestamp. Identifiant : `9c1f0a2e-0000-4000-8000-00000000d001`. Vue de données : logs-web-*. Table : logs.web.
 
 **Champs calculés (1)** — prête, couverture 100 %. Renvoie 10 documents triés par timestamp (décroissant).
 
@@ -94,7 +92,7 @@ LIMIT 10;
 
 ### Recherche : Enquête délais d’attente
 
-À reprendre, 3,25 h. Discover, 2 onglets. Identifiant : `9c1f0a2e-0000-4000-8000-00000000s002`. Vue de données : logs-web-*. Table : logs.web.
+À reprendre. Discover, 2 onglets. Identifiant : `9c1f0a2e-0000-4000-8000-00000000s002`. Vue de données : logs-web-*. Table : logs.web.
 
 À reprendre :
 - **recherche ES|QL** : Une recherche ES|QL se réécrit en SQL ClickHouse. Requête : FROM logs-web-* | WHERE http.response.status_code >= 500 | STATS n = COUNT(*) BY service.name
@@ -115,16 +113,9 @@ ORDER BY timestamp DESC
 LIMIT 100;
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (recherche) : 0,25 h
-- recherche ES|QL : 3 h
-
-</details>
-
 ### Recherche : Erreurs 5xx récentes
 
-Prête, 0,25 h. Discover. Identifiant : `9c1f0a2e-0000-4000-8000-00000000s001`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
+Prête. Discover. Identifiant : `9c1f0a2e-0000-4000-8000-00000000s001`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
 
 **Documents** — prête, couverture 100 %. Sur @timestamp ≥ {{time_from}} et ≤ {{time_to}}, garde les documents où http.response.status_code ≥ 500, service.name = checkout, sauf url.path = /health, et renvoie 500 documents triés par timestamp (décroissant).
 
@@ -148,21 +139,14 @@ LIMIT 500;
 
 ### Visualisation : Carte des sessions (Vega)
 
-À reprendre, 6,5 h. Vega. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v005`.
+À reprendre. Vega. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v005`.
 
 À reprendre :
 - **visualisation Vega** : Une spécification Vega embarque ses propres requêtes Elasticsearch : le graphique se recrée dans l’outil cible et ses requêtes se réécrivent en SQL.
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (visualisation) : 0,5 h
-- visualisation Vega : 6 h
-
-</details>
-
 ### Visualisation : Chemins en erreur
 
-Prête, 0,5 h. secteurs, depuis une recherche. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v003`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
+Prête. secteurs, depuis une recherche. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v003`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
 
 **Requête** — prête, couverture 100 %. Sur @timestamp ≥ {{time_from}} et ≤ {{time_to}}, garde les documents où http.response.status_code ≥ 500, service.name = checkout, sauf url.path = /health, puis regroupe par url.path (10 premiers).
 
@@ -184,7 +168,7 @@ LIMIT 10;
 
 ### Visualisation : Débit sortant par hôte (TSVB)
 
-À vérifier, 1,5 h. TSVB timeseries. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v004`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
+À vérifier. TSVB timeseries. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v004`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
 
 À vérifier :
 - **intervalle automatique** : Kibana calcule l’intervalle d’après la période affichée. La traduction retient 30m, l’intervalle de la période par défaut du tableau de bord (1 j) ; dans Grafana, $__interval le recalcule à chaque affichage.
@@ -258,19 +242,9 @@ GROUP BY periode
 ORDER BY periode ASC;
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (visualisation) : 0,5 h
-- Vérifier « Taux d’erreur » (à vérifier) : 0,25 h
-- Points à vérifier de « Taux d’erreur » : 0,25 h
-- intervalle automatique : 0,25 h
-- dernière tranche écartée (TSVB) : 0,25 h
-
-</details>
-
 ### Visualisation : Latence moyenne et p95 par heure
 
-Prête, 0,5 h. courbes. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v002`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
+Prête. courbes. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v002`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
 
 **Requête** — prête, couverture 100 %. Sur @timestamp ≥ {{time_from}} et ≤ {{time_to}}, garde les documents où service.name = checkout ou service.name = panier, puis regroupe par heure, avec moyenne de event.duration, percentiles de event.duration.
 
@@ -291,11 +265,11 @@ ORDER BY periode ASC;
 
 ### Visualisation : Mode d’emploi
 
-Prête, 0,5 h. Markdown. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v006`.
+Prête. Markdown. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v006`.
 
 ### Visualisation : Requêtes par service
 
-À vérifier, 1 h. barres verticales. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v001`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
+À vérifier. barres verticales. Identifiant : `9c1f0a2e-0000-4000-8000-00000000v001`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
 
 À vérifier :
 - **intervalle automatique** : Kibana calcule l’intervalle d’après la période affichée. La traduction retient 30m, l’intervalle de la période par défaut du tableau de bord (1 j) ; dans Grafana, $__interval le recalcule à chaque affichage.
@@ -317,21 +291,13 @@ ORDER BY periode ASC, doc_count DESC, service_name ASC
 LIMIT 5 BY periode;
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (visualisation) : 0,5 h
-- intervalle automatique : 0,25 h
-- groupe « Autres » : 0,25 h
-
-</details>
-
 ### Visualisation : Supervision du site web › Panneau 11
 
-Prête, 0,5 h. Markdown. Identifiant : `9c1f0a2e-0000-4000-8000-00000000d101/pv2`.
+Prête. Markdown. Identifiant : `9c1f0a2e-0000-4000-8000-00000000d101/pv2`.
 
 ### Lens : Erreurs : aujourd’hui contre hier
 
-À reprendre, 1,5 h. métrique. Identifiant : `9c1f0a2e-0000-4000-8000-00000000l004`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
+À reprendre. métrique. Identifiant : `9c1f0a2e-0000-4000-8000-00000000l004`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
 
 À reprendre :
 - **décalage temporel (time shift)** : « Erreurs hier » compare à la période décalée de 1d : une seconde requête sur cette période est nécessaire.
@@ -348,16 +314,9 @@ WHERE timestamp >= parseDateTime64BestEffort({time_from:String}, 3, 'UTC')
   AND http.response.status_code >= 500;
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (lens) : 0,5 h
-- décalage temporel (time shift) : 1 h
-
-</details>
-
 ### Lens : Requêtes par seconde et par méthode
 
-À vérifier, 1,25 h. graphique XY. Identifiant : `9c1f0a2e-0000-4000-8000-00000000l001`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
+À vérifier. graphique XY. Identifiant : `9c1f0a2e-0000-4000-8000-00000000l001`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
 
 À vérifier :
 - **taux par unité de temps aux bords** : Lens ramène les deux tranches des bords de la période à leur partie affichée ; rate divise par la tranche entière : seules ces deux tranches diffèrent.
@@ -381,18 +340,9 @@ ORDER BY periode ASC, Requetes_par_seconde DESC, http_request_method ASC
 LIMIT 4 BY periode;
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (lens) : 0,5 h
-- taux par unité de temps aux bords : 0,25 h
-- groupe « Autres » : 0,25 h
-- intervalle automatique : 0,25 h
-
-</details>
-
 ### Lens : Taux d’erreur (formule)
 
-Prête, 0,5 h. métrique. Identifiant : `9c1f0a2e-0000-4000-8000-00000000l002`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
+Prête. métrique. Identifiant : `9c1f0a2e-0000-4000-8000-00000000l002`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
 
 **Requête** — prête, couverture 100 %. Sur @timestamp ≥ {{time_from}} et ≤ {{time_to}}, regroupe par filtres (tout).
 
@@ -412,7 +362,7 @@ ORDER BY indexOf(['tout'], tout) ASC;
 
 ### Lens : Utilisateurs les plus actifs
 
-À vérifier, 0,75 h. tableau. Identifiant : `9c1f0a2e-0000-4000-8000-00000000l003`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
+À vérifier. tableau. Identifiant : `9c1f0a2e-0000-4000-8000-00000000l003`. Vue de données : logs-web-*. Table : logs.web. Utilisé par 1 tableau de bord.
 
 À vérifier :
 - **nombre de valeurs distinctes** : Elasticsearch l’estime (HyperLogLog++, exact jusqu’à 3 000 valeurs) ; ClickHouse le calcule selon la configuration (uniqExact exact, uniq approché).
@@ -435,16 +385,9 @@ ORDER BY Adresses_IP_distinctes DESC, user_name ASC
 LIMIT 10;
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (lens) : 0,5 h
-- nombre de valeurs distinctes : 0,25 h
-
-</details>
-
 ### Lens : Supervision du site web › Codes d’erreur
 
-Prête, 0,5 h. secteurs. Identifiant : `9c1f0a2e-0000-4000-8000-00000000d101/pv1`. Vue de données : logs-web-*. Table : logs.web.
+Prête. secteurs. Identifiant : `9c1f0a2e-0000-4000-8000-00000000d101/pv1`. Vue de données : logs-web-*. Table : logs.web.
 
 **Requête** — prête, couverture 100 %. Sur @timestamp ≥ {{time_from}} et ≤ {{time_to}}, garde les documents où service.environment = production, sauf url.path = /health, puis regroupe par plages de http.response.status_code.
 
@@ -472,21 +415,14 @@ ARRAY JOIN
 
 ### Carte : Origine des visiteurs
 
-À reprendre, 4,5 h. Maps. Identifiant : `9c1f0a2e-0000-4000-8000-00000000m001`.
+À reprendre. Maps. Identifiant : `9c1f0a2e-0000-4000-8000-00000000m001`.
 
 À reprendre :
 - **carte (Maps)** : Une carte de l’application Maps (couches, documents, grilles, jointures) se recrée dans l’outil cible (Geomap de Grafana) ; ses requêtes se réécrivent en SQL.
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (carte) : 0,5 h
-- carte (Maps) : 4 h
-
-</details>
-
 ### Tableau de bord : Supervision du site web
 
-À reprendre, 2 h. 11 panneaux, période now-24h → now. Identifiant : `9c1f0a2e-0000-4000-8000-00000000d101`. Vue de données : logs-web-*. Table : logs.web.
+À reprendre. 11 panneaux, période now-24h → now. Identifiant : `9c1f0a2e-0000-4000-8000-00000000d101`. Vue de données : logs-web-*. Table : logs.web.
 
 À vérifier :
 - **filtre commun du tableau de bord** : Le tableau de bord ajoute sa requête et ses filtres à chaque panneau. Ils sont inclus dans le SQL des panneaux par valeur ; pour les panneaux par référence, ajoutez la condition ci-dessous à leur requête (ou recréez-la en variable).
@@ -529,17 +465,9 @@ WHERE timestamp >= parseDateTime64BestEffort({time_from:String}, 3, 'UTC')
   AND timestamp <= parseDateTime64BestEffort({time_to:String}, 3, 'UTC');
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer le tableau de bord : 0,5 h
-- Disposer 11 panneaux : 1,1 h
-- filtre commun du tableau de bord : 0,25 h
-
-</details>
-
 ### Règle d’alerte : Latence moyenne par service
 
-Prête, 1 h. .index-threshold. Identifiant : `9c1f0a2e-0000-4000-8000-00000000r002`. Vue de données : logs-web-*. Table : logs.web.
+Prête. .index-threshold. Identifiant : `9c1f0a2e-0000-4000-8000-00000000r002`. Vue de données : logs-web-*. Table : logs.web.
 
 À noter :
 - **planification** : La règle s’évalue toutes les 5m : à reproduire dans l’outil cible.
@@ -568,7 +496,7 @@ FROM
 
 ### Règle d’alerte : Pic d’erreurs 5xx
 
-Prête, 1,5 h. .es-query. Identifiant : `9c1f0a2e-0000-4000-8000-00000000r001`. Vue de données : logs-web-*. Table : logs.web.
+Prête. .es-query. Identifiant : `9c1f0a2e-0000-4000-8000-00000000r001`. Vue de données : logs-web-*. Table : logs.web.
 
 À noter :
 - **2 actions à recréer** : Notifications (.email, .slack) à recréer dans l’outil d’alerte cible, avec la planification « toutes les 1m ».
@@ -590,16 +518,9 @@ FROM
 );
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (règle d’alerte) : 1 h
-- 2 actions à recréer : 0,5 h
-
-</details>
-
 ### Règle d’alerte : Requête Elasticsearch : connexions refusées
 
-Prête, 1 h. .es-query, désactivée. Identifiant : `9c1f0a2e-0000-4000-8000-00000000r003`. Vue de données : logs-web-*. Table : logs.web.
+Prête. .es-query, désactivée. Identifiant : `9c1f0a2e-0000-4000-8000-00000000r003`. Vue de données : logs-web-*. Table : logs.web.
 
 À noter :
 - **planification** : La règle s’évalue toutes les 5m : à reproduire dans l’outil cible.
@@ -625,7 +546,7 @@ FROM
 
 ### Règle de détection : Accès à l’administration
 
-À vérifier, 1,25 h. query. Identifiant : `web-admin-access`. Vue de données : logs-web-*. Table : logs.web.
+À vérifier. query. Identifiant : `web-admin-access`. Vue de données : logs-web-*. Table : logs.web.
 
 À vérifier :
 - **logique de détection à recréer** : Planification (5m), gravité, suppression des doublons et création des signaux se recréent dans l’outil cible ; la requête est traduite.
@@ -644,30 +565,16 @@ ORDER BY timestamp DESC
 LIMIT 100;
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (règle de détection) : 1 h
-- logique de détection à recréer : 0,25 h
-
-</details>
-
 ### Règle de détection : Connexion puis export massif
 
-À reprendre, 5 h. eql. Identifiant : `web-sequence`.
+À reprendre. eql. Identifiant : `web-sequence`.
 
 À reprendre :
 - **règle de détection eql** : Une séquence EQL se réécrit dans l’outil cible. Requête : sequence by user.name [authentication where event.outcome == "success"] [web where url.path : "/export*"]
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (règle de détection) : 1 h
-- règle de détection eql : 4 h
-
-</details>
-
 ### Règle de détection : Connexions refusées en rafale
 
-À vérifier, 1,25 h. threshold. Identifiant : `web-brute-force`. Vue de données : logs-web-*. Table : logs.web.
+À vérifier. threshold. Identifiant : `web-brute-force`. Vue de données : logs-web-*. Table : logs.web.
 
 À vérifier :
 - **logique de détection à recréer** : Planification (5m), gravité, suppression des doublons et création des signaux se recréent dans l’outil cible ; la requête est traduite.
@@ -689,27 +596,16 @@ ORDER BY doc_count DESC, groupe ASC
 LIMIT 100;
 ```
 
-<details><summary>Calcul de l’effort</summary>
-
-- Recréer l’objet (règle de détection) : 1 h
-- logique de détection à recréer : 0,25 h
-
-</details>
-
 ### Connecteur : Canal #web-ops
 
-Prête, 0,25 h. .slack. Identifiant : `9c1f0a2e-0000-4000-8000-00000000a002`.
+Prête. .slack. Identifiant : `9c1f0a2e-0000-4000-8000-00000000a002`.
 
 À noter :
 - **connecteur à recréer** : Le connecteur .slack (destination des notifications) se recrée dans l’outil d’alerte cible ; ses secrets ne sont pas exportés.
 
 ### Connecteur : Courriel de l’astreinte
 
-Prête, 0,25 h. .email. Identifiant : `9c1f0a2e-0000-4000-8000-00000000a001`.
+Prête. .email. Identifiant : `9c1f0a2e-0000-4000-8000-00000000a001`.
 
 À noter :
 - **connecteur à recréer** : Le connecteur .email (destination des notifications) se recrée dans l’outil d’alerte cible ; ses secrets ne sont pas exportés.
-
-## Barème de l’effort
-
-Recréer un objet : vue de données 0,25 h, recherche 0,25 h, requête enregistrée 0,1 h, visualisation 0,5 h, lens 0,5 h, carte 0,5 h, liens 0,25 h, tableau de bord 0,5 h, règle d’alerte 1 h, règle de détection 1 h, connecteur 0,25 h, canvas 0,5 h, graph 0,5 h, autre 0,5 h ; 0,1 h par panneau de tableau de bord. Vérifier une requête : 0,25 h si elle est à vérifier, 0,5 h si elle est à reprendre, plus 0,25 h par point à vérifier. Point à reprendre : visualisation Vega 6 h ; classeur Canvas 6 h ; carte 4 h ; TSVB ou Timelion 3 h ; requête ES|QL ou EQL 3 h ; logique de détection 4 h ; script Painless 2 h ; agrégation, mesure ou formule 1,5 h ; 1 h pour une clause ou un paramètre. Total arrondi au quart d’heure supérieur par objet ; un jour vaut 7 h.

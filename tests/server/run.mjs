@@ -434,8 +434,9 @@ try {
     r.status === 200 &&
       r.json.summary.objects > 10 &&
       r.json.entries.some(x => x.type === 'dashboard') &&
-      r.json.summary.effort.hours > 0,
-    'inventaire Kibana : objets, verdicts et effort',
+      r.json.summary.queries > 0 &&
+      !('effort' in r.json.summary),
+    'inventaire Kibana : objets et verdicts, sans estimation d’effort',
     `statut ${r.status}`
   );
   r = await request(prod, 'POST', '/v1/inventory/kibana?format=md&timezone=Europe/Paris', {
@@ -656,7 +657,8 @@ check(
   c.status === 0 &&
     ['md', 'html', 'csv', 'json'].every(f => existsSync(join(kibanaOut, `inventaire.${f}`))) &&
     readdirSync(join(kibanaOut, 'sql')).length > 10 &&
-    /Effort estimé/.test(c.stderr),
+    /objet\(s\) : \d+ prêt\(s\)/.test(c.stderr) &&
+    !/ffort/.test(c.stderr),
   'kibana --out : rapports et fichiers SQL',
   `code ${c.status} ${c.stderr}`
 );

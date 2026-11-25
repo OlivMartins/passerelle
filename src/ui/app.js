@@ -4,8 +4,6 @@ import {
   configToYAML,
   coverage,
   DEFAULT_CONFIG,
-  frHours,
-  frNum,
   grafanaDashboard,
   grafanaReportMarkdown,
   inventoryCSV,
@@ -1072,12 +1070,12 @@ function renderAPI() {
         [
           'POST',
           '/v1/inventory/kibana?format=json',
-          'Inventaire d’un export Kibana (.ndjson) : objets, requêtes traduites, verdict et effort par objet. Formats json, md, html, csv.'
+          'Inventaire d’un export Kibana (.ndjson) : objets, requêtes traduites, verdict par objet. Formats json, md, html, csv.'
         ],
         [
           'POST',
           '/v1/translate/watcher?format=json',
-          'Traduit des watches Elasticsearch (export _query/watches, GET _watcher/watch/<id> ou console) : requête SQL, décision de la condition, planification et actions à recréer, verdict et effort par watch. Formats json, md, html, csv.'
+          'Traduit des watches Elasticsearch (export _query/watches, GET _watcher/watch/<id> ou console) : requête SQL, décision de la condition, planification et actions à recréer, verdict par watch. Formats json, md, html, csv.'
         ],
         [
           'POST',
@@ -1345,7 +1343,7 @@ const TOOLS = {
       return {
         verdict: s.watches ? worstOf(Object.keys(b).filter(k => b[k])) : 'ready',
         counts: { ok: b.ready, approx: b.review, ko: b.todo + b.unrecognized },
-        sentence: `${nb(s.watches, 'watch à migrer', 'watches à migrer')}, ${nb(s.conditions, 'condition traduite', 'conditions traduites')} en décision SQL. Effort estimé : ${frHours(s.effort.hours)}.${s.skipped ? ` ${nb(s.skipped, 'watch de Stack Monitoring', 'watches de Stack Monitoring')}, sans objet.` : ''}`,
+        sentence: `${nb(s.watches, 'watch à migrer', 'watches à migrer')}, ${nb(s.conditions, 'condition traduite', 'conditions traduites')} en décision SQL.${s.skipped ? ` ${nb(s.skipped, 'watch de Stack Monitoring', 'watches de Stack Monitoring')}, sans objet.` : ''}`,
         tabs: [
           ['rapport', 'Rapport', 'md', md],
           ['sql', 'SQL', 'sql', sql],
@@ -1708,7 +1706,7 @@ function kbSelect(key, focus) {
   }
 }
 
-/* Ce qui s’affiche à droite pour la sélection : verdict, comptes, effort, phrase, et les objets dont on montre les requêtes */
+/* Ce qui s’affiche à droite pour la sélection : verdict, comptes, phrase, et les objets dont on montre les requêtes */
 function kbSelection() {
   const st = S.kibana;
   const inv = st.inv;
@@ -1724,8 +1722,6 @@ function kbSelection() {
       title: 'Vue d’ensemble',
       counts: { ok: b.ready, approx: b.review, ko: b.todo + b.unrecognized },
       noun: ['objet', 'objets'],
-      hours: s.effort.hours,
-      hoursLabel: `effort estimé, soit ${frNum(s.effort.days)} j à ${inv.effortScale.hoursPerDay} h`,
       meta: [
         st.files.length > 1 ? `${st.files.length} exports réunis` : (st.files[0] || {}).name,
         ign.length ? `non comptés : ${ign.map(([t, n]) => `${n} ${t}`).join(', ')}` : ''
@@ -1755,8 +1751,6 @@ function kbSelection() {
       verdict: x.verdict,
       counts: kids.length ? c : null,
       noun: ['panneau', 'panneaux'],
-      hours: x.effortTotal || x.effort,
-      hoursLabel: 'effort estimé, panneaux compris',
       meta: [kbKind(x), [...new Set(kids.flatMap(k => k.views))].join(', ')].filter(Boolean).join(' · '),
       sentence: `${nb(x.panels || kids.length, 'panneau', 'panneaux')}, ${nb(nq, 'requête SQL', 'requêtes SQL')}.${own.length ? ` Le tableau de bord ajoute ${own.join(' et ')}.` : ''}${manual.length ? ` ${nb(manual.length, 'panneau se recrée', 'panneaux se recréent')} sans traduction : ${manual.map(k => k.title).join(', ')}.` : ''}`,
       groups: [x]
@@ -1782,8 +1776,6 @@ function kbSelection() {
     verdict: x.verdict,
     counts: x.queries.length ? c : null,
     noun: ['requête', 'requêtes'],
-    hours: x.effort,
-    hoursLabel: 'effort estimé',
     meta: [
       kbKind(x),
       x.views.length ? `${x.views.join(', ')} → ${x.tables.join(', ') || '?'}` : '',
@@ -1835,7 +1827,7 @@ function renderKbBrowse(view) {
   const total = s.objects || 1;
   const dashes = kbDashboards();
   stats.hidden = false;
-  stats.innerHTML = `<div class="kb-figs"><span><b>${s.objects}</b>objet${s.objects > 1 ? 's' : ''}</span><span><b>${dashes.length}</b>tableau${dashes.length > 1 ? 'x' : ''} de bord</span><span><b>${s.queries}</b>requête${s.queries > 1 ? 's' : ''} SQL</span><span><b>${esc(frHours(s.effort.hours))}</b>d’effort</span></div>
+  stats.innerHTML = `<div class="kb-figs"><span><b>${s.objects}</b>objet${s.objects > 1 ? 's' : ''}</span><span><b>${dashes.length}</b>tableau${dashes.length > 1 ? 'x' : ''} de bord</span><span><b>${s.queries}</b>requête${s.queries > 1 ? 's' : ''} SQL</span></div>
     <div class="gauge" role="img" aria-label="${b.ready} objets prêts, ${b.review} à vérifier, ${b.todo + b.unrecognized} à reprendre"><span class="c-ok" style="width:${(100 * b.ready) / total}%"></span><span class="c-approx" style="width:${(100 * b.review) / total}%"></span><span class="c-ko" style="width:${(100 * (b.todo + b.unrecognized)) / total}%"></span></div>`;
   // Arbre : vue d’ensemble, tableaux de bord et leurs panneaux, puis les objets qu’aucun tableau de bord n’affiche
   const q = kbNorm(st.filter.trim());
@@ -1910,7 +1902,7 @@ function renderKbOut(view) {
   const total = c ? c.ok + c.approx + c.ko || 1 : 1;
   const [one, many] = sel.noun;
   const ready = n => `${n} ${n > 1 ? many : one} prêt${one === 'requête' ? 'e' : ''}${n > 1 ? 's' : ''}`;
-  v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-${sel.verdict}"><i></i>${verdictLabel(sel.verdict)}</span><span class="score">${esc(frHours(sel.hours))}</span><span class="score-label">${esc(sel.hoursLabel)}</span>
+  v.innerHTML = `<div class="verdict-top"><span class="verdict-chip v-${sel.verdict}"><i></i>${verdictLabel(sel.verdict)}</span>
     ${c ? `<span class="counts"><span><i class="c-ok"></i>${ready(c.ok)}</span><span><i class="c-approx"></i>${c.approx} à vérifier</span><span><i class="c-ko"></i>${c.ko} à reprendre</span></span>` : ''}</div>
     ${c ? `<div class="gauge" role="img" aria-label="${ready(c.ok)}, ${c.approx} à vérifier, ${c.ko} à reprendre"><span class="c-ok" style="width:${(100 * c.ok) / total}%"></span><span class="c-approx" style="width:${(100 * c.approx) / total}%"></span><span class="c-ko" style="width:${(100 * c.ko) / total}%"></span></div>` : ''}
     <p class="kb-meta"><b>${esc(sel.overview ? sel.title : sel.x.title)}</b>${sel.meta ? ` · ${esc(sel.meta)}` : ''}</p>
@@ -1991,7 +1983,7 @@ function kbNotes(sel) {
           level: b.kind === 'todo' ? 'err' : 'warn',
           title: ucfirst(b.label),
           detail: '',
-          where: [`${nb(b.objects, 'objet', 'objets')}, ${frHours(b.hours)}`]
+          where: [nb(b.objects, 'objet', 'objets')]
         }))
       )
       .concat(
@@ -2052,8 +2044,7 @@ function kbAnatomyHTML(sel) {
     ['Vue de données', uniq(all.flatMap(y => y.views))],
     ['Table ClickHouse', uniq(all.flatMap(y => y.tables))],
     ['Paramètres', params],
-    ['Champs cités', uniq(all.flatMap(y => y.fields || [])).sort()],
-    ['Effort', x.effortDetail.map(l => `${l.label} · ${frHours(l.hours)}`)]
+    ['Champs cités', uniq(all.flatMap(y => y.fields || [])).sort()]
   ].filter(([, list]) => list && list.length);
   return `<dl class="anatomy">${rows.map(([k, list]) => `<dt>${k}</dt><dd>${list.map(y => `<span class="chip">${esc(y)}</span>`).join('')}</dd>`).join('')}</dl>`;
 }
